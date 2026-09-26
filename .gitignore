@@ -1,0 +1,7 @@
+/build*/
+/prefix/
+/corpus/
+crash-*
+leak-*
+timeout-*
+__pycache__/

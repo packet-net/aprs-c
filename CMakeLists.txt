@@ -1,0 +1,169 @@
+cmake_minimum_required(VERSION 3.14)
+
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/include/pdn_aprs.h" _pdn_version_line
+     REGEX "^#define PDN_APRS_VERSION \"[0-9]+\\.[0-9]+\\.[0-9]+\"")
+string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" PDN_APRS_VERSION "${_pdn_version_line}")
+
+project(pdn_aprs VERSION ${PDN_APRS_VERSION} DESCRIPTION "APRS encoder and decoder in C99" LANGUAGES C)
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  set(PDN_APRS_TOP_LEVEL ON)
+else()
+  set(PDN_APRS_TOP_LEVEL OFF)
+endif()
+
+option(PDN_APRS_DEVICEID "Include the device identification table (CC BY-SA 2.0 data)" ON)
+option(PDN_APRS_AMALGAMATION "Build from the single-file dist/pdn_aprs.c instead of src/" OFF)
+option(PDN_APRS_BUILD_TESTS "Build the tests" ${PDN_APRS_TOP_LEVEL})
+option(PDN_APRS_BUILD_TOOLS "Build the tools (diffdump)" ${PDN_APRS_TOP_LEVEL})
+option(PDN_APRS_BUILD_EXAMPLES "Build the examples" ${PDN_APRS_TOP_LEVEL})
+option(PDN_APRS_BUILD_FUZZ "Build the libFuzzer target (clang only)" OFF)
+option(PDN_APRS_WERROR "Treat warnings as errors" OFF)
+option(PDN_APRS_CXX_CHECK "Compile pdn_aprs.h as C++ as part of the tests" OFF)
+
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+
+if(MSVC)
+  set(PDN_APRS_WARNINGS /W4)
+  if(PDN_APRS_WERROR)
+    list(APPEND PDN_APRS_WARNINGS /WX)
+  endif()
+else()
+  set(PDN_APRS_WARNINGS -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow)
+  if(PDN_APRS_WERROR)
+    list(APPEND PDN_APRS_WARNINGS -Werror)
+  endif()
+endif()
+
+# ---- the library
+
+if(PDN_APRS_AMALGAMATION)
+  set(PDN_APRS_SOURCES dist/pdn_aprs.c)
+  set(PDN_APRS_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/dist)
+else()
+  set(PDN_APRS_SOURCES
+      src/util.c src/decode.c src/header.c src/position.c src/comment.c src/weather.c src/mice.c
+      src/message.c src/other.c src/device.c src/equal.c src/encode.c src/build.c src/symbols.c)
+  set(PDN_APRS_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+endif()
+if(PDN_APRS_DEVICEID)
+  if(PDN_APRS_AMALGAMATION)
+    list(APPEND PDN_APRS_SOURCES dist/pdn_aprs_deviceid.c)
+  else()
+    list(APPEND PDN_APRS_SOURCES src/pdn_aprs_deviceid.c)
+  endif()
+endif()
+
+add_library(pdn_aprs ${PDN_APRS_SOURCES})
+add_library(pdn_aprs::pdn_aprs ALIAS pdn_aprs)
+target_include_directories(pdn_aprs PUBLIC $<BUILD_INTERFACE:${PDN_APRS_INCLUDE}> $<INSTALL_INTERFACE:include>)
+if(NOT PDN_APRS_AMALGAMATION)
+  target_include_directories(pdn_aprs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+endif()
+target_compile_options(pdn_aprs PRIVATE ${PDN_APRS_WARNINGS})
+if(NOT MSVC)
+  target_link_libraries(pdn_aprs PUBLIC m)
+endif()
+set_target_properties(pdn_aprs PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR}
+                                          PUBLIC_HEADER ${PDN_APRS_INCLUDE}/pdn_aprs.h)
+
+# ---- install, CMake package, pkg-config
+
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+install(TARGETS pdn_aprs EXPORT pdn_aprsTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(EXPORT pdn_aprsTargets NAMESPACE pdn_aprs:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/pdn_aprs)
+configure_package_config_file(cmake/pdn_aprsConfig.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/pdn_aprsConfig.cmake
+                              INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/pdn_aprs)
+write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/pdn_aprsConfigVersion.cmake
+                                 VERSION ${PROJECT_VERSION} COMPATIBILITY SameMajorVersion)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pdn_aprsConfig.cmake ${CMAKE_CURRENT_BINARY_DIR}/pdn_aprsConfigVersion.cmake
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/pdn_aprs)
+if(MSVC)
+  set(PDN_APRS_PC_LIBS "")
+else()
+  set(PDN_APRS_PC_LIBS "-lm")
+endif()
+configure_file(cmake/pdn_aprs.pc.in ${CMAKE_CURRENT_BINARY_DIR}/pdn_aprs.pc @ONLY)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pdn_aprs.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+
+# ---- tests, tools, examples
+
+set(PDN_APRS_TEST_SUPPORT tests/json.c tests/neutral.c)
+
+if(PDN_APRS_BUILD_TESTS OR PDN_APRS_BUILD_TOOLS)
+  add_library(pdn_aprs_test_support STATIC ${PDN_APRS_TEST_SUPPORT})
+  target_include_directories(pdn_aprs_test_support PUBLIC tests)
+  target_link_libraries(pdn_aprs_test_support PUBLIC pdn_aprs)
+  target_compile_options(pdn_aprs_test_support PRIVATE ${PDN_APRS_WARNINGS})
+  if(MSVC)
+    target_compile_definitions(pdn_aprs_test_support PUBLIC _CRT_SECURE_NO_WARNINGS)
+  endif()
+endif()
+
+if(PDN_APRS_BUILD_TESTS)
+  enable_testing()
+  if(NOT PDN_APRS_DEVICEID)
+    message(FATAL_ERROR "The tests need the device table: PDN_APRS_DEVICEID=ON")
+  endif()
+  add_executable(pdn_aprs_vectors tests/vectors.c)
+  target_link_libraries(pdn_aprs_vectors PRIVATE pdn_aprs_test_support)
+  target_compile_options(pdn_aprs_vectors PRIVATE ${PDN_APRS_WARNINGS})
+  add_test(NAME vectors COMMAND pdn_aprs_vectors ${CMAKE_CURRENT_SOURCE_DIR}/vectors
+                                ${CMAKE_CURRENT_SOURCE_DIR}/tests/known-differences.txt)
+
+  add_executable(pdn_aprs_api_test tests/api.c)
+  target_link_libraries(pdn_aprs_api_test PRIVATE pdn_aprs_test_support)
+  target_compile_options(pdn_aprs_api_test PRIVATE ${PDN_APRS_WARNINGS})
+  add_test(NAME api COMMAND pdn_aprs_api_test)
+
+  if(PDN_APRS_CXX_CHECK)
+    enable_language(CXX)
+    add_executable(pdn_aprs_cxx_header tests/cxx_header.cpp)
+    target_link_libraries(pdn_aprs_cxx_header PRIVATE pdn_aprs)
+    set_target_properties(pdn_aprs_cxx_header PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON)
+    if(MSVC)
+      target_compile_options(pdn_aprs_cxx_header PRIVATE /W4 /WX)
+    else()
+      target_compile_options(pdn_aprs_cxx_header PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(NAME cxx_header COMMAND pdn_aprs_cxx_header)
+  endif()
+endif()
+
+if(PDN_APRS_BUILD_TOOLS)
+  add_executable(pdn_aprs_diffdump tools/diffdump.c)
+  target_link_libraries(pdn_aprs_diffdump PRIVATE pdn_aprs_test_support)
+  target_compile_options(pdn_aprs_diffdump PRIVATE ${PDN_APRS_WARNINGS})
+endif()
+
+if(PDN_APRS_BUILD_EXAMPLES)
+  foreach(example decode build ax25)
+    add_executable(pdn_aprs_example_${example} examples/${example}.c)
+    target_link_libraries(pdn_aprs_example_${example} PRIVATE pdn_aprs)
+    target_compile_options(pdn_aprs_example_${example} PRIVATE ${PDN_APRS_WARNINGS})
+    if(MSVC)
+      target_compile_definitions(pdn_aprs_example_${example} PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    if(PDN_APRS_BUILD_TESTS)
+      add_test(NAME example_${example} COMMAND pdn_aprs_example_${example})
+    endif()
+  endforeach()
+endif()
+
+if(PDN_APRS_BUILD_FUZZ)
+  if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "The fuzz target needs clang (libFuzzer)")
+  endif()
+  add_executable(pdn_aprs_fuzz fuzz/fuzz_decode.c ${PDN_APRS_SOURCES})
+  target_include_directories(pdn_aprs_fuzz PRIVATE ${PDN_APRS_INCLUDE} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_compile_options(pdn_aprs_fuzz PRIVATE -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all)
+  target_link_options(pdn_aprs_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+  target_link_libraries(pdn_aprs_fuzz PRIVATE m)
+endif()

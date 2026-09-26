@@ -1,0 +1,182 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.cc }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cc: gcc
+            cxx: g++
+          - cc: clang
+            cxx: clang++
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Install a decimal-comma locale for the locale test
+        run: |
+          sudo locale-gen de_DE.UTF-8
+      - name: Configure
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} -DPDN_APRS_WERROR=ON -DPDN_APRS_CXX_CHECK=ON
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Vectors pass count
+        run: build/pdn_aprs_vectors vectors tests/known-differences.txt | tail -1
+      - name: Install, then build against the installed package
+        run: |
+          cmake --install build --prefix "$PWD/prefix"
+          mkdir consumer
+          printf '#include "pdn_aprs.h"\n#include <stdio.h>\nint main(void) { printf("%%s\\n", pdn_aprs_version()); return 0; }\n' > consumer/main.c
+          printf 'cmake_minimum_required(VERSION 3.14)\nproject(consumer C)\nfind_package(pdn_aprs REQUIRED)\nadd_executable(consumer main.c)\ntarget_link_libraries(consumer pdn_aprs::pdn_aprs)\n' > consumer/CMakeLists.txt
+          cmake -S consumer -B consumer/build -DCMAKE_PREFIX_PATH="$PWD/prefix"
+          cmake --build consumer/build
+          consumer/build/consumer
+          PKG_CONFIG_PATH="$PWD/prefix/lib/pkgconfig" ${{ matrix.cc }} consumer/main.c $(PKG_CONFIG_PATH="$PWD/prefix/lib/pkgconfig" pkg-config --cflags --libs --static pdn_aprs) -o consumer/pc
+          consumer/pc
+
+  sanitizers:
+    name: ASan and UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Configure
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DPDN_APRS_WERROR=ON \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  windows:
+    name: Windows MSVC
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Configure
+        run: cmake -S . -B build -DPDN_APRS_WERROR=ON -DPDN_APRS_CXX_CHECK=ON
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  macos:
+    name: macOS clang
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPDN_APRS_WERROR=ON -DPDN_APRS_CXX_CHECK=ON
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  linux32:
+    name: Linux 32-bit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Install multilib
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-m32 -DPDN_APRS_WERROR=ON
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  cxx-header:
+    name: Header as C++
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compile pdn_aprs.h as C++
+        run: |
+          for std in c++98 c++11 c++17 c++20; do
+            echo "g++ -std=$std"
+            g++ -std=$std -x c++ -fsyntax-only -Wall -Wextra -Wpedantic -Werror -Iinclude include/pdn_aprs.h
+            echo "clang++ -std=$std"
+            clang++ -std=$std -x c++ -fsyntax-only -Wall -Wextra -Wpedantic -Werror -Iinclude include/pdn_aprs.h
+          done
+          g++ -std=c++11 -Wall -Wextra -Werror -Iinclude -c tests/cxx_header.cpp -o /dev/null
+
+  amalgamation:
+    name: Amalgamation and text checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: dist/ is current
+        run: python3 tools/amalgamate.py --check
+      - name: README examples match examples/
+        run: python3 tools/check_readme.py
+      - name: No em or en dashes, plain ASCII sources
+        run: python3 tools/check_text.py
+      - name: Build and test from the single file
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPDN_APRS_AMALGAMATION=ON -DPDN_APRS_WERROR=ON
+          cmake --build build -j
+          ctest --test-dir build --output-on-failure
+      - name: Build the single file without the device table
+        run: |
+          cc -std=c99 -Wall -Wextra -Wpedantic -Wconversion -Werror -c dist/pdn_aprs.c -Idist -o pdn_aprs.o
+          printf '#include "pdn_aprs.h"\n#include <string.h>\nint main(void) { static pdn_aprs_packet p; const char *l = "N0CALL>APZ001:!4903.50N/07201.75W-"; return pdn_aprs_decode_tnc2(l, strlen(l), NULL, &p); }\n' > nodev.c
+          cc -std=c99 -Idist nodev.c pdn_aprs.o -lm -o nodev
+          ./nodev
+
+  fuzz:
+    name: Fuzz (60 seconds)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Install libFuzzer
+        run: |
+          sudo apt-get update
+          ver=$(clang -dumpversion | cut -d. -f1)
+          sudo apt-get install -y "libclang-rt-$ver-dev" || true
+      - name: Build
+        run: |
+          cmake -S . -B build-fuzz -DCMAKE_C_COMPILER=clang -DPDN_APRS_BUILD_FUZZ=ON -DPDN_APRS_BUILD_TESTS=OFF \
+            -DPDN_APRS_BUILD_TOOLS=OFF -DPDN_APRS_BUILD_EXAMPLES=OFF
+          cmake --build build-fuzz --target pdn_aprs_fuzz -j
+      - name: Fuzz
+        run: |
+          python3 tools/fuzz_seeds.py vectors corpus
+          build-fuzz/pdn_aprs_fuzz -max_total_time=60 -print_final_stats=1 corpus
+      - name: Keep any crash
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crash
+          path: crash-*

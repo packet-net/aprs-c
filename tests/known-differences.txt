@@ -1,0 +1,2 @@
+# Checks the vectors runner skips on purpose, one per line as "<case id> [<check>]",
+# optionally followed by a tab and the reason. The target is none.

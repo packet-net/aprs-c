@@ -1,0 +1,4 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/pdn_aprsTargets.cmake")
+check_required_components(pdn_aprs)

@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: The tag matches the version
+        run: |
+          version=$(sed -n 's/^#define PDN_APRS_VERSION "\(.*\)"$/\1/p' include/pdn_aprs.h)
+          echo "header version $version, tag ${GITHUB_REF_NAME}"
+          test "v$version" = "${GITHUB_REF_NAME}"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: dist/ is current
+        run: python3 tools/amalgamate.py --check
+      - name: Test
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPDN_APRS_AMALGAMATION=ON -DPDN_APRS_WERROR=ON
+          cmake --build build -j
+          ctest --test-dir build --output-on-failure
+      - name: Package
+        run: |
+          name="pdn_aprs-$VERSION"
+          mkdir "$name"
+          cp dist/pdn_aprs.h dist/pdn_aprs.c dist/pdn_aprs_deviceid.c LICENSE THIRD-PARTY-NOTICES.md README.md CHANGELOG.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+          zip -r "$name.zip" "$name"
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=$(awk -v v="$VERSION" '$0 ~ "^## " v {on=1; next} /^## / {on=0} on' CHANGELOG.md)
+          gh release create "${GITHUB_REF_NAME}" "pdn_aprs-$VERSION.tar.gz" "pdn_aprs-$VERSION.zip" \
+            --title "pdn_aprs $VERSION" --notes "$notes"
