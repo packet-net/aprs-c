@@ -16,6 +16,9 @@
 #include "pdn_aprs.h"
 
 static int verbose = 0;
+/* passes per kind of check: lenient, strict, tolerance, reencode, encode */
+static const char *const kinds[] = {"lenient", "strict", "tolerance", "reencode", "encode"};
+static int kind_passed[5];
 static const char *filter = NULL;
 static int passed = 0, failed = 0, skipped = 0;
 static char **known = NULL;
@@ -74,7 +77,11 @@ static void report(const char *id, const char *check, int ok, const char *why, c
         return;
     }
     if (ok) {
+        int k;
         passed++;
+        for (k = 0; k < 5; k++)
+            if (strncmp(check, kinds[k], strlen(kinds[k])) == 0)
+                kind_passed[k]++;
         if (verbose)
             printf("ok   %s\n", name);
         return;
@@ -506,6 +513,8 @@ int main(int argc, char **argv)
         }
         json_free(doc);
     }
+    printf("passed by check: lenient %d, strict %d, single tolerance %d, re-encode %d, encode %d\n",
+           kind_passed[0], kind_passed[1], kind_passed[2], kind_passed[3], kind_passed[4]);
     printf("%d passed, %d failed, %d skipped (known differences)\n", passed, failed, skipped);
     return failed ? 1 : 0;
 }
