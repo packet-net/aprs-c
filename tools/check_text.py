@@ -17,8 +17,8 @@ def main():
     problems = 0
     for name in files:
         path = ROOT / name
-        if not name or not path.is_file():
-            continue
+        if not name or not path.is_file() or name.startswith("fuzz/regressions/"):
+            continue  # fuzz regressions are arbitrary bytes, not text
         data = path.read_bytes()
         try:
             text = data.decode("utf-8")
