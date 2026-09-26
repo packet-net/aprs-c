@@ -4083,7 +4083,8 @@ static int report_eq(const pdn_aprs_report *a, const pdn_aprs_report *b, int typ
     case PDN_APRS_TYPE_MIC_E:
         return a->mic_e_message == b->mic_e_message && !a->old_data == !b->old_data && a->type_code == b->type_code &&
                str_eq(a->device_suffix, b->device_suffix) && str_eq(a->locator, b->locator) &&
-               a->destination_ssid == b->destination_ssid && !a->has_legacy_telemetry == !b->has_legacy_telemetry;
+               a->destination_ssid == b->destination_ssid && !a->has_legacy_telemetry == !b->has_legacy_telemetry &&
+               (!a->has_legacy_telemetry || memcmp(a->legacy_telemetry, b->legacy_telemetry, 5) == 0);
     default:
         return 1;
     }
@@ -5276,6 +5277,11 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     info[7] = (uint8_t)r->symbol.code;
     info[8] = (uint8_t)r->symbol.table;
     pdn_aprs__put(e->b, info, 9);
+    if (r->has_legacy_telemetry) {
+        /* obsolete Mic-E telemetry: 0x1d and five binary channels */
+        pdn_aprs__putc(e->b, 0x1d);
+        pdn_aprs__put(e->b, r->legacy_telemetry, 5);
+    }
     /* status text: [type][altitude][locator][extension][/A=][frequency][comment][telemetry][DAO][suffix] */
     if (r->type_code) {
         if (!strchr("`'>] ", r->type_code))

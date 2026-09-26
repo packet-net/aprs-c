@@ -38,8 +38,10 @@ jobs:
         run: cmake --build build -j
       - name: Test
         run: ctest --test-dir build --output-on-failure
-      - name: Vectors pass count
-        run: build/pdn_aprs_vectors vectors tests/known-differences.txt | tail -1
+      - name: Vectors pass count, and the API test under a German locale
+        run: |
+          build/pdn_aprs_vectors vectors tests/known-differences.txt | tail -1
+          build/pdn_aprs_api_test
       - name: Install, then build against the installed package
         run: |
           cmake --install build --prefix "$PWD/prefix"
@@ -68,6 +70,10 @@ jobs:
         run: cmake --build build -j
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: Threads under ThreadSanitizer
+        run: |
+          clang -std=c99 -g -O1 -fsanitize=thread -Iinclude -Isrc tests/threads.c src/*.c -lm -lpthread -o threads-tsan
+          ./threads-tsan
 
   windows:
     name: Windows MSVC

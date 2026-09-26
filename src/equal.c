@@ -140,7 +140,8 @@ static int report_eq(const pdn_aprs_report *a, const pdn_aprs_report *b, int typ
     case PDN_APRS_TYPE_MIC_E:
         return a->mic_e_message == b->mic_e_message && !a->old_data == !b->old_data && a->type_code == b->type_code &&
                str_eq(a->device_suffix, b->device_suffix) && str_eq(a->locator, b->locator) &&
-               a->destination_ssid == b->destination_ssid && !a->has_legacy_telemetry == !b->has_legacy_telemetry;
+               a->destination_ssid == b->destination_ssid && !a->has_legacy_telemetry == !b->has_legacy_telemetry &&
+               (!a->has_legacy_telemetry || memcmp(a->legacy_telemetry, b->legacy_telemetry, 5) == 0);
     default:
         return 1;
     }

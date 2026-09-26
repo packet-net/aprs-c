@@ -1055,6 +1055,11 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     info[7] = (uint8_t)r->symbol.code;
     info[8] = (uint8_t)r->symbol.table;
     pdn_aprs__put(e->b, info, 9);
+    if (r->has_legacy_telemetry) {
+        /* obsolete Mic-E telemetry: 0x1d and five binary channels */
+        pdn_aprs__putc(e->b, 0x1d);
+        pdn_aprs__put(e->b, r->legacy_telemetry, 5);
+    }
     /* status text: [type][altitude][locator][extension][/A=][frequency][comment][telemetry][DAO][suffix] */
     if (r->type_code) {
         if (!strchr("`'>] ", r->type_code))

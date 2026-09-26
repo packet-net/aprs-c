@@ -232,6 +232,21 @@ static void test_builders(void)
     CHECK(pdn_aprs_build_status(&me, "x", NULL, line, sizeof line) == PDN_APRS_ERR_ARGUMENT);
 }
 
+static void test_legacy_mic_e(void)
+{
+    /* the obsolete Mic-E telemetry: 0x1d and five binary channels after the symbol */
+    static const char line[] = "N0CALL>S32UVT:`(_fn\"Oj/\x1d\x01\x02\x03\x04\x05`Hi";
+    uint8_t buf[100];
+    pdn_aprs_encoded enc;
+    int n;
+    CHECK(pdn_aprs_decode_tnc2(line, sizeof line - 1, NULL, &pkt) == PDN_APRS_OK);
+    CHECK(pkt.data.type == PDN_APRS_TYPE_MIC_E && pkt.data.as.report.has_legacy_telemetry &&
+          pkt.data.as.report.legacy_telemetry[4] == 5 && pkt.data.as.report.type_code == '`' &&
+          strcmp(pkt.data.as.report.comment, "Hi") == 0);
+    n = pdn_aprs_encode_info(&pkt.data, NULL, buf, sizeof buf, &enc);
+    CHECK(n == (int)(sizeof line - 1 - 14) && memcmp(buf, line + 14, (size_t)n) == 0);
+}
+
 static void test_locale(void)
 {
     static const char *const locales[] = {"de_DE.UTF-8", "de_DE.utf8", "de_DE", "German_Germany.1252", "fr_FR.UTF-8"};
@@ -262,6 +277,7 @@ int main(void)
     test_devices();
     test_encoding();
     test_builders();
+    test_legacy_mic_e();
     test_locale();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
