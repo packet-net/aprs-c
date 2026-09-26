@@ -244,7 +244,7 @@ The tests run every check the vectors' README defines against every case in [pac
 
 `tools/diffdump.c` writes the comparison dump: `zcat lines.hex.gz | pdn_aprs_diffdump | gzip > c.jsonl.gz`.
 
-The decoder is also fuzzed with libFuzzer, AddressSanitizer and UndefinedBehaviorSanitizer (`fuzz/fuzz_decode.c`): every input is decoded as a TNC2 line, an AX.25 frame and an information field, leniently and strictly, and whatever decodes is re-encoded and decoded again to check it reads back the same.
+The decoder is also fuzzed with libFuzzer, AddressSanitizer and UndefinedBehaviorSanitizer (`fuzz/fuzz_decode.c`): every input is decoded as a TNC2 line, an AX.25 frame and an information field, leniently and strictly, and whatever decodes is re-encoded and decoded again to check it reads back the same. Inputs that once failed are kept in `fuzz/regressions/`, and the tests replay them on every platform.
 
 ## Building from source
 
