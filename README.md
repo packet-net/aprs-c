@@ -239,7 +239,7 @@ The library was written to be added to the source tree of a program like LinBPQ/
 
 The tests run every check the vectors' README defines against every case in [packet-net/aprs-vectors](https://github.com/packet-net/aprs-vectors), which is a submodule at `vectors/`: the lenient decode, the strict decode, the decode with each single tolerance switched off, the re-encode (identical, equivalent or refused) and the encode cases.
 
-- **Vectors:** 5,523 of 5,523 checks pass over 1,698 cases, with nothing skipped ([`tests/known-differences.txt`](tests/known-differences.txt) is empty).
+- **Vectors:** 5,524 of 5,524 checks pass over 1,699 cases, with nothing skipped ([`tests/known-differences.txt`](tests/known-differences.txt) is empty).
 - **A real capture:** on 6,879,893 packets from APRS-IS, the decodings (lenient and strict) and re-encodings agree with the Rust library's on every packet, by the vectors' `tools/compare.py`. The only differences are encoder choices the comparison does not count: for 114 objects this library writes the original bytes back where Rust writes different but equivalent ones.
 
 `tools/diffdump.c` writes the comparison dump: `zcat lines.hex.gz | pdn_aprs_diffdump | gzip > c.jsonl.gz`.

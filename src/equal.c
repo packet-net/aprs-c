@@ -51,8 +51,11 @@ static int weather_eq(const pdn_aprs_weather *a, const pdn_aprs_weather *b, int 
 
 static int report_eq(const pdn_aprs_report *a, const pdn_aprs_report *b, int type, int loose)
 {
+    /* loose: an ambiguous position may move anywhere in its box */
+    static const double box[5] = {1e-4, 0.05 / 60 + 1e-9, 0.5 / 60 + 1e-9, 5.0 / 60 + 1e-9, 0.5 + 1e-9};
+    double tol = box[b->ambiguity <= 4 ? b->ambiguity : 0];
     int i;
-    if (!near(a->latitude, b->latitude, 1e-4, 0, loose) || !near(a->longitude, b->longitude, 1e-4, 0, loose) ||
+    if (!near(a->latitude, b->latitude, tol, 0, loose) || !near(a->longitude, b->longitude, tol, 0, loose) ||
         a->ambiguity != b->ambiguity ||
         a->symbol.table != b->symbol.table || a->symbol.code != b->symbol.code || !a->compressed != !b->compressed)
         return 0;

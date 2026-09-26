@@ -42,6 +42,8 @@ static void test_basics(void)
     CHECK(!pdn_aprs_code_tolerable(PDN_APRS_CODE_INVALID_HEADER));
     CHECK(pdn_aprs_code_name(0) == NULL && pdn_aprs_code_name(PDN_APRS_CODE_COUNT) == NULL);
     CHECK(strcmp(pdn_aprs_type_name(PDN_APRS_TYPE_MIC_E), "mic-e") == 0);
+    CHECK(strcmp(pdn_aprs_weather_field_name(PDN_APRS_WX_TEMPERATURE), "temperature_f") == 0);
+    CHECK(pdn_aprs_weather_field_name(PDN_APRS_WX_COUNT) == NULL);
     CHECK(strcmp(pdn_aprs_symbol_description(s), "Car") == 0);
     CHECK(strcmp(pdn_aprs_symbol_name(s), "CAR") == 0);
     CHECK(pdn_aprs_symbol_description(pdn_aprs_symbol_make('/', ' ')) == NULL);

@@ -5,6 +5,17 @@
  */
 #include "internal.h"
 
+const char *pdn_aprs_weather_field_name(int index)
+{
+    static const char *const names[PDN_APRS_WX_COUNT] = {
+        "wind_direction_degrees", "wind_speed_mph",  "wind_gust_mph",    "temperature_f",
+        "rain_1h_in",             "rain_24h_in",     "rain_midnight_in", "humidity_percent",
+        "pressure_mbar",          "luminosity_w_m2", "snow_24h_in",      "rain_raw"};
+    if (index < 0 || index >= PDN_APRS_WX_COUNT)
+        return NULL;
+    return names[index];
+}
+
 static int field_index(uint8_t letter, int snow)
 {
     switch (letter) {

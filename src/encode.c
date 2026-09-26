@@ -155,8 +155,10 @@ static int put_uncompressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, char da
         return pdn_aprs__refuse(e, "ambiguity out of range");
     if (r->has_dao && r->ambiguity)
         return pdn_aprs__refuse(e, "a !DAO! cannot add precision to an ambiguous position");
-    split_coord(r->latitude, dao_prec > 0, &ldeg, &lh, &lx);
-    split_coord(r->longitude, dao_prec > 0, &gdeg, &gh, &gx);
+    /* with ambiguity the digits kept are those of the box the position is
+       in (truncated); with a !DAO! the rest goes in its digits */
+    split_coord(r->latitude, dao_prec > 0 || r->ambiguity, &ldeg, &lh, &lx);
+    split_coord(r->longitude, dao_prec > 0 || r->ambiguity, &gdeg, &gh, &gx);
     dao_digits(dao_prec, lx, gx, &a, &o, &lc, &gc);
     lh += lc;
     gh += gc;
@@ -965,8 +967,8 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
         return pdn_aprs__refuse(e, "a Mic-E message type mixing standard and custom bits has no meaning");
     if (r->destination_ssid > 15)
         return pdn_aprs__refuse(e, "destination SSID out of range");
-    split_coord(r->latitude, dao_prec > 0, &ldeg, &lh, &lx);
-    split_coord(r->longitude, dao_prec > 0, &gdeg, &gh, &gx);
+    split_coord(r->latitude, dao_prec > 0 || amb, &ldeg, &lh, &lx);
+    split_coord(r->longitude, dao_prec > 0 || amb, &gdeg, &gh, &gx);
     dao_digits(dao_prec, lx, gx, &a, &o, &lc, &gc);
     lh += lc;
     gh += gc;

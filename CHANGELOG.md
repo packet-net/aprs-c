@@ -11,4 +11,4 @@ The first release.
 - Named symbols, with an overlay helper and descriptions.
 - Device identification from the aprs-deviceid database, in an optional file (`pdn_aprs_deviceid.c`, CC BY-SA 2.0 data).
 - Shipped as `pdn_aprs.h` and `pdn_aprs.c`, C99, no allocation, no global state, nothing locale-dependent.
-- Passes all 5,523 checks of packet-net/aprs-vectors at 6121fb9, and agrees with the Rust implementation on every packet of a 6,879,893-packet APRS-IS capture.
+- Passes all 5,524 checks of packet-net/aprs-vectors at 16f12df, and agrees with the Rust implementation on every packet of a 6,879,893-packet APRS-IS capture.

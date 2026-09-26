@@ -2290,6 +2290,17 @@ PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf
 /* ==== src/weather.c ==== */
 
 
+const char *pdn_aprs_weather_field_name(int index)
+{
+    static const char *const names[PDN_APRS_WX_COUNT] = {
+        "wind_direction_degrees", "wind_speed_mph",  "wind_gust_mph",    "temperature_f",
+        "rain_1h_in",             "rain_24h_in",     "rain_midnight_in", "humidity_percent",
+        "pressure_mbar",          "luminosity_w_m2", "snow_24h_in",      "rain_raw"};
+    if (index < 0 || index >= PDN_APRS_WX_COUNT)
+        return NULL;
+    return names[index];
+}
+
 static int field_index(uint8_t letter, int snow)
 {
     switch (letter) {
@@ -3994,8 +4005,11 @@ static int weather_eq(const pdn_aprs_weather *a, const pdn_aprs_weather *b, int 
 
 static int report_eq(const pdn_aprs_report *a, const pdn_aprs_report *b, int type, int loose)
 {
+    /* loose: an ambiguous position may move anywhere in its box */
+    static const double box[5] = {1e-4, 0.05 / 60 + 1e-9, 0.5 / 60 + 1e-9, 5.0 / 60 + 1e-9, 0.5 + 1e-9};
+    double tol = box[b->ambiguity <= 4 ? b->ambiguity : 0];
     int i;
-    if (!near(a->latitude, b->latitude, 1e-4, 0, loose) || !near(a->longitude, b->longitude, 1e-4, 0, loose) ||
+    if (!near(a->latitude, b->latitude, tol, 0, loose) || !near(a->longitude, b->longitude, tol, 0, loose) ||
         a->ambiguity != b->ambiguity ||
         a->symbol.table != b->symbol.table || a->symbol.code != b->symbol.code || !a->compressed != !b->compressed)
         return 0;
@@ -4377,8 +4391,10 @@ static int put_uncompressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, char da
         return pdn_aprs__refuse(e, "ambiguity out of range");
     if (r->has_dao && r->ambiguity)
         return pdn_aprs__refuse(e, "a !DAO! cannot add precision to an ambiguous position");
-    split_coord(r->latitude, dao_prec > 0, &ldeg, &lh, &lx);
-    split_coord(r->longitude, dao_prec > 0, &gdeg, &gh, &gx);
+    /* with ambiguity the digits kept are those of the box the position is
+       in (truncated); with a !DAO! the rest goes in its digits */
+    split_coord(r->latitude, dao_prec > 0 || r->ambiguity, &ldeg, &lh, &lx);
+    split_coord(r->longitude, dao_prec > 0 || r->ambiguity, &gdeg, &gh, &gx);
     dao_digits(dao_prec, lx, gx, &a, &o, &lc, &gc);
     lh += lc;
     gh += gc;
@@ -5187,8 +5203,8 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
         return pdn_aprs__refuse(e, "a Mic-E message type mixing standard and custom bits has no meaning");
     if (r->destination_ssid > 15)
         return pdn_aprs__refuse(e, "destination SSID out of range");
-    split_coord(r->latitude, dao_prec > 0, &ldeg, &lh, &lx);
-    split_coord(r->longitude, dao_prec > 0, &gdeg, &gh, &gx);
+    split_coord(r->latitude, dao_prec > 0 || amb, &ldeg, &lh, &lx);
+    split_coord(r->longitude, dao_prec > 0 || amb, &gdeg, &gh, &gx);
     dao_digits(dao_prec, lx, gx, &a, &o, &lc, &gc);
     lh += lc;
     gh += gc;
