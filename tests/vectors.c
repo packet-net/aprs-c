@@ -100,6 +100,27 @@ static void report(const char *id, const char *check, int ok, const char *why, c
     }
 }
 
+/* Bytes as printable ASCII, other bytes as \xHH, for messages. */
+static const char *ascii(const void *p, int n)
+{
+    static char out[4][4096];
+    static int slot = 0;
+    const unsigned char *b = (const unsigned char *)p;
+    char *o = out[slot = (slot + 1) % 4];
+    size_t k = 0;
+    int i;
+    for (i = 0; i < n && k + 5 < sizeof out[0]; i++) {
+        if (b[i] >= 0x20 && b[i] < 0x7f) {
+            o[k++] = (char)b[i];
+        } else {
+            snprintf(o + k, 5, "\\x%02X", b[i]);
+            k += 4;
+        }
+    }
+    o[k] = 0;
+    return o;
+}
+
 /* ---- inputs ---- */
 
 static size_t unhex(const char *h, uint8_t *out, size_t cap)
@@ -365,7 +386,7 @@ static void check_decode_case(const jval *c, const char *id)
             if (pkt.data.type == PDN_APRS_TYPE_MIC_E && strcmp(enc.destination, pkt.header.destination) != 0)
                 identical = 0;
             if (strcmp(reenc, "identical") == 0) {
-                snprintf(why, sizeof why, "wrote %.*s (dest %s)", n, (const char *)buf, enc.destination);
+                snprintf(why, sizeof why, "wrote %s (dest %s)", ascii(buf, n), enc.destination);
                 report(id, check, identical, why, NULL, NULL);
             } else {
                 /* equivalent: decodes, leniently, to the same data with no warnings or errors */
@@ -383,7 +404,7 @@ static void check_decode_case(const jval *c, const char *id)
                 for (i = 0; i < pkt2.diagnostic_count; i++)
                     if (pkt2.diagnostics[i].severity != PDN_APRS_SEVERITY_INFO)
                         clean = 0;
-                snprintf(why, sizeof why, "wrote %.*s: %s", n, (const char *)buf,
+                snprintf(why, sizeof why, "wrote %s: %s", ascii(buf, n),
                          !eq ? "decodes to different data" : "decodes with warnings");
                 report(id, check, eq && clean, why, eq && clean ? NULL : again, NULL);
                 json_free(again);
@@ -442,7 +463,7 @@ static void check_encode_case(const jval *c, const char *id)
     }
     n = conv < 0 ? PDN_APRS_ERR_REFUSED : pdn_aprs_encode_info(&d, NULL, buf, sizeof buf, &enc);
     if (json_get(expect, "refused")) {
-        snprintf(why, sizeof why, "wrote %.*s", n > 0 ? n : 0, (const char *)buf);
+        snprintf(why, sizeof why, "wrote %s", ascii(buf, n > 0 ? n : 0));
         report(id, "encode", n == PDN_APRS_ERR_REFUSED, why, NULL, NULL);
         return;
     }
@@ -455,8 +476,8 @@ static void check_encode_case(const jval *c, const char *id)
         if (n < 0)
             snprintf(why, sizeof why, "encoder returned %d (%s)", n, enc.reason ? enc.reason : "");
         else
-            snprintf(why, sizeof why, "wrote %.*s dest %s, want %s dest %s", n, (const char *)buf, enc.destination,
-                     want ? want->str : "?", wdest ? wdest : "-");
+            snprintf(why, sizeof why, "wrote %s dest %s, want %s dest %s", ascii(buf, n), enc.destination,
+                     want ? ascii(want->str, (int)want->len) : "?", wdest ? wdest : "-");
         report(id, "encode", ok, why, NULL, NULL);
     }
 }
