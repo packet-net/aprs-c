@@ -54,6 +54,9 @@ const char *pdn_aprs_version(void);
 #ifndef PDN_APRS_MAX_INFO
 #define PDN_APRS_MAX_INFO 512
 #endif
+#if PDN_APRS_MAX_INFO < 256 || PDN_APRS_MAX_INFO > 16384
+#error "PDN_APRS_MAX_INFO must be between 256 and 16384"
+#endif
 
 /* Room for any text taken from an information field, as UTF-8 plus a NUL
    (Latin-1 text can double in size when converted). */
