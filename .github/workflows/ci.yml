@@ -88,6 +88,8 @@ jobs:
         run: cmake --build build --config Release
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Vectors pass count
+        run: build/Release/pdn_aprs_vectors.exe vectors tests/known-differences.txt | Select-Object -Last 2
 
   macos:
     name: macOS clang
@@ -102,6 +104,8 @@ jobs:
         run: cmake --build build -j
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: Vectors pass count
+        run: build/pdn_aprs_vectors vectors tests/known-differences.txt | tail -2
 
   linux32:
     name: Linux 32-bit
