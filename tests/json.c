@@ -171,12 +171,20 @@ static void put_utf8(char *buf, size_t *o, unsigned cp)
 static char *parse_string(reader *r, size_t *len)
 {
     char *buf;
-    size_t o = 0, start;
+    size_t o = 0, start, end;
     if (r->i >= r->n || r->s[r->i] != '"')
         return NULL;
     r->i++;
     start = r->i;
-    buf = (char *)malloc(r->n - start + 1);
+    /* the string's end, to size it: escapes never make it longer */
+    for (end = start; end < r->n && r->s[end] != '"'; end++)
+        if (r->s[end] == '\\')
+            end++;
+    buf = (char *)malloc(end - start + 1);
+    if (!buf) {
+        fprintf(stderr, "out of memory\n");
+        exit(2);
+    }
     while (r->i < r->n && r->s[r->i] != '"') {
         char c = r->s[r->i++];
         if (c == '\\') {

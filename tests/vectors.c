@@ -427,6 +427,7 @@ static void check_encode_case(const jval *c, const char *id)
     uint8_t buf[2048];
     pdn_aprs_encoded enc;
     int n, conv;
+    memset(&enc, 0, sizeof enc);
     conv = neutral_to_data(json_get(in, "encode"), &d, err, sizeof err);
     if (conv == 0) {
         report(id, "encode", 0, err, NULL, NULL);
