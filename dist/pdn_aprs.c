@@ -1495,17 +1495,19 @@ static int parse_compressed(pdn_aprs__dctx *c, const uint8_t *s, pdn_aprs_report
     int i;
     uint8_t table = s[0];
     long y, x;
+    /* read in order: the latitude and longitude, and their range, before
+       the symbol code after them */
     for (i = 1; i < 9; i++)
         if (!A_B91(s[i]))
             return pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_COMPRESSED_POSITION);
-    if (!symbol_code_ok(s[9]))
-        return pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_SYMBOL_CODE);
     y = pdn_aprs__b91(s + 1, 4);
     x = pdn_aprs__b91(s + 5, 4);
     r->latitude = 90.0 - (double)y / 380926.0;
     r->longitude = -180.0 + (double)x / 190463.0;
     if (r->latitude < -90.0 || r->longitude > 180.0)
         return pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_COMPRESSED_POSITION);
+    if (!symbol_code_ok(s[9]))
+        return pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_SYMBOL_CODE);
     r->compressed = 1;
     r->symbol.table = (char)(table >= 'a' && table <= 'j' ? table - 'a' + '0' : table);
     r->symbol.code = (char)s[9];
@@ -2295,10 +2297,11 @@ PDN_APRS__PRIVATE int pdn_aprs__lift_frequency(pdn_aprs__cbuf *cb, pdn_aprs_freq
 static int find_braces(const pdn_aprs__cbuf *cb, size_t *at, size_t *len)
 {
     size_t i, k;
+    /* the first { followed by 1-3 characters and a }, wherever it is */
     for (i = 0; i < cb->n; i++) {
         if (cb->b[i] != '{')
             continue;
-        for (k = i + 1; k < cb->n && k <= i + 4 && cb->b[k] != '}' && cb->b[k] != '{'; k++)
+        for (k = i + 1; k < cb->n && k <= i + 4 && cb->b[k] != '}'; k++)
             ;
         if (k < cb->n && cb->b[k] == '}' && k - i - 1 >= 1 && k - i - 1 <= 3) {
             *at = i;
@@ -3260,7 +3263,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_message(pdn_aprs__dctx *c)
     size_t n = c->len, alen, at, tl, k;
     char addressee[PDN_APRS_NAME_SIZE];
     pdn_aprs_data *d = c->data;
-    int brace = 0;
+    int brace = 0, bulletin, nws;
 
     d->type = PDN_APRS_TYPE_MESSAGE;
     if (n >= 11 && s[10] == ':') {
@@ -3294,6 +3297,11 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_message(pdn_aprs__dctx *c)
     addressee[alen] = 0;
     t = s + at;
     tl = n - at;
+    /* A bulletin is BLN then a digit or an upper-case letter. Bulletins and
+       NWS bulletins are to everyone: their text is never a directed query or
+       telemetry metadata, which are addressed to one station. */
+    bulletin = alen >= 4 && memcmp(addressee, "BLN", 3) == 0 && (A_DIGIT(addressee[3]) || A_UPPER(addressee[3]));
+    nws = !bulletin && alen >= 4 && (memcmp(addressee, "NWS-", 4) == 0 || memcmp(addressee, "NWS_", 4) == 0);
 
     /* ack / rej */
     if (tl >= 4 && (memcmp(t, "ack", 3) == 0 || memcmp(t, "rej", 3) == 0)) {
@@ -3337,8 +3345,9 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_message(pdn_aprs__dctx *c)
         }
     }
 
-    /* telemetry metadata */
-    if (tl >= 5 && t[4] == '.' &&
+    /* telemetry metadata: only a message, addressed to "the callsign of the
+       station transmitting the telemetry data" (APRS12c ch. 13) */
+    if (!bulletin && !nws && tl >= 5 && t[4] == '.' &&
         (memcmp(t, "PARM", 4) == 0 || memcmp(t, "UNIT", 4) == 0 || memcmp(t, "EQNS", 4) == 0 ||
          memcmp(t, "BITS", 4) == 0)) {
         pdn_aprs_telemetry_meta *m = &d->as.meta;
@@ -3381,12 +3390,8 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_message(pdn_aprs__dctx *c)
         pdn_aprs_message *msg = &d->as.message;
         char id[PDN_APRS_NAME_SIZE], ack[PDN_APRS_NAME_SIZE];
         uint8_t has_ack;
-        /* A bulletin is BLN then a digit or an upper-case letter. Bulletins
-           and NWS bulletins are not acknowledged, so they take a message ID
-           but not the reply-ack form. */
-        int bulletin =
-            alen >= 4 && memcmp(addressee, "BLN", 3) == 0 && (A_DIGIT(addressee[3]) || A_UPPER(addressee[3]));
-        int nws = !bulletin && alen >= 4 && (memcmp(addressee, "NWS-", 4) == 0 || memcmp(addressee, "NWS_", 4) == 0);
+        /* bulletins and NWS bulletins are not acknowledged, so they take a
+           message ID but not the reply-ack form */
         size_t body_end = split_message_id(t, tl, !bulletin && !nws, id, ack, &has_ack, &brace);
 
         /* A directed query: only a message is one, since queries are

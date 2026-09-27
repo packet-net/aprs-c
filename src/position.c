@@ -160,17 +160,19 @@ static int parse_compressed(pdn_aprs__dctx *c, const uint8_t *s, pdn_aprs_report
     int i;
     uint8_t table = s[0];
     long y, x;
+    /* read in order: the latitude and longitude, and their range, before
+       the symbol code after them */
     for (i = 1; i < 9; i++)
         if (!A_B91(s[i]))
             return pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_COMPRESSED_POSITION);
-    if (!symbol_code_ok(s[9]))
-        return pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_SYMBOL_CODE);
     y = pdn_aprs__b91(s + 1, 4);
     x = pdn_aprs__b91(s + 5, 4);
     r->latitude = 90.0 - (double)y / 380926.0;
     r->longitude = -180.0 + (double)x / 190463.0;
     if (r->latitude < -90.0 || r->longitude > 180.0)
         return pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_COMPRESSED_POSITION);
+    if (!symbol_code_ok(s[9]))
+        return pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_SYMBOL_CODE);
     r->compressed = 1;
     r->symbol.table = (char)(table >= 'a' && table <= 'j' ? table - 'a' + '0' : table);
     r->symbol.code = (char)s[9];

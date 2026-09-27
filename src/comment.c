@@ -284,10 +284,11 @@ PDN_APRS__PRIVATE int pdn_aprs__lift_frequency(pdn_aprs__cbuf *cb, pdn_aprs_freq
 static int find_braces(const pdn_aprs__cbuf *cb, size_t *at, size_t *len)
 {
     size_t i, k;
+    /* the first { followed by 1-3 characters and a }, wherever it is */
     for (i = 0; i < cb->n; i++) {
         if (cb->b[i] != '{')
             continue;
-        for (k = i + 1; k < cb->n && k <= i + 4 && cb->b[k] != '}' && cb->b[k] != '{'; k++)
+        for (k = i + 1; k < cb->n && k <= i + 4 && cb->b[k] != '}'; k++)
             ;
         if (k < cb->n && cb->b[k] == '}' && k - i - 1 >= 1 && k - i - 1 <= 3) {
             *at = i;
