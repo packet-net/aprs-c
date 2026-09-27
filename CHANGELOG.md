@@ -19,6 +19,10 @@ Encoding:
   - Snowfall under 1 inch is `.` and two digits (0.5 as `.50`); it wrote `0.5` (E8).
   - A compressed wind direction that rounds to 360 degrees is written as north (c = 0); a 358-degree wind was refused (E9).
 
+Tests and tools:
+
+- The vectors move to the exact-bytes branch. The runner compares the bytes written with `canonical_info` byte for byte for `equivalent` and the new `rounded` (whose data read back is not compared); it only checked that they decoded to the same data.
+
 ## 0.2.0
 
 Brings the library into line with the rulings from differential fuzzing of all five implementations (packet-net/aprs-vectors, "Rulings from differential fuzzing: 120 cases and the rules behind them"). The vectors move to dc3854a, which adds rounds 2 to 7 of the fuzzing rulings and settles signpost and corridor braces.
