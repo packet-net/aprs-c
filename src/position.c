@@ -117,8 +117,10 @@ static int parse_uncompressed(pdn_aprs__dctx *c, const uint8_t *s, pdn_aprs_repo
     uint8_t hem;
     amb = parse_coordinate(s, 2, -1, &ldeg, &lmin, &lhund);
     hem = s[7];
+    /* with ambiguity the point reported is the centre of the box, which must
+       not be past the pole (90  .  N would be 90 degrees 30 minutes) */
     if (amb < 0 || ldeg > 90 || lmin > 59 || (ldeg == 90 && (lmin || lhund)) ||
-        !(hem == 'N' || hem == 'S' || hem == 'n' || hem == 's'))
+        coordinate_value(ldeg, lmin, lhund, amb) > 90.0 || !(hem == 'N' || hem == 'S' || hem == 'n' || hem == 's'))
         return pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_LATITUDE);
     if ((hem == 'n' || hem == 's') && !pdn_aprs__tolerate(c, PDN_APRS_CODE_LOWERCASE_HEMISPHERE))
         return 0;
@@ -126,8 +128,10 @@ static int parse_uncompressed(pdn_aprs__dctx *c, const uint8_t *s, pdn_aprs_repo
         return pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_SYMBOL_TABLE);
     lamb = parse_coordinate(s + 9, 3, amb, &gdeg, &gmin, &ghund);
     hem = s[17];
+    /* and the longitude's centre must not be past 180 (180  .  W would be
+       180 degrees 30 minutes) */
     if (lamb < 0 || gdeg > 180 || gmin > 59 || (gdeg == 180 && (gmin || ghund)) ||
-        !(hem == 'E' || hem == 'W' || hem == 'e' || hem == 'w'))
+        coordinate_value(gdeg, gmin, ghund, amb) > 180.0 || !(hem == 'E' || hem == 'W' || hem == 'e' || hem == 'w'))
         return pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_LONGITUDE);
     if ((hem == 'e' || hem == 'w') && !pdn_aprs__tolerate(c, PDN_APRS_CODE_LOWERCASE_HEMISPHERE))
         return 0;
@@ -489,9 +493,17 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_positioned(pdn_aprs__dctx *c, size_t at, 
                 r->has_speed = 1;
                 r->speed_knots = spd;
             }
-            if (r->symbol.table == '/' && r->symbol.code == '\\')
+            if (r->symbol.table == '/' && r->symbol.code == '\\') {
                 e += parse_df(s + 7, n - 7, r);
-            else if (r->symbol.code == '@')
+                /* a bearing is degrees: over 360 is out of range, and the
+                   whole /BRG/NRQ is dropped, as an out-of-range course is */
+                if (r->has_df_bearing && r->df_bearing.bearing_degrees > 360) {
+                    if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_OUT_OF_RANGE_VALUE))
+                        return 0;
+                    r->has_df_bearing = 0;
+                    memset(&r->df_bearing, 0, sizeof r->df_bearing);
+                }
+            } else if (r->symbol.code == '@')
                 e += parse_storm(s + 7, n - 7, r);
         } else if ((e = pdn_aprs__parse_phg_rng_dfs(s, n, r)) > 0) {
             had_extension = 1;

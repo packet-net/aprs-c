@@ -118,6 +118,14 @@ PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs
     }
 }
 
+/* 1 if v has its sign bit set, -0.0 included. */
+static int sign_negative(double v)
+{
+    uint64_t bits;
+    memcpy(&bits, &v, sizeof bits);
+    return (int)(bits >> 63);
+}
+
 PDN_APRS__PRIVATE void pdn_aprs__apply_dao(pdn_aprs__dctx *c, pdn_aprs_report *r, const uint8_t dao[5], int applies)
 {
     double dlat, dlon;
@@ -133,8 +141,10 @@ PDN_APRS__PRIVATE void pdn_aprs__apply_dao(pdn_aprs__dctx *c, pdn_aprs_report *r
     }
     dlat /= 60.0;
     dlon /= 60.0;
-    r->latitude += r->latitude < 0 ? -dlat : dlat;
-    r->longitude += r->longitude < 0 ? -dlon : dlon;
+    /* the added precision is in the position's own hemisphere, which a zero
+       degree and minute (-0.0 south or west) still carries */
+    r->latitude += sign_negative(r->latitude) ? -dlat : dlat;
+    r->longitude += sign_negative(r->longitude) ? -dlon : dlon;
 }
 
 /* ---- altitude ---- */

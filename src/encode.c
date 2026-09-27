@@ -548,7 +548,9 @@ static int put_comment_part(pdn_aprs__ectx *e, const pdn_aprs_report *r, int at_
             if (open == 0 && !ext_counts && starts_extension(c, n, r->symbol.table == '\\' && r->symbol.code == 'l'))
                 slash = 1;
         } else {
-            if (open < 1 && (c[0] == '`' || c[0] == '\'' || c[0] == '>' || c[0] == ']'))
+            /* status text must not start with a type code character or
+               0x1D, the obsolete telemetry (APRS12c ch. 10) */
+            if (open < 1 && (c[0] == '`' || c[0] == '\'' || c[0] == '>' || c[0] == ']' || c[0] == 0x1d))
                 slash = 1;
             if (open < 2 && n >= 4 && A_B91((uint8_t)c[0]) && A_B91((uint8_t)c[1]) && A_B91((uint8_t)c[2]) &&
                 c[3] == '}')
@@ -840,8 +842,8 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
             }
             if (r->has_df_bearing) {
                 const pdn_aprs_df_bearing *df = &r->df_bearing;
-                if (df->bearing_degrees > 999 || df->number > 9 || df->range > 9 || df->quality > 9)
-                    return pdn_aprs__refuse(e, "DF bearing out of range");
+                if (df->bearing_degrees > 360 || df->number > 9 || df->range > 9 || df->quality > 9)
+                    return pdn_aprs__refuse(e, "a DF bearing is 0-360 degrees, and N, R and Q one digit each");
                 pdn_aprs__putc(e->b, '/');
                 pdn_aprs__putu(e->b, df->bearing_degrees, 3);
                 pdn_aprs__putc(e->b, '/');

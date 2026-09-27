@@ -88,6 +88,10 @@ PDN_APRS__PRIVATE int pdn_aprs__mic_e_dest(const char *dest, double *lat, int *m
             break;
         }
         *lat = deg + minutes / 60.0;
+        /* with ambiguity the point reported is the centre of the box, which
+           must not be past the pole (90 and four blanks is 90 degrees 30) */
+        if (*lat > 90.0)
+            return 0;
         if (!north)
             *lat = -*lat;
     }
