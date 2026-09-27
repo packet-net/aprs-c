@@ -239,7 +239,7 @@ The library was written to be added to the source tree of a program like LinBPQ/
 
 The tests run every check the vectors' README defines against every case in [packet-net/aprs-vectors](https://github.com/packet-net/aprs-vectors), which is a submodule at `vectors/`: the lenient decode, the strict decode, the decode with each single tolerance switched off, the re-encode (identical, equivalent or refused) and the encode cases.
 
-- **Vectors:** 5,944 of 5,944 checks pass over 1,850 cases: 1,788 lenient decodes, 1,788 strict decodes, 688 decodes with a single tolerance switched off, 1,618 re-encodes and 62 encode cases. Nothing is skipped ([`tests/known-differences.txt`](tests/known-differences.txt) is empty). `pdn_aprs_vectors vectors -v` lists every check by case id.
+- **Vectors:** 5,969 of 5,969 checks pass over 1,858 cases: 1,796 lenient decodes, 1,796 strict decodes, 689 decodes with a single tolerance switched off, 1,626 re-encodes and 62 encode cases. Nothing is skipped ([`tests/known-differences.txt`](tests/known-differences.txt) is empty). `pdn_aprs_vectors vectors -v` lists every check by case id.
 - **A real capture:** at 0.1.0, on 6,879,893 packets from APRS-IS, the decodings (lenient and strict) and re-encodings agreed with the Rust library's on every packet, by the vectors' `tools/compare.py`. The only differences were encoder choices the comparison does not count: for 114 objects this library wrote the original bytes back where Rust wrote different but equivalent ones.
 - **Differential fuzzing:** the five implementations were also compared over 2,000,000 mutated packets (2026-09-27). Every disagreement was settled by a ruling, and the rulings are in the vectors as cases.
 

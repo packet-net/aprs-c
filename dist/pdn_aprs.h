@@ -846,7 +846,8 @@ typedef struct pdn_aprs_capabilities {
    printable ASCII characters other than > and : (APRS12c ch. 17). A defect
    its header may tolerate (several used markers) is a warning on the inner
    packet, and a strict decode rejects the whole packet as
-   invalid-third-party. */
+   invalid-third-party. A q-construct is read only in the outer header, so
+   the inner packet's q_construct is always -1. */
 typedef struct pdn_aprs_third_party {
     uint16_t len;
     uint8_t packet[PDN_APRS_MAX_INFO];

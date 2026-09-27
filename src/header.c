@@ -117,7 +117,9 @@ PDN_APRS__PRIVATE size_t pdn_aprs__parse_tnc2_header(pdn_aprs__dctx *c, const ui
         return 0;
     for (i = 0; (int)i <= last_marked; i++)
         h->path[i].used = 1;
-    for (i = 0; i < h->path_count; i++) {
+    /* a q-construct is read only in the outer header: a third-party
+       header's path is kept as sent */
+    for (i = 0; !third_party && i < h->path_count; i++) {
         const char *p = h->path[i].call;
         if (p[0] == 'q' && p[1] == 'A' && A_ALPHA(p[2]) && p[3] == 0) {
             h->q_construct = (int8_t)i;

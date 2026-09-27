@@ -1251,7 +1251,9 @@ PDN_APRS__PRIVATE size_t pdn_aprs__parse_tnc2_header(pdn_aprs__dctx *c, const ui
         return 0;
     for (i = 0; (int)i <= last_marked; i++)
         h->path[i].used = 1;
-    for (i = 0; i < h->path_count; i++) {
+    /* a q-construct is read only in the outer header: a third-party
+       header's path is kept as sent */
+    for (i = 0; !third_party && i < h->path_count; i++) {
         const char *p = h->path[i].call;
         if (p[0] == 'q' && p[1] == 'A' && A_ALPHA(p[2]) && p[3] == 0) {
             h->q_construct = (int8_t)i;
@@ -3387,8 +3389,10 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_message(pdn_aprs__dctx *c)
         int nws = !bulletin && alen >= 4 && (memcmp(addressee, "NWS-", 4) == 0 || memcmp(addressee, "NWS_", 4) == 0);
         size_t body_end = split_message_id(t, tl, !bulletin && !nws, id, ack, &has_ack, &brace);
 
-        /* a directed query */
-        if (tl > 0 && t[0] == '?') {
+        /* A directed query: only a message is one, since queries are
+           "addressed to individual stations" (APRS12c ch. 15). Bulletin
+           and NWS bulletin text starting with ? is just text. */
+        if (tl > 0 && t[0] == '?' && !bulletin && !nws) {
             pdn_aprs_directed_query q;
             int kind;
             memset(&q, 0, sizeof q);

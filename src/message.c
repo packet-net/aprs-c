@@ -355,8 +355,10 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_message(pdn_aprs__dctx *c)
         int nws = !bulletin && alen >= 4 && (memcmp(addressee, "NWS-", 4) == 0 || memcmp(addressee, "NWS_", 4) == 0);
         size_t body_end = split_message_id(t, tl, !bulletin && !nws, id, ack, &has_ack, &brace);
 
-        /* a directed query */
-        if (tl > 0 && t[0] == '?') {
+        /* A directed query: only a message is one, since queries are
+           "addressed to individual stations" (APRS12c ch. 15). Bulletin
+           and NWS bulletin text starting with ? is just text. */
+        if (tl > 0 && t[0] == '?' && !bulletin && !nws) {
             pdn_aprs_directed_query q;
             int kind;
             memset(&q, 0, sizeof q);
