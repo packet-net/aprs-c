@@ -661,8 +661,14 @@ static int put_wx_field(pdn_aprs__ectx *e, char letter, const pdn_aprs_weather *
             pdn_aprs__putu(&tmp, (unsigned long)w->value[idx], 3);
         else
             pdn_aprs__putd(&tmp, w->value[idx]); /* "1.5" fits; "12.5" does not */
+        /* written exactly in three characters, the decimal point where it
+           needs one: 0.32 is ".32" */
+        if (tmp.len == 4 && s[0] == '0' && s[1] == '.') {
+            memmove(s, s + 1, 3);
+            tmp.len = 3;
+        }
         if (tmp.len != 3)
-            return pdn_aprs__refuse(e, "snowfall has no three-character form");
+            return pdn_aprs__refuse(e, "snowfall has no exact three-character form");
         pdn_aprs__putc(e->b, 's');
         pdn_aprs__put(e->b, s, 3);
         return 1;

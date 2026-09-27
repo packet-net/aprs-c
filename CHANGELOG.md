@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Brings the library into line with the rulings from differential fuzzing of all five implementations (packet-net/aprs-vectors, "Rulings from differential fuzzing: 120 cases and the rules behind them"). The vectors move to 791ac08, which adds rounds 2 to 4 of the fuzzing rulings.
+Brings the library into line with the rulings from differential fuzzing of all five implementations (packet-net/aprs-vectors, "Rulings from differential fuzzing: 120 cases and the rules behind them"). The vectors move to 5cbef99, which adds rounds 2 to 5 of the fuzzing rulings.
 
 API changes. Struct layouts change, so rebuild everything that includes `pdn_aprs.h`:
 
@@ -28,7 +28,7 @@ Decoding:
 Encoding:
 
 - Writes an NMEA comment after the checksum, and refuses a comment on a sentence without one.
-- Writes a GGA compressed altitude under 1 foot as `!!` in the cs bytes and the altitude in `/A=` (it refused), a directed query's target after one space for a type the spec does not define and an APRSH target padded to 9 characters, a digit `!DAO!` datum, snowfall in a positionless report, status text exactly as it is before `^HP`, and numbers of 1.8e19 and over (it refused them).
+- Writes a GGA compressed altitude under 1 foot as `!!` in the cs bytes and the altitude in `/A=` (it refused), a directed query's target after one space for a type the spec does not define and an APRSH target padded to 9 characters, a digit `!DAO!` datum, snowfall in a positionless report, a snowfall under 1 inch in hundredths (0.32 as `.32`; it refused), status text exactly as it is before `^HP`, and numbers of 1.8e19 and over (it refused them).
 - Writes Mic-E status text that starts with 0x1D after a `/` (APRS12c ch. 10: status text must not start with 0x1D); it wrote it straight after the fixed bytes whenever that happened to read back.
 - Refuses a DF bearing over 360, a capability value that holds a control character or starts or ends with a space, a reply-ack on a bulletin, a signpost that is not printable ASCII, a base-91 binary value over 255, and a third-party packet whose inner header has a tolerated defect.
 
