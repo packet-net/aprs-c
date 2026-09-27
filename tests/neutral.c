@@ -4,6 +4,7 @@
  */
 #include "neutral.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -536,244 +537,510 @@ jval *neutral_result(const pdn_aprs_packet *p, int rc, const pdn_aprs_decode_opt
 
 /* ---- neutral form to data ---- */
 
-static double num(const jval *o, const char *k, int *has)
+/* The conversion's state: the first thing the C data cannot hold, if any. */
+typedef struct conv {
+    char *err;
+    size_t errlen;
+    int bad;
+} conv;
+
+static int cannot(conv *cv, const char *what, const char *key)
 {
-    jval *v = json_get(o, k);
-    if (v && v->t == J_NUM) {
-        if (has)
-            *has = 1;
-        return v->num;
+    if (!cv->bad) {
+        snprintf(cv->err, cv->errlen, "%s %s", key, what);
+        cv->bad = 1;
     }
-    if (has)
-        *has = 0;
     return 0;
 }
 
-static int flag(const jval *o, const char *k)
+/* Every key of o is one of keys (NULL-terminated). */
+static void keys_only(conv *cv, const jval *o, const char *const *keys)
 {
-    jval *v = json_get(o, k);
-    return v && v->t == J_BOOL && v->b;
-}
-
-static void str_into(char *dst, size_t cap, const jval *o, const char *k, uint16_t *len)
-{
-    jval *v = json_get(o, k);
-    size_t n = 0;
-    if (v && v->t == J_STR) {
-        n = v->len < cap - 1 ? v->len : cap - 1;
-        memcpy(dst, v->str, n);
+    size_t i;
+    int k;
+    if (!o || o->t != J_OBJ) {
+        cannot(cv, "is not an object", "data");
+        return;
     }
-    dst[n] = 0;
-    if (len)
-        *len = (uint16_t)n;
+    for (i = 0; i < o->count; i++) {
+        for (k = 0; keys[k]; k++)
+            if (strcmp(o->keys[i], keys[k]) == 0)
+                break;
+        if (!keys[k])
+            cannot(cv, "is not a field the C data has", o->keys[i]);
+    }
 }
 
-/* A string of code points U+0000-U+00FF back to bytes. */
-static size_t latin1_bytes(const jval *v, uint8_t *out, size_t cap)
+/* A number: 1 and *out if present, 0 if absent. */
+static int num_in(conv *cv, const jval *o, const char *k, double *out)
+{
+    jval *v = json_get(o, k);
+    *out = 0;
+    if (!v)
+        return 0;
+    if (v->t != J_NUM)
+        return cannot(cv, "is not a number", k);
+    *out = v->num;
+    return 1;
+}
+
+/* A whole number the C field's type holds, lo to hi. */
+static int int_in(conv *cv, const jval *o, const char *k, double lo, double hi, long *out)
+{
+    double v;
+    *out = 0;
+    if (!num_in(cv, o, k, &v))
+        return 0;
+    if (v != floor(v) || v < lo || v > hi)
+        return cannot(cv, "does not fit the C field (a whole number of limited size)", k);
+    *out = (long)v;
+    return 1;
+}
+
+static int flag_in(conv *cv, const jval *o, const char *k)
+{
+    jval *v = json_get(o, k);
+    if (!v)
+        return 0;
+    if (v->t != J_BOOL)
+        return cannot(cv, "is not a boolean", k);
+    return v->b;
+}
+
+/* Text into a fixed array of cap bytes, NUL included. */
+static int str_in(conv *cv, const jval *o, const char *k, char *dst, size_t cap, uint16_t *len)
+{
+    jval *v = json_get(o, k);
+    dst[0] = 0;
+    if (len)
+        *len = 0;
+    if (!v)
+        return 0;
+    if (v->t != J_STR)
+        return cannot(cv, "is not text", k);
+    if (v->len >= cap)
+        return cannot(cv, "is longer than the C field holds", k);
+    memcpy(dst, v->str, v->len);
+    dst[v->len] = 0;
+    if (len)
+        *len = (uint16_t)v->len;
+    return 1;
+}
+
+/* One character: a string of exactly one byte. */
+static int char_in(conv *cv, const jval *o, const char *k, char *out)
+{
+    jval *v = json_get(o, k);
+    *out = 0;
+    if (!v)
+        return 0;
+    if (v->t != J_STR || v->len != 1)
+        return cannot(cv, "is not one ASCII character, which is all the C field holds", k);
+    *out = v->str[0];
+    return 1;
+}
+
+static int enum_in(conv *cv, const jval *o, const char *k, const char *const *names, int count, int *out)
+{
+    const char *s = json_gets(o, k);
+    *out = 0;
+    if (!json_get(o, k))
+        return 0;
+    if (!s || (*out = find_name(names, count, s)) < 0) {
+        *out = 0;
+        return cannot(cv, "is not a value the C data has", k);
+    }
+    return 1;
+}
+
+/* A string of code points U+0000-U+00FF back to bytes; -1 if it holds any
+   other or is longer than cap. */
+static long latin1_bytes(const jval *v, uint8_t *out, size_t cap)
 {
     size_t i = 0, o = 0;
-    while (v && i < v->len && o < cap) {
+    while (v && i < v->len) {
         unsigned char c = (unsigned char)v->str[i];
+        if (o == cap)
+            return -1;
         if (c < 0x80) {
             out[o++] = c;
             i++;
-        } else {
+        } else if ((c == 0xC2 || c == 0xC3) && i + 1 < v->len) {
             out[o++] = (uint8_t)(((c & 0x03) << 6) | ((unsigned char)v->str[i + 1] & 0x3F));
             i += 2;
+        } else {
+            return -1;
         }
     }
-    return o;
+    return (long)o;
 }
 
-static int symbol_from(const jval *o, pdn_aprs_symbol *s)
+static int symbol_in(conv *cv, const jval *o, pdn_aprs_symbol *s)
 {
-    uint8_t b[4];
+    uint8_t b[2];
     jval *v = json_get(o, "symbol");
-    if (!v || v->t != J_STR || latin1_bytes(v, b, 4) != 2)
+    if (!v)
         return 0;
+    if (v->t != J_STR || latin1_bytes(v, b, 2) != 2)
+        return cannot(cv, "is not two characters U+0000-U+00FF", "symbol");
     s->table = (char)b[0];
     s->code = (char)b[1];
     return 1;
 }
 
-static void weather_from(const jval *o, pdn_aprs_weather *w)
+static void weather_in(conv *cv, const jval *o, pdn_aprs_weather *w)
 {
-    int i, has;
+    static const char *const keys[] = {"wind_direction_degrees", "wind_speed_mph", "wind_gust_mph", "temperature_f",
+                                       "rain_1h_in", "rain_24h_in", "rain_midnight_in", "humidity_percent",
+                                       "pressure_mbar", "luminosity_w_m2", "snow_24h_in", "rain_raw",
+                                       "software", "unit", "extra", NULL};
+    int i;
     jval *extra;
     memset(w, 0, sizeof *w);
-    for (i = 0; i < PDN_APRS_WX_COUNT; i++) {
-        double v = num(o, wx_names[i], &has);
-        if (has) {
-            w->has[i] = 1;
-            w->value[i] = v;
-        }
-    }
-    if (json_gets(o, "software"))
-        w->software = json_gets(o, "software")[0];
-    if (json_gets(o, "unit"))
-        snprintf(w->unit, sizeof w->unit, "%s", json_gets(o, "unit"));
+    keys_only(cv, o, keys);
+    for (i = 0; i < PDN_APRS_WX_COUNT; i++)
+        w->has[i] = (uint8_t)num_in(cv, o, wx_names[i], &w->value[i]);
+    char_in(cv, o, "software", &w->software);
+    str_in(cv, o, "unit", w->unit, sizeof w->unit, NULL);
     extra = json_get(o, "extra");
-    if (extra && extra->t == J_ARR) {
+    if (extra) {
         size_t k;
-        for (k = 0; k < extra->count && w->extra_count < PDN_APRS_MAX_WEATHER_EXTRA; k++) {
-            const char *l = json_gets(extra->items[k], "letter");
-            const char *val = json_gets(extra->items[k], "value");
-            if (!l || !val)
-                continue;
-            w->extra[w->extra_count].letter = l[0];
-            snprintf(w->extra[w->extra_count].value, sizeof w->extra[0].value, "%s", val);
-            w->extra_count++;
+        if (extra->t != J_ARR || extra->count > PDN_APRS_MAX_WEATHER_EXTRA) {
+            cannot(cv, "has more fields than the C data holds", "extra");
+            return;
         }
+        for (k = 0; k < extra->count; k++) {
+            static const char *const ekeys[] = {"letter", "value", NULL};
+            keys_only(cv, extra->items[k], ekeys);
+            char_in(cv, extra->items[k], "letter", &w->extra[k].letter);
+            str_in(cv, extra->items[k], "value", w->extra[k].value, sizeof w->extra[0].value, NULL);
+        }
+        w->extra_count = (uint8_t)extra->count;
     }
 }
 
-static void report_from(const jval *o, pdn_aprs_report *r)
+static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
 {
-    int has;
+    static const char *const keys[] = {
+        "type", "latitude", "longitude", "ambiguity", "symbol", "compressed", "compression", "course_degrees",
+        "speed_knots", "altitude_feet", "phg", "range_miles", "dfs", "area", "df_bearing", "storm", "dao",
+        "telemetry", "frequency", "weather", "signpost", "comment", "timestamp", "messaging", "name", "killed",
+        "mic_e_message", "old_data", "type_code", "device_suffix", "locator", "legacy_telemetry",
+        "destination_ssid", NULL};
     jval *v;
+    long n;
+    int e;
     memset(r, 0, sizeof *r);
-    r->latitude = num(o, "latitude", NULL);
-    r->longitude = num(o, "longitude", NULL);
-    r->ambiguity = (uint8_t)num(o, "ambiguity", NULL);
-    symbol_from(o, &r->symbol);
-    r->compressed = (uint8_t)flag(o, "compressed");
+    keys_only(cv, o, keys);
+    if (type != PDN_APRS_TYPE_MIC_E) {
+        static const char *const mic_e_only[] = {"mic_e_message", "old_data", "type_code", "device_suffix", "locator",
+                                                 "legacy_telemetry", "destination_ssid", NULL};
+        for (e = 0; mic_e_only[e]; e++)
+            if (json_get(o, mic_e_only[e]))
+                cannot(cv, "is not a field the C data has here", mic_e_only[e]);
+    }
+    num_in(cv, o, "latitude", &r->latitude);
+    num_in(cv, o, "longitude", &r->longitude);
+    int_in(cv, o, "ambiguity", 0, 255, &n);
+    r->ambiguity = (uint8_t)n;
+    symbol_in(cv, o, &r->symbol);
+    r->compressed = (uint8_t)flag_in(cv, o, "compressed");
     if ((v = json_get(o, "compression")) != NULL) {
+        static const char *const ck[] = {"fix", "source", "origin", NULL};
+        keys_only(cv, v, ck);
         r->has_compression = 1;
-        r->compression.fix = (uint8_t)find_name(fix_names, 2, json_gets(v, "fix"));
-        r->compression.source = (uint8_t)find_name(source_names, 4, json_gets(v, "source"));
-        r->compression.origin = (uint8_t)find_name(origin_names, 8, json_gets(v, "origin"));
+        enum_in(cv, v, "fix", fix_names, 2, &e);
+        r->compression.fix = (uint8_t)e;
+        enum_in(cv, v, "source", source_names, 4, &e);
+        r->compression.source = (uint8_t)e;
+        enum_in(cv, v, "origin", origin_names, 8, &e);
+        r->compression.origin = (uint8_t)e;
     }
-    r->course_degrees = (uint16_t)num(o, "course_degrees", &has);
-    r->has_course = (uint8_t)has;
-    r->speed_knots = num(o, "speed_knots", &has);
-    r->has_speed = (uint8_t)has;
-    r->altitude_feet = num(o, "altitude_feet", &has);
-    r->has_altitude = (uint8_t)has;
+    r->has_course = (uint8_t)int_in(cv, o, "course_degrees", 0, 65535, &n);
+    r->course_degrees = (uint16_t)n;
+    r->has_speed = (uint8_t)num_in(cv, o, "speed_knots", &r->speed_knots);
+    r->has_altitude = (uint8_t)num_in(cv, o, "altitude_feet", &r->altitude_feet);
     if ((v = json_get(o, "phg")) != NULL) {
+        static const char *const pk[] = {"power", "height", "gain", "directivity", "beacons_per_hour", NULL};
+        keys_only(cv, v, pk);
         r->has_phg = 1;
-        r->phg.power = (uint8_t)num(v, "power", NULL);
-        r->phg.height = (uint8_t)num(v, "height", NULL);
-        r->phg.gain = (uint8_t)num(v, "gain", NULL);
-        r->phg.directivity = (uint8_t)num(v, "directivity", NULL);
-        r->phg.beacons_per_hour = (uint8_t)num(v, "beacons_per_hour", NULL);
+        int_in(cv, v, "power", 0, 255, &n);
+        r->phg.power = (uint8_t)n;
+        int_in(cv, v, "height", 0, 255, &n);
+        r->phg.height = (uint8_t)n;
+        int_in(cv, v, "gain", 0, 255, &n);
+        r->phg.gain = (uint8_t)n;
+        int_in(cv, v, "directivity", 0, 255, &n);
+        r->phg.directivity = (uint8_t)n;
+        int_in(cv, v, "beacons_per_hour", 0, 255, &n);
+        r->phg.beacons_per_hour = (uint8_t)n;
     }
-    r->range_miles = num(o, "range_miles", &has);
-    r->has_range = (uint8_t)has;
+    r->has_range = (uint8_t)num_in(cv, o, "range_miles", &r->range_miles);
     if ((v = json_get(o, "dfs")) != NULL) {
+        static const char *const dk[] = {"strength", "height", "gain", "directivity", NULL};
+        keys_only(cv, v, dk);
         r->has_dfs = 1;
-        r->dfs.strength = (uint8_t)num(v, "strength", NULL);
-        r->dfs.height = (uint8_t)num(v, "height", NULL);
-        r->dfs.gain = (uint8_t)num(v, "gain", NULL);
-        r->dfs.directivity = (uint8_t)num(v, "directivity", NULL);
+        int_in(cv, v, "strength", 0, 255, &n);
+        r->dfs.strength = (uint8_t)n;
+        int_in(cv, v, "height", 0, 255, &n);
+        r->dfs.height = (uint8_t)n;
+        int_in(cv, v, "gain", 0, 255, &n);
+        r->dfs.gain = (uint8_t)n;
+        int_in(cv, v, "directivity", 0, 255, &n);
+        r->dfs.directivity = (uint8_t)n;
     }
     if ((v = json_get(o, "area")) != NULL) {
+        static const char *const ak[] = {"shape", "color", "lat_offset", "lon_offset", "corridor_width_miles", NULL};
+        keys_only(cv, v, ak);
         r->has_area = 1;
-        r->area.shape = (uint8_t)find_name(shape_names, 10, json_gets(v, "shape"));
-        r->area.color = (uint8_t)find_name(color_names, 16, json_gets(v, "color"));
-        r->area.lat_offset = (uint8_t)num(v, "lat_offset", NULL);
-        r->area.lon_offset = (uint8_t)num(v, "lon_offset", NULL);
-        r->area.corridor_width_miles = (uint16_t)num(v, "corridor_width_miles", &has);
-        r->area.has_corridor = (uint8_t)has;
+        enum_in(cv, v, "shape", shape_names, 10, &e);
+        r->area.shape = (uint8_t)e;
+        enum_in(cv, v, "color", color_names, 16, &e);
+        r->area.color = (uint8_t)e;
+        int_in(cv, v, "lat_offset", 0, 255, &n);
+        r->area.lat_offset = (uint8_t)n;
+        int_in(cv, v, "lon_offset", 0, 255, &n);
+        r->area.lon_offset = (uint8_t)n;
+        r->area.has_corridor = (uint8_t)int_in(cv, v, "corridor_width_miles", 0, 65535, &n);
+        r->area.corridor_width_miles = (uint16_t)n;
     }
     if ((v = json_get(o, "df_bearing")) != NULL) {
+        static const char *const bk[] = {"bearing_degrees", "number", "range", "quality", NULL};
+        keys_only(cv, v, bk);
         r->has_df_bearing = 1;
-        r->df_bearing.bearing_degrees = (uint16_t)num(v, "bearing_degrees", NULL);
-        r->df_bearing.number = (uint8_t)num(v, "number", NULL);
-        r->df_bearing.range = (uint8_t)num(v, "range", NULL);
-        r->df_bearing.quality = (uint8_t)num(v, "quality", NULL);
+        int_in(cv, v, "bearing_degrees", 0, 65535, &n);
+        r->df_bearing.bearing_degrees = (uint16_t)n;
+        int_in(cv, v, "number", 0, 255, &n);
+        r->df_bearing.number = (uint8_t)n;
+        int_in(cv, v, "range", 0, 255, &n);
+        r->df_bearing.range = (uint8_t)n;
+        int_in(cv, v, "quality", 0, 255, &n);
+        r->df_bearing.quality = (uint8_t)n;
     }
     if ((v = json_get(o, "storm")) != NULL) {
+        static const char *const sk[] = {"type", "sustained_wind_knots", "gust_knots", "central_pressure_mbar",
+                                         "hurricane_radius_nm", "tropical_storm_radius_nm", "whole_gale_radius_nm",
+                                         NULL};
+        keys_only(cv, v, sk);
         r->has_storm = 1;
-        r->storm.type = (uint8_t)find_name(storm_names, 3, json_gets(v, "type"));
-        r->storm.sustained_wind_knots = (uint16_t)num(v, "sustained_wind_knots", NULL);
-        r->storm.gust_knots = (uint16_t)num(v, "gust_knots", NULL);
-        r->storm.central_pressure_mbar = (uint16_t)num(v, "central_pressure_mbar", NULL);
-        r->storm.hurricane_radius_nm = (uint16_t)num(v, "hurricane_radius_nm", NULL);
-        r->storm.tropical_storm_radius_nm = (uint16_t)num(v, "tropical_storm_radius_nm", NULL);
-        r->storm.whole_gale_radius_nm = (uint16_t)num(v, "whole_gale_radius_nm", &has);
-        r->storm.has_whole_gale_radius = (uint8_t)has;
+        enum_in(cv, v, "type", storm_names, 3, &e);
+        r->storm.type = (uint8_t)e;
+        int_in(cv, v, "sustained_wind_knots", 0, 65535, &n);
+        r->storm.sustained_wind_knots = (uint16_t)n;
+        int_in(cv, v, "gust_knots", 0, 65535, &n);
+        r->storm.gust_knots = (uint16_t)n;
+        int_in(cv, v, "central_pressure_mbar", 0, 65535, &n);
+        r->storm.central_pressure_mbar = (uint16_t)n;
+        int_in(cv, v, "hurricane_radius_nm", 0, 65535, &n);
+        r->storm.hurricane_radius_nm = (uint16_t)n;
+        int_in(cv, v, "tropical_storm_radius_nm", 0, 65535, &n);
+        r->storm.tropical_storm_radius_nm = (uint16_t)n;
+        r->storm.has_whole_gale_radius = (uint8_t)int_in(cv, v, "whole_gale_radius_nm", 0, 65535, &n);
+        r->storm.whole_gale_radius_nm = (uint16_t)n;
     }
     if ((v = json_get(o, "dao")) != NULL) {
+        static const char *const dk[] = {"datum", "precision", NULL};
+        keys_only(cv, v, dk);
         r->has_dao = 1;
-        r->dao.datum = json_gets(v, "datum") ? json_gets(v, "datum")[0] : 'W';
-        r->dao.precision = (uint8_t)find_name(dao_names, 3, json_gets(v, "precision"));
+        if (!char_in(cv, v, "datum", &r->dao.datum))
+            r->dao.datum = 'W';
+        enum_in(cv, v, "precision", dao_names, 3, &e);
+        r->dao.precision = (uint8_t)e;
     }
     if ((v = json_get(o, "telemetry")) != NULL) {
+        static const char *const tk[] = {"sequence", "analog", "digital", NULL};
         jval *a = json_get(v, "analog");
+        keys_only(cv, v, tk);
         r->has_telemetry = 1;
-        r->telemetry.sequence = (uint16_t)num(v, "sequence", NULL);
-        if (a && a->t == J_ARR) {
+        int_in(cv, v, "sequence", 0, 65535, &n);
+        r->telemetry.sequence = (uint16_t)n;
+        if (a) {
             size_t k;
-            for (k = 0; k < a->count && k < PDN_APRS_MAX_ANALOG; k++)
-                r->telemetry.analog[r->telemetry.analog_count++] = (uint16_t)a->items[k]->num;
+            if (a->t != J_ARR || a->count > PDN_APRS_MAX_ANALOG)
+                cannot(cv, "has more channels than the C data holds", "telemetry.analog");
+            for (k = 0; a->t == J_ARR && k < a->count && k < PDN_APRS_MAX_ANALOG; k++) {
+                const jval *x = a->items[k];
+                if (x->t != J_NUM || x->num != floor(x->num) || x->num < 0 || x->num > 65535)
+                    cannot(cv, "does not fit the C field (a whole number of limited size)", "telemetry.analog");
+                else
+                    r->telemetry.analog[r->telemetry.analog_count++] = (uint16_t)x->num;
+            }
         }
-        r->telemetry.digital = (uint16_t)num(v, "digital", &has);
-        r->telemetry.has_digital = (uint8_t)has;
+        r->telemetry.has_digital = (uint8_t)int_in(cv, v, "digital", 0, 65535, &n);
+        r->telemetry.digital = (uint16_t)n;
     }
     if ((v = json_get(o, "frequency")) != NULL) {
+        static const char *const fk[] = {"mhz", "tone", "tone_value", "offset_khz", "range", "range_km", "narrow",
+                                         "ten_khz_resolution", NULL};
         pdn_aprs_frequency *f = &r->frequency;
-        int t;
+        keys_only(cv, v, fk);
         r->has_frequency = 1;
-        f->mhz = num(v, "mhz", NULL);
-        t = find_name(tone_names, 6, json_gets(v, "tone"));
-        f->tone = (uint8_t)(t < 0 ? 0 : t);
-        f->tone_value = (uint16_t)num(v, "tone_value", NULL);
-        f->offset_khz = (int16_t)num(v, "offset_khz", &has);
-        f->has_offset = (uint8_t)has;
-        f->range = (uint8_t)num(v, "range", &has);
-        f->has_range = (uint8_t)has;
-        f->range_km = (uint8_t)flag(v, "range_km");
-        f->narrow = (uint8_t)flag(v, "narrow");
-        f->ten_khz_resolution = (uint8_t)flag(v, "ten_khz_resolution");
+        num_in(cv, v, "mhz", &f->mhz);
+        enum_in(cv, v, "tone", tone_names, 6, &e);
+        f->tone = (uint8_t)e;
+        int_in(cv, v, "tone_value", 0, 65535, &n);
+        f->tone_value = (uint16_t)n;
+        f->has_offset = (uint8_t)int_in(cv, v, "offset_khz", -32768, 32767, &n);
+        f->offset_khz = (int16_t)n;
+        f->has_range = (uint8_t)int_in(cv, v, "range", 0, 255, &n);
+        f->range = (uint8_t)n;
+        f->range_km = (uint8_t)flag_in(cv, v, "range_km");
+        f->narrow = (uint8_t)flag_in(cv, v, "narrow");
+        f->ten_khz_resolution = (uint8_t)flag_in(cv, v, "ten_khz_resolution");
     }
     if ((v = json_get(o, "weather")) != NULL) {
         r->has_weather = 1;
-        weather_from(v, &r->weather);
+        weather_in(cv, v, &r->weather);
     }
-    str_into(r->signpost, sizeof r->signpost, o, "signpost", NULL);
-    str_into(r->comment, sizeof r->comment, o, "comment", &r->comment_len);
-    str_into(r->timestamp, sizeof r->timestamp, o, "timestamp", NULL);
-    r->messaging = (uint8_t)flag(o, "messaging");
-    str_into(r->name, sizeof r->name, o, "name", NULL);
-    r->killed = (uint8_t)flag(o, "killed");
-    if (json_gets(o, "mic_e_message")) {
-        int m = find_name(mic_e_names, 16, json_gets(o, "mic_e_message"));
-        r->mic_e_message = (uint8_t)(m < 0 ? PDN_APRS_MIC_E_UNKNOWN : m);
+    str_in(cv, o, "signpost", r->signpost, sizeof r->signpost, NULL);
+    str_in(cv, o, "comment", r->comment, sizeof r->comment, &r->comment_len);
+    str_in(cv, o, "timestamp", r->timestamp, sizeof r->timestamp, NULL);
+    r->messaging = (uint8_t)flag_in(cv, o, "messaging");
+    str_in(cv, o, "name", r->name, sizeof r->name, NULL);
+    r->killed = (uint8_t)flag_in(cv, o, "killed");
+    if (enum_in(cv, o, "mic_e_message", mic_e_names, 16, &e))
+        r->mic_e_message = (uint8_t)e;
+    r->old_data = (uint8_t)flag_in(cv, o, "old_data");
+    char_in(cv, o, "type_code", &r->type_code);
+    str_in(cv, o, "device_suffix", r->device_suffix, sizeof r->device_suffix, NULL);
+    str_in(cv, o, "locator", r->locator, sizeof r->locator, NULL);
+    if ((v = json_get(o, "legacy_telemetry")) != NULL) {
+        size_t k;
+        if (v->t != J_ARR || v->count != 5)
+            cannot(cv, "is not the five channels the C data holds", "legacy_telemetry");
+        for (k = 0; v->t == J_ARR && k < v->count && k < 5; k++) {
+            if (v->items[k]->t != J_NUM || v->items[k]->num != floor(v->items[k]->num) || v->items[k]->num < 0 ||
+                v->items[k]->num > 255)
+                cannot(cv, "does not fit the C field (a byte)", "legacy_telemetry");
+            else
+                r->legacy_telemetry[k] = (uint8_t)v->items[k]->num;
+        }
+        r->has_legacy_telemetry = 1;
     }
-    r->old_data = (uint8_t)flag(o, "old_data");
-    if (json_gets(o, "type_code"))
-        r->type_code = json_gets(o, "type_code")[0];
-    str_into(r->device_suffix, sizeof r->device_suffix, o, "device_suffix", NULL);
-    str_into(r->locator, sizeof r->locator, o, "locator", NULL);
-    r->destination_ssid = (uint8_t)num(o, "destination_ssid", NULL);
+    int_in(cv, o, "destination_ssid", 0, 255, &n);
+    r->destination_ssid = (uint8_t)n;
 }
 
-static void meta_strings(const jval *a, pdn_aprs_telemetry_meta *m)
+/* Names or units into the metadata's text. */
+static void meta_strings_in(conv *cv, const jval *a, const char *k, pdn_aprs_telemetry_meta *m)
 {
-    size_t k, out = 0;
-    if (!a || a->t != J_ARR)
+    size_t i, out = 0;
+    if (!a)
         return;
-    for (k = 0; k < a->count && m->count < PDN_APRS_MAX_META_ITEMS; k++) {
-        size_t n = a->items[k]->len;
-        if (out + n + 1 > sizeof m->text)
-            break;
-        memcpy(m->text + out, a->items[k]->str, n);
-        m->text[out + n] = 0;
-        m->offset[m->count] = (uint16_t)out;
-        m->length[m->count] = (uint16_t)n;
-        m->count++;
-        out += n + 1;
+    if (a->t != J_ARR) {
+        cannot(cv, "is not a list", k);
+        return;
     }
-    /* a list longer than fits: record the real count so the encoder refuses */
-    if (a->count > PDN_APRS_MAX_META_ITEMS)
-        m->count = (uint8_t)(PDN_APRS_MAX_META_ITEMS + 1 > 255 ? 255 : a->count);
+    if (a->count > PDN_APRS_MAX_META_ITEMS) {
+        /* the spec allows 13, so the encoder refuses a longer list; keep
+           the count so that it does */
+        m->count = (uint8_t)(a->count > 255 ? 255 : a->count);
+        return;
+    }
+    for (i = 0; i < a->count; i++) {
+        const jval *v = a->items[i];
+        if (v->t != J_STR) {
+            cannot(cv, "is not a list of text", k);
+            return;
+        }
+        if (out + v->len + 1 > sizeof m->text) {
+            cannot(cv, "is longer than the C field holds", k);
+            return;
+        }
+        memcpy(m->text + out, v->str, v->len);
+        m->text[out + v->len] = 0;
+        m->offset[m->count] = (uint16_t)out;
+        m->length[m->count] = (uint16_t)v->len;
+        m->count++;
+        out += v->len + 1;
+    }
+}
+
+/* A third-party packet's inner packet, written as its TNC2 form: the header,
+   with * on the last used path entry, and the inner data encoded. Returns 1,
+   0 when the C data cannot hold it, or -1 when the encoder refuses it. */
+static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
+{
+    static const char *const keys[] = {"source", "destination", "path", "data", "diagnostics", NULL};
+    char line[4 * PDN_APRS_MAX_INFO];
+    pdn_aprs_data *inner;
+    pdn_aprs_encoded enc;
+    const jval *path = json_get(p, "path");
+    const jval *data = json_get(p, "data");
+    /* a header's source and destination are written even when empty, but
+       may have been left out as empty text */
+    const char *src = json_gets(p, "source") ? json_gets(p, "source") : "";
+    const char *dst = json_gets(p, "destination") ? json_gets(p, "destination") : "";
+    const char *reason = json_gets(data, "reason");
+    size_t n = 0, k, last = 0;
+    int rc, i;
+    keys_only(cv, p, keys);
+    if (cv->bad)
+        return 0;
+    if (json_get(p, "diagnostics"))
+        return -1; /* a tolerated defect in the inner header is part of its data */
+    if (!data)
+        return cannot(cv, "has no data", "packet");
+    inner = (pdn_aprs_data *)malloc(sizeof *inner);
+    if (json_gets(data, "type") && strcmp(json_gets(data, "type"), "unrecognized") == 0) {
+        /* an empty field is written back empty; any other the data does not give */
+        free(inner);
+        if (!reason || strcmp(reason, "empty") != 0)
+            return cannot(cv, "is an unrecognized packet, whose information field the data does not give", "packet");
+        inner = NULL;
+        i = 0;
+        memset(&enc, 0, sizeof enc);
+    } else {
+        rc = neutral_to_data(data, inner, cv->err, cv->errlen);
+        if (rc != 1) {
+            free(inner);
+            if (rc == 0)
+                cv->bad = 1;
+            return rc;
+        }
+        i = pdn_aprs_encode_info(inner, NULL, line + 2 * PDN_APRS_MAX_INFO, 2 * PDN_APRS_MAX_INFO, &enc);
+        if (i < 0) {
+            free(inner);
+            snprintf(cv->err, cv->errlen, "inner packet: %s", enc.reason ? enc.reason : pdn_aprs_strerror(i));
+            return -1;
+        }
+    }
+    for (k = 0; path && path->t == J_ARR && k < path->count; k++)
+        if (path->items[k]->len && path->items[k]->str[path->items[k]->len - 1] == '*')
+            last = k + 1;
+    {
+        /* the header, then the field after it */
+        char head[512];
+        size_t h = (size_t)snprintf(head, sizeof head, "%s>%s", src,
+                                    inner && inner->type == PDN_APRS_TYPE_MIC_E ? enc.destination : dst);
+        for (k = 0; path && path->t == J_ARR && k < path->count && h < sizeof head; k++) {
+            const jval *e = path->items[k];
+            size_t el = e->len && e->str[e->len - 1] == '*' ? e->len - 1 : e->len;
+            h += (size_t)snprintf(head + h, sizeof head - h, ",%.*s%s", (int)el, e->str, k + 1 == last ? "*" : "");
+        }
+        free(inner);
+        if (h + 1 + (size_t)i > sizeof t->packet)
+            return cannot(cv, "is longer than the C field holds", "packet");
+        memcpy(t->packet, head, h);
+        t->packet[h] = ':';
+        memcpy(t->packet + h + 1, line + 2 * PDN_APRS_MAX_INFO, (size_t)i);
+        n = h + 1 + (size_t)i;
+    }
+    t->len = (uint16_t)n;
+    return 1;
 }
 
 int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
 {
     const char *type = json_gets(j, "type");
-    int t;
+    conv c, *cv = &c;
+    long n;
+    int t, e;
     memset(d, 0, sizeof *d);
+    c.err = err;
+    c.errlen = errlen;
+    c.bad = 0;
+    err[0] = 0;
     if (!type) {
         snprintf(err, errlen, "no type");
         return 0;
@@ -791,33 +1058,31 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
     case PDN_APRS_TYPE_MIC_E:
     case PDN_APRS_TYPE_OBJECT:
     case PDN_APRS_TYPE_ITEM:
-        report_from(j, &d->as.report);
+        report_in(cv, j, t, &d->as.report);
         break;
     case PDN_APRS_TYPE_MESSAGE:
     case PDN_APRS_TYPE_BULLETIN:
     case PDN_APRS_TYPE_NWS_BULLETIN: {
+        static const char *const keys[] = {"type", "addressee", "text", "message_id", "reply_ack", NULL};
         pdn_aprs_message *m = &d->as.message;
-        str_into(m->addressee, sizeof m->addressee, j, "addressee", NULL);
-        str_into(m->text, sizeof m->text, j, "text", &m->text_len);
-        str_into(m->message_id, sizeof m->message_id, j, "message_id", NULL);
-        if (json_gets(j, "reply_ack")) {
-            m->has_reply_ack = 1;
-            str_into(m->reply_ack, sizeof m->reply_ack, j, "reply_ack", NULL);
-        }
-        if (json_get(j, "addressee") && json_get(j, "addressee")->len >= sizeof m->addressee)
-            memset(m->addressee, 'X', sizeof m->addressee - 1);
+        keys_only(cv, j, keys);
+        str_in(cv, j, "addressee", m->addressee, sizeof m->addressee, NULL);
+        str_in(cv, j, "text", m->text, sizeof m->text, &m->text_len);
+        str_in(cv, j, "message_id", m->message_id, sizeof m->message_id, NULL);
+        m->has_reply_ack = (uint8_t)str_in(cv, j, "reply_ack", m->reply_ack, sizeof m->reply_ack, NULL);
         break;
     }
     case PDN_APRS_TYPE_ACK:
     case PDN_APRS_TYPE_REJECT: {
+        static const char *const keys[] = {"type", "addressee", "acked_id", "rejected_id", "reply_ack", "message_id", NULL};
         pdn_aprs_ack *a = &d->as.ack;
-        str_into(a->addressee, sizeof a->addressee, j, "addressee", NULL);
-        str_into(a->id, sizeof a->id, j, t == PDN_APRS_TYPE_ACK ? "acked_id" : "rejected_id", NULL);
-        if (json_gets(j, "reply_ack")) {
-            a->has_reply_ack = 1;
-            str_into(a->reply_ack, sizeof a->reply_ack, j, "reply_ack", NULL);
-        }
-        if (json_gets(j, "message_id")) {
+        keys_only(cv, j, keys);
+        str_in(cv, j, "addressee", a->addressee, sizeof a->addressee, NULL);
+        str_in(cv, j, t == PDN_APRS_TYPE_ACK ? "acked_id" : "rejected_id", a->id, sizeof a->id, NULL);
+        if (json_get(j, t == PDN_APRS_TYPE_ACK ? "rejected_id" : "acked_id"))
+            cannot(cv, "is not a field the C data has here", t == PDN_APRS_TYPE_ACK ? "rejected_id" : "acked_id");
+        a->has_reply_ack = (uint8_t)str_in(cv, j, "reply_ack", a->reply_ack, sizeof a->reply_ack, NULL);
+        if (!c.bad && json_get(j, "message_id")) {
             /* an ack does not carry its own message ID: make the encoder see it */
             snprintf(err, errlen, "ack with message_id");
             return -1;
@@ -828,143 +1093,235 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
     case PDN_APRS_TYPE_TELEMETRY_UNITS:
     case PDN_APRS_TYPE_TELEMETRY_COEFFICIENTS:
     case PDN_APRS_TYPE_TELEMETRY_BITS: {
+        static const char *const keys[] = {"type", "addressee", "message_id", "names", "units", "coefficients", "bits",
+                                           "project", NULL};
+        static const char *const lists[] = {"names", "units", "coefficients", NULL};
         pdn_aprs_telemetry_meta *m = &d->as.meta;
-        str_into(m->addressee, sizeof m->addressee, j, "addressee", NULL);
-        str_into(m->message_id, sizeof m->message_id, j, "message_id", NULL);
-        if (t == PDN_APRS_TYPE_TELEMETRY_NAMES)
-            meta_strings(json_get(j, "names"), m);
-        else if (t == PDN_APRS_TYPE_TELEMETRY_UNITS)
-            meta_strings(json_get(j, "units"), m);
-        else if (t == PDN_APRS_TYPE_TELEMETRY_COEFFICIENTS) {
+        const char *own = t == PDN_APRS_TYPE_TELEMETRY_NAMES   ? "names"
+                          : t == PDN_APRS_TYPE_TELEMETRY_UNITS ? "units"
+                          : t == PDN_APRS_TYPE_TELEMETRY_COEFFICIENTS ? "coefficients"
+                                                                       : "bits";
+        keys_only(cv, j, keys);
+        for (e = 0; lists[e]; e++)
+            if (strcmp(lists[e], own) != 0 && json_get(j, lists[e]))
+                cannot(cv, "is not a field the C data has here", lists[e]);
+        str_in(cv, j, "addressee", m->addressee, sizeof m->addressee, NULL);
+        str_in(cv, j, "message_id", m->message_id, sizeof m->message_id, NULL);
+        if (t == PDN_APRS_TYPE_TELEMETRY_NAMES || t == PDN_APRS_TYPE_TELEMETRY_UNITS) {
+            meta_strings_in(cv, json_get(j, own), own, m);
+        } else if (t == PDN_APRS_TYPE_TELEMETRY_COEFFICIENTS) {
             jval *a = json_get(j, "coefficients");
             size_t k;
-            for (k = 0; a && k < a->count && k < PDN_APRS_MAX_META_ITEMS; k++)
-                m->coefficient[m->count++].value = a->items[k]->num;
+            if (a && a->t != J_ARR)
+                cannot(cv, "is not a list", "coefficients");
+            else if (a && a->count > PDN_APRS_MAX_META_ITEMS)
+                m->count = (uint8_t)(a->count > 255 ? 255 : a->count); /* the encoder refuses over 15 */
+            else
+                for (k = 0; a && k < a->count; k++) {
+                    if (a->items[k]->t != J_NUM)
+                        cannot(cv, "is not a list of numbers", "coefficients");
+                    m->coefficient[m->count++].value = a->items[k]->num;
+                }
         } else {
-            str_into(m->bits, sizeof m->bits, j, "bits", NULL);
-            str_into(m->text, sizeof m->text, j, "project", &m->project_len);
+            str_in(cv, j, "bits", m->bits, sizeof m->bits, NULL);
+            str_in(cv, j, "project", m->text, sizeof m->text, &m->project_len);
         }
         break;
     }
     case PDN_APRS_TYPE_DIRECTED_QUERY: {
+        static const char *const keys[] = {"type", "addressee", "query_type", "target", NULL};
         pdn_aprs_directed_query *q = &d->as.directed_query;
-        str_into(q->addressee, sizeof q->addressee, j, "addressee", NULL);
-        str_into(q->query_type, sizeof q->query_type, j, "query_type", NULL);
-        str_into(q->target, sizeof q->target, j, "target", NULL);
+        keys_only(cv, j, keys);
+        str_in(cv, j, "addressee", q->addressee, sizeof q->addressee, NULL);
+        str_in(cv, j, "query_type", q->query_type, sizeof q->query_type, NULL);
+        str_in(cv, j, "target", q->target, sizeof q->target, NULL);
         break;
     }
     case PDN_APRS_TYPE_STATUS: {
+        static const char *const keys[] = {"type", "timestamp", "locator", "symbol", "beam", "text", NULL};
         pdn_aprs_status *s = &d->as.status;
         jval *b;
-        str_into(s->timestamp, sizeof s->timestamp, j, "timestamp", NULL);
-        str_into(s->locator, sizeof s->locator, j, "locator", NULL);
-        symbol_from(j, &s->symbol);
+        keys_only(cv, j, keys);
+        str_in(cv, j, "timestamp", s->timestamp, sizeof s->timestamp, NULL);
+        str_in(cv, j, "locator", s->locator, sizeof s->locator, NULL);
+        symbol_in(cv, j, &s->symbol);
         if ((b = json_get(j, "beam")) != NULL) {
+            static const char *const bk[] = {"heading_code", "power_code", NULL};
+            keys_only(cv, b, bk);
             s->has_beam = 1;
-            s->beam_heading = json_gets(b, "heading_code") ? json_gets(b, "heading_code")[0] : 0;
-            s->beam_power = json_gets(b, "power_code") ? json_gets(b, "power_code")[0] : 0;
+            char_in(cv, b, "heading_code", &s->beam_heading);
+            char_in(cv, b, "power_code", &s->beam_power);
         }
-        str_into(s->text, sizeof s->text, j, "text", &s->text_len);
+        str_in(cv, j, "text", s->text, sizeof s->text, &s->text_len);
         break;
     }
     case PDN_APRS_TYPE_TELEMETRY: {
+        static const char *const keys[] = {"type", "sequence", "analog", "bits", "comment", NULL};
         pdn_aprs_telemetry *tl = &d->as.telemetry;
         jval *a = json_get(j, "analog");
         size_t k;
-        str_into(tl->sequence, sizeof tl->sequence, j, "sequence", NULL);
-        for (k = 0; a && k < a->count; k++) {
+        keys_only(cv, j, keys);
+        str_in(cv, j, "sequence", tl->sequence, sizeof tl->sequence, NULL);
+        if (a && a->t != J_ARR)
+            cannot(cv, "is not a list", "analog");
+        for (k = 0; a && a->t == J_ARR && k < a->count; k++) {
             if (k >= PDN_APRS_MAX_ANALOG) {
-                tl->analog_count = PDN_APRS_MAX_ANALOG + 1;
+                tl->analog_count = PDN_APRS_MAX_ANALOG + 1; /* the encoder refuses over five */
                 break;
             }
+            if (a->items[k]->t != J_NULL && a->items[k]->t != J_NUM)
+                cannot(cv, "is not a list of numbers", "analog");
             tl->analog[k].is_null = a->items[k]->t == J_NULL;
             tl->analog[k].value = a->items[k]->num;
             tl->analog_count = (uint8_t)(k + 1);
         }
-        if (json_gets(j, "bits")) {
-            tl->has_bits = 1;
-            str_into(tl->bits, sizeof tl->bits, j, "bits", NULL);
-        }
-        str_into(tl->comment, sizeof tl->comment, j, "comment", &tl->comment_len);
+        tl->has_bits = (uint8_t)str_in(cv, j, "bits", tl->bits, sizeof tl->bits, NULL);
+        str_in(cv, j, "comment", tl->comment, sizeof tl->comment, &tl->comment_len);
         break;
     }
-    case PDN_APRS_TYPE_WEATHER:
-        str_into(d->as.weather.timestamp, sizeof d->as.weather.timestamp, j, "timestamp", NULL);
+    case PDN_APRS_TYPE_WEATHER: {
+        static const char *const keys[] = {"type", "timestamp", "weather", "comment", NULL};
+        keys_only(cv, j, keys);
+        str_in(cv, j, "timestamp", d->as.weather.timestamp, sizeof d->as.weather.timestamp, NULL);
         if (json_get(j, "weather"))
-            weather_from(json_get(j, "weather"), &d->as.weather.weather);
-        str_into(d->as.weather.comment, sizeof d->as.weather.comment, j, "comment", &d->as.weather.comment_len);
+            weather_in(cv, json_get(j, "weather"), &d->as.weather.weather);
+        str_in(cv, j, "comment", d->as.weather.comment, sizeof d->as.weather.comment, &d->as.weather.comment_len);
         break;
+    }
     case PDN_APRS_TYPE_RAW_WEATHER: {
-        int f = find_name(rawwx_names, 4, json_gets(j, "format"));
-        d->as.raw_weather.format = (uint8_t)(f < 0 ? 0 : f);
-        str_into(d->as.raw_weather.data, sizeof d->as.raw_weather.data, j, "data", &d->as.raw_weather.data_len);
+        static const char *const keys[] = {"type", "format", "data", NULL};
+        keys_only(cv, j, keys);
+        enum_in(cv, j, "format", rawwx_names, 4, &e);
+        d->as.raw_weather.format = (uint8_t)e;
+        str_in(cv, j, "data", d->as.raw_weather.data, sizeof d->as.raw_weather.data, &d->as.raw_weather.data_len);
         break;
     }
     case PDN_APRS_TYPE_NMEA: {
+        /* what the sentence determines (the position, time and so on) is
+           not written separately */
+        static const char *const keys[] = {"type", "sentence", "has_checksum", "comment", "latitude", "longitude", "fix",
+                                           "course_degrees", "speed_knots", "altitude_m", "time", "waypoint", NULL};
         pdn_aprs_nmea *m = &d->as.nmea;
-        str_into(m->sentence, sizeof m->sentence, j, "sentence", &m->sentence_len);
-        m->has_checksum = (uint8_t)flag(j, "has_checksum");
-        str_into(m->comment, sizeof m->comment, j, "comment", &m->comment_len);
+        keys_only(cv, j, keys);
+        str_in(cv, j, "sentence", m->sentence, sizeof m->sentence, &m->sentence_len);
+        m->has_checksum = (uint8_t)flag_in(cv, j, "has_checksum");
+        str_in(cv, j, "comment", m->comment, sizeof m->comment, &m->comment_len);
         break;
     }
-    case PDN_APRS_TYPE_MAIDENHEAD_BEACON:
-        str_into(d->as.maidenhead.locator, sizeof d->as.maidenhead.locator, j, "locator", NULL);
-        str_into(d->as.maidenhead.comment, sizeof d->as.maidenhead.comment, j, "comment",
-                 &d->as.maidenhead.comment_len);
+    case PDN_APRS_TYPE_MAIDENHEAD_BEACON: {
+        static const char *const keys[] = {"type", "locator", "comment", NULL};
+        keys_only(cv, j, keys);
+        str_in(cv, j, "locator", d->as.maidenhead.locator, sizeof d->as.maidenhead.locator, NULL);
+        str_in(cv, j, "comment", d->as.maidenhead.comment, sizeof d->as.maidenhead.comment,
+               &d->as.maidenhead.comment_len);
         break;
+    }
     case PDN_APRS_TYPE_QUERY: {
+        static const char *const keys[] = {"type", "query_type", "footprint", NULL};
         jval *f;
-        str_into(d->as.query.query_type, sizeof d->as.query.query_type, j, "query_type", NULL);
+        keys_only(cv, j, keys);
+        str_in(cv, j, "query_type", d->as.query.query_type, sizeof d->as.query.query_type, NULL);
         if ((f = json_get(j, "footprint")) != NULL) {
+            static const char *const fk[] = {"latitude", "longitude", "radius_miles", NULL};
+            keys_only(cv, f, fk);
             d->as.query.has_footprint = 1;
-            d->as.query.latitude = num(f, "latitude", NULL);
-            d->as.query.longitude = num(f, "longitude", NULL);
-            d->as.query.radius_miles = (uint16_t)num(f, "radius_miles", NULL);
+            num_in(cv, f, "latitude", &d->as.query.latitude);
+            num_in(cv, f, "longitude", &d->as.query.longitude);
+            int_in(cv, f, "radius_miles", 0, 65535, &n);
+            d->as.query.radius_miles = (uint16_t)n;
         }
         break;
     }
     case PDN_APRS_TYPE_CAPABILITIES: {
-        pdn_aprs_capabilities *c = &d->as.capabilities;
+        static const char *const keys[] = {"type", "capabilities", NULL};
+        pdn_aprs_capabilities *cp = &d->as.capabilities;
         jval *a = json_get(j, "capabilities");
         size_t k, out = 0;
-        for (k = 0; a && k < a->count && c->count < PDN_APRS_MAX_CAPABILITIES; k++) {
+        keys_only(cv, j, keys);
+        if (a && (a->t != J_ARR || a->count > PDN_APRS_MAX_CAPABILITIES)) {
+            cannot(cv, "has more items than the C data holds", "capabilities");
+            break;
+        }
+        for (k = 0; a && k < a->count; k++) {
             jval *item = a->items[k];
-            if (item->t != J_ARR || item->count < 1)
-                continue;
-            c->item[c->count].token_offset = (uint16_t)out;
-            c->item[c->count].token_length = (uint16_t)item->items[0]->len;
-            memcpy(c->text + out, item->items[0]->str, item->items[0]->len + 1);
-            out += item->items[0]->len + 1;
-            if (item->count > 1) {
-                c->item[c->count].has_value = 1;
-                c->item[c->count].value_offset = (uint16_t)out;
-                c->item[c->count].value_length = (uint16_t)item->items[1]->len;
-                memcpy(c->text + out, item->items[1]->str, item->items[1]->len + 1);
-                out += item->items[1]->len + 1;
+            size_t f;
+            if (item->t != J_ARR || item->count < 1 || item->count > 2) {
+                cannot(cv, "holds an item that is not [token] or [token, value]", "capabilities");
+                break;
             }
-            c->count++;
+            for (f = 0; f < item->count; f++) {
+                if (item->items[f]->t != J_STR || out + item->items[f]->len + 1 > sizeof cp->text) {
+                    cannot(cv, "is longer than the C field holds", "capabilities");
+                    break;
+                }
+                if (f == 0) {
+                    cp->item[cp->count].token_offset = (uint16_t)out;
+                    cp->item[cp->count].token_length = (uint16_t)item->items[f]->len;
+                } else {
+                    cp->item[cp->count].has_value = 1;
+                    cp->item[cp->count].value_offset = (uint16_t)out;
+                    cp->item[cp->count].value_length = (uint16_t)item->items[f]->len;
+                }
+                memcpy(cp->text + out, item->items[f]->str, item->items[f]->len + 1);
+                out += item->items[f]->len + 1;
+            }
+            cp->count++;
+        }
+        break;
+    }
+    case PDN_APRS_TYPE_THIRD_PARTY: {
+        static const char *const keys[] = {"type", "packet", NULL};
+        keys_only(cv, j, keys);
+        if (!c.bad) {
+            if (!json_get(j, "packet"))
+                cannot(cv, "is missing", "packet");
+            else {
+                int rc = third_party_in(cv, json_get(j, "packet"), &d->as.third_party);
+                if (rc < 0)
+                    return -1;
+            }
         }
         break;
     }
     case PDN_APRS_TYPE_USER_DEFINED: {
+        static const char *const keys[] = {"type", "user_id", "packet_type", "data", NULL};
         pdn_aprs_user_defined *u = &d->as.user_defined;
         uint8_t b[2];
-        if (latin1_bytes(json_get(j, "user_id"), b, 1) == 1)
-            u->user_id = (char)b[0];
-        if (latin1_bytes(json_get(j, "packet_type"), b, 1) == 1)
-            u->packet_type = (char)b[0];
-        u->data_len = (uint16_t)latin1_bytes(json_get(j, "data"), u->data, sizeof u->data);
+        long len;
+        keys_only(cv, j, keys);
+        if (latin1_bytes(json_get(j, "user_id"), b, 2) != 1)
+            cannot(cv, "is not one character U+0000-U+00FF", "user_id");
+        u->user_id = (char)b[0];
+        if (latin1_bytes(json_get(j, "packet_type"), b, 2) != 1)
+            cannot(cv, "is not one character U+0000-U+00FF", "packet_type");
+        u->packet_type = (char)b[0];
+        len = latin1_bytes(json_get(j, "data"), u->data, sizeof u->data);
+        if (len < 0)
+            cannot(cv, "is not text U+0000-U+00FF of a length the C field holds", "data");
+        else
+            u->data_len = (uint16_t)len;
         break;
     }
-    case PDN_APRS_TYPE_TEST:
-        str_into(d->as.test.data, sizeof d->as.test.data, j, "data", &d->as.test.data_len);
-        break;
-    case PDN_APRS_TYPE_AGRELO_DF:
-        d->as.agrelo.bearing_degrees = (uint16_t)num(j, "bearing_degrees", NULL);
-        d->as.agrelo.quality = (uint8_t)num(j, "quality", NULL);
-        break;
-    default:
+    case PDN_APRS_TYPE_TEST: {
+        static const char *const keys[] = {"type", "data", NULL};
+        keys_only(cv, j, keys);
+        str_in(cv, j, "data", d->as.test.data, sizeof d->as.test.data, &d->as.test.data_len);
         break;
     }
-    return 1;
+    case PDN_APRS_TYPE_AGRELO_DF: {
+        static const char *const keys[] = {"type", "bearing_degrees", "quality", NULL};
+        keys_only(cv, j, keys);
+        int_in(cv, j, "bearing_degrees", 0, 65535, &n);
+        d->as.agrelo.bearing_degrees = (uint16_t)n;
+        int_in(cv, j, "quality", 0, 255, &n);
+        d->as.agrelo.quality = (uint8_t)n;
+        break;
+    }
+    default: {
+        static const char *const keys[] = {"type", "reason", NULL};
+        keys_only(cv, j, keys);
+        break;
+    }
+    }
+    return c.bad ? 0 : 1;
 }
