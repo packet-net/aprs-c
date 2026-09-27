@@ -550,7 +550,9 @@ typedef struct pdn_aprs_storm {
 
 /* !DAO! datum and precision. */
 typedef struct pdn_aprs_dao {
-    char datum;        /* 'W' for WGS84, as sent (upper case) */
+    /* 'W' for WGS84, as sent (upper case); or a digit 0-9, a locally
+       defined datum, which carries no added precision */
+    char datum;
     uint8_t precision; /* PDN_APRS_DAO_* */
 } pdn_aprs_dao;
 #define PDN_APRS_DAO_NONE 0
@@ -563,7 +565,9 @@ typedef struct pdn_aprs_comment_telemetry {
     uint8_t analog_count; /* 1-5 */
     uint16_t analog[PDN_APRS_MAX_ANALOG];
     uint8_t has_digital;
-    uint16_t digital; /* B1 is the least significant bit */
+    /* the eight binary channels, 0-255, B1 the least significant bit; bits
+       9-13 of the value sent are reserved and ignored */
+    uint16_t digital;
 } pdn_aprs_comment_telemetry;
 
 /* APRS 1.2 voice frequency (APRS12c ch. 18). */
@@ -707,15 +711,19 @@ typedef struct pdn_aprs_ack {
 /* A directed query (APRS12c ch. 15). */
 typedef struct pdn_aprs_directed_query {
     char addressee[PDN_APRS_NAME_SIZE];
-    char query_type[PDN_APRS_NAME_SIZE]; /* "APRSD", "PING?" ... */
-    char target[PDN_APRS_NAME_SIZE];     /* the callsign asked about, or "" */
+    /* "APRSD", "PING?" ..., or any other type of upper-case letters, which
+       may be as long as the text */
+    char query_type[PDN_APRS_MAX_INFO];
+    char target[PDN_APRS_NAME_SIZE]; /* the callsign asked about, or "" */
 } pdn_aprs_directed_query;
 
 /* A number as sent: its value and, for identical re-encoding, its text. */
 typedef struct pdn_aprs_number {
-    double value;
+    double value;    /* always a finite number */
     uint8_t is_null; /* an empty telemetry value */
-    char text[24];   /* as sent ("073", ".53"); "" to format the value */
+    /* as sent ("073", ".53"); "" to format the value, and "" too when the
+       text sent is longer than fits here (the value is still read) */
+    char text[24];
 } pdn_aprs_number;
 
 /* Telemetry metadata: PARM., UNIT., EQNS. or BITS. (APRS12c ch. 13). */
@@ -747,13 +755,14 @@ typedef struct pdn_aprs_status {
     char beam_heading;      /* meteor scatter ^HP: heading code */
     char beam_power;        /* power code */
     uint16_t text_len;
-    char text[PDN_APRS_TEXT_SIZE];
+    char text[PDN_APRS_TEXT_SIZE]; /* as sent, spaces before a beam heading included */
 } pdn_aprs_status;
 
 /* A telemetry report T#... (APRS12c ch. 13). */
 typedef struct pdn_aprs_telemetry {
-    char sequence[PDN_APRS_NAME_SIZE]; /* as sent: "005", "MIC", "51752" */
-    uint8_t analog_count;              /* 1-5 */
+    /* as sent: "005", "MIC", "51752"; letters and digits of any length */
+    char sequence[PDN_APRS_MAX_INFO];
+    uint8_t analog_count; /* 1-5 */
     pdn_aprs_number analog[PDN_APRS_MAX_ANALOG];
     uint8_t has_bits;
     char bits[9]; /* eight '0'/'1' characters, B1 first */
@@ -780,10 +789,11 @@ typedef struct pdn_aprs_raw_weather {
 #define PDN_APRS_RAW_WX_ULTIMETER_PACKET 2  /* $ULTW */
 #define PDN_APRS_RAW_WX_ULTIMETER_LOGGING 3 /* !! */
 
-/* A raw NMEA sentence (APRS12c ch. 6, 8). */
+/* A raw NMEA 0183 sentence (APRS12c ch. 5, 6). */
 typedef struct pdn_aprs_nmea {
     uint16_t sentence_len;
-    char sentence[PDN_APRS_TEXT_SIZE]; /* without the $ */
+    /* without the $, up to and including any *hh checksum; printable ASCII */
+    char sentence[PDN_APRS_MAX_INFO];
     uint8_t has_checksum;
     uint8_t has_position;
     double latitude, longitude;
@@ -795,8 +805,13 @@ typedef struct pdn_aprs_nmea {
     double speed_knots;
     uint8_t has_altitude;
     double altitude_m;
-    char time[16];     /* "HH:MM:SS[.fff]", or "" */
-    char waypoint[PDN_APRS_NAME_SIZE]; /* WPL waypoint name, or "" */
+    /* "HH:MM:SS", then any fraction of a second as sent, less trailing
+       zeros ("15:40:27.123456789"); or "" */
+    char time[PDN_APRS_MAX_INFO];
+    char waypoint[PDN_APRS_MAX_INFO]; /* WPL waypoint name, or "" */
+    /* Text after the checksum (TinyTrack's "/Home Station"), as sent. */
+    uint16_t comment_len;
+    char comment[PDN_APRS_TEXT_SIZE];
 } pdn_aprs_nmea;
 
 /* A Maidenhead locator beacon [IO91SX] (obsolete). */
@@ -808,7 +823,7 @@ typedef struct pdn_aprs_maidenhead {
 
 /* A general query ?APRS? (APRS12c ch. 15). */
 typedef struct pdn_aprs_query {
-    char query_type[PDN_APRS_NAME_SIZE];
+    char query_type[PDN_APRS_MAX_INFO]; /* upper-case letters */
     uint8_t has_footprint;
     double latitude, longitude;
     uint16_t radius_miles;
@@ -827,7 +842,12 @@ typedef struct pdn_aprs_capabilities {
 } pdn_aprs_capabilities;
 
 /* A third-party packet }...: the encapsulated packet in TNC2 form, as
-   received. pdn_aprs_decode_third_party() decodes it. */
+   received. pdn_aprs_decode_third_party() decodes it. Its source may be 1-9
+   printable ASCII characters other than > and : (APRS12c ch. 17). A defect
+   its header may tolerate (several used markers) is a warning on the inner
+   packet, and a strict decode rejects the whole packet as
+   invalid-third-party. A q-construct is read only in the outer header, so
+   the inner packet's q_construct is always -1. */
 typedef struct pdn_aprs_third_party {
     uint16_t len;
     uint8_t packet[PDN_APRS_MAX_INFO];

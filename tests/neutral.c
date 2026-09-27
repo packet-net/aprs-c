@@ -436,6 +436,7 @@ jval *neutral_data(const pdn_aprs_data *d, const pdn_aprs_decode_options *opt)
             json_set(o, "altitude_m", json_num(m->altitude_m));
         set_cstr(o, "time", m->time);
         set_cstr(o, "waypoint", m->waypoint);
+        set_str(o, "comment", m->comment, m->comment_len);
         break;
     }
     case PDN_APRS_TYPE_MAIDENHEAD_BEACON:
@@ -903,6 +904,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         pdn_aprs_nmea *m = &d->as.nmea;
         str_into(m->sentence, sizeof m->sentence, j, "sentence", &m->sentence_len);
         m->has_checksum = (uint8_t)flag(j, "has_checksum");
+        str_into(m->comment, sizeof m->comment, j, "comment", &m->comment_len);
         break;
     }
     case PDN_APRS_TYPE_MAIDENHEAD_BEACON:

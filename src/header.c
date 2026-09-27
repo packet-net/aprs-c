@@ -24,12 +24,24 @@ static int address_ok(const uint8_t *s, size_t n)
     return 1;
 }
 
+/* The source inside a third-party packet (APRS12c ch. 17): 1-9 printable
+   ASCII characters other than '>' and ':', which end it. */
+static int inner_source_ok(const uint8_t *s, size_t n)
+{
+    size_t i;
+    if (n == 0 || n > 9)
+        return 0;
+    for (i = 0; i < n; i++)
+        if (!A_PRINT(s[i]) || s[i] == '>' || s[i] == ':')
+            return 0;
+    return 1;
+}
+
 PDN_APRS__PRIVATE size_t pdn_aprs__parse_tnc2_header(pdn_aprs__dctx *c, const uint8_t *s, size_t n,
                                                      pdn_aprs_header *h, int third_party)
 {
     size_t colon, gt, i, start;
     int field = 0, marks = 0, last_marked = -1, empty_path = 0;
-    PDN_APRS__UNUSED(third_party);
     memset(h, 0, sizeof *h);
     h->q_construct = -1;
     for (colon = 0; colon < n && s[colon] != ':'; colon++)
@@ -44,7 +56,7 @@ PDN_APRS__PRIVATE size_t pdn_aprs__parse_tnc2_header(pdn_aprs__dctx *c, const ui
         pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_HEADER);
         return 0;
     }
-    if (!address_ok(s, gt)) {
+    if (third_party ? !inner_source_ok(s, gt) : !address_ok(s, gt)) {
         pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_ADDRESS);
         return 0;
     }
@@ -105,7 +117,9 @@ PDN_APRS__PRIVATE size_t pdn_aprs__parse_tnc2_header(pdn_aprs__dctx *c, const ui
         return 0;
     for (i = 0; (int)i <= last_marked; i++)
         h->path[i].used = 1;
-    for (i = 0; i < h->path_count; i++) {
+    /* a q-construct is read only in the outer header: a third-party
+       header's path is kept as sent */
+    for (i = 0; !third_party && i < h->path_count; i++) {
         const char *p = h->path[i].call;
         if (p[0] == 'q' && p[1] == 'A' && A_ALPHA(p[2]) && p[3] == 0) {
             h->q_construct = (int8_t)i;

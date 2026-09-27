@@ -430,28 +430,34 @@ static void sb_str(sbuf *b, const char *s, size_t n)
             sb_put(b, (const char *)&s[i], 1);
             i++;
         } else {
-            /* decode UTF-8 (the library only produces valid UTF-8) */
-            unsigned cp;
-            size_t need;
-            if (c >= 0xF0) {
-                cp = c & 0x07;
-                need = 3;
-            } else if (c >= 0xE0) {
-                cp = c & 0x0F;
-                need = 2;
-            } else {
-                cp = c & 0x1F;
+            /* A UTF-8 sequence, checked: the library only produces valid
+               UTF-8, but the output must be valid JSON whatever it is given,
+               so a byte that does not start a valid sequence is written as
+               the Latin-1 code point it would be. */
+            unsigned cp = c, min = 0;
+            size_t need = 0, k;
+            if (c >= 0xC2 && c <= 0xDF) {
+                cp = c & 0x1Fu;
                 need = 1;
+                min = 0x80;
+            } else if (c >= 0xE0 && c <= 0xEF) {
+                cp = c & 0x0Fu;
+                need = 2;
+                min = 0x800;
+            } else if (c >= 0xF0 && c <= 0xF4) {
+                cp = c & 0x07u;
+                need = 3;
+                min = 0x10000;
             }
-            if (i + need >= n) {
-                /* truncated sequence: write the byte as a code point */
+            for (k = 1; k <= need; k++) {
+                unsigned char cc = i + k < n ? (unsigned char)s[i + k] : 0;
+                if ((cc & 0xC0) != 0x80)
+                    break;
+                cp = (cp << 6) | (cc & 0x3Fu);
+            }
+            if (need == 0 || k <= need || cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
                 cp = c;
                 need = 0;
-            }
-            {
-                size_t k;
-                for (k = 1; k <= need && i + k < n; k++)
-                    cp = (cp << 6) | ((unsigned char)s[i + k] & 0x3F);
             }
             i += need + 1;
             if (cp >= 0x10000) {
@@ -482,10 +488,20 @@ static void sb_value(sbuf *b, const jval *v)
             sb_put(b, "false", 5);
         break;
     case J_NUM:
+        /* JSON has no infinity or NaN: the library never produces them, but
+           if one ever reached here it is written as null, never as "nan" */
+        if (v->num != v->num || v->num - v->num != 0.0) {
+            sb_put(b, "null", 4);
+            break;
+        }
         if (v->is_int || (v->num == floor(v->num) && fabs(v->num) < 1e15))
             snprintf(tmp, sizeof tmp, "%.0f", v->num);
         else
             snprintf(tmp, sizeof tmp, "%.17g", v->num);
+        /* printf follows LC_NUMERIC; JSON's decimal separator is always '.' */
+        for (i = 0; tmp[i]; i++)
+            if (tmp[i] == ',')
+                tmp[i] = '.';
         sb_put(b, tmp, strlen(tmp));
         break;
     case J_STR:

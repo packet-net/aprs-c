@@ -32,8 +32,10 @@ static int dao_at(const uint8_t *s)
     uint8_t d = s[1], a = s[2], o = s[3];
     if (s[0] != '!' || s[4] != '!')
         return 0;
+    /* a digit is a local datum (APRS12c ch. 5); it has no case to say how A
+       and O are written, so it is read only with spaces there */
     if (a == ' ' && o == ' ')
-        return A_ALPHA(d);
+        return A_ALPHA(d) || A_DIGIT(d);
     if (A_UPPER(d))
         return A_DIGIT(a) && A_DIGIT(o);
     if (A_LOWER(d))
@@ -72,8 +74,9 @@ PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs
             for (p = 1; p < pairs && p <= PDN_APRS_MAX_ANALOG; p++)
                 r->telemetry.analog[r->telemetry.analog_count++] = (uint16_t)pdn_aprs__b91(t + 2 * p, 2);
             if (pairs == 7) {
+                /* eight binary channels; bits 9-13 are reserved (APRS12c ch. 13) */
                 r->telemetry.has_digital = 1;
-                r->telemetry.digital = (uint16_t)pdn_aprs__b91(t + 12, 2);
+                r->telemetry.digital = (uint16_t)(pdn_aprs__b91(t + 12, 2) & 0xFF);
             }
             have_tlm = 1;
             tstart = prev;
@@ -115,6 +118,14 @@ PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs
     }
 }
 
+/* 1 if v has its sign bit set, -0.0 included. */
+static int sign_negative(double v)
+{
+    uint64_t bits;
+    memcpy(&bits, &v, sizeof bits);
+    return (int)(bits >> 63);
+}
+
 PDN_APRS__PRIVATE void pdn_aprs__apply_dao(pdn_aprs__dctx *c, pdn_aprs_report *r, const uint8_t dao[5], int applies)
 {
     double dlat, dlon;
@@ -130,8 +141,10 @@ PDN_APRS__PRIVATE void pdn_aprs__apply_dao(pdn_aprs__dctx *c, pdn_aprs_report *r
     }
     dlat /= 60.0;
     dlon /= 60.0;
-    r->latitude += r->latitude < 0 ? -dlat : dlat;
-    r->longitude += r->longitude < 0 ? -dlon : dlon;
+    /* the added precision is in the position's own hemisphere, which a zero
+       degree and minute (-0.0 south or west) still carries */
+    r->latitude += sign_negative(r->latitude) ? -dlat : dlat;
+    r->longitude += sign_negative(r->longitude) ? -dlon : dlon;
 }
 
 /* ---- altitude ---- */
@@ -268,15 +281,21 @@ PDN_APRS__PRIVATE int pdn_aprs__lift_frequency(pdn_aprs__cbuf *cb, pdn_aprs_freq
 
 /* ---- braces ---- */
 
-static int find_braces(const pdn_aprs__cbuf *cb, size_t *at, size_t *len)
+/* The first well-formed braces, wherever they are: {, 1-3 characters that
+   are not braces, and }, the characters digits for a corridor or printable
+   ASCII for a signpost. Braces that do not qualify are comment text and do
+   not stop the search, as a malformed data extension does not. */
+static int find_braces(const pdn_aprs__cbuf *cb, int digits, size_t *at, size_t *len)
 {
     size_t i, k;
     for (i = 0; i < cb->n; i++) {
+        int ok = 1;
         if (cb->b[i] != '{')
             continue;
         for (k = i + 1; k < cb->n && k <= i + 4 && cb->b[k] != '}' && cb->b[k] != '{'; k++)
-            ;
-        if (k < cb->n && cb->b[k] == '}' && k - i - 1 >= 1 && k - i - 1 <= 3) {
+            if (digits ? !A_DIGIT(cb->b[k]) : !A_PRINT(cb->b[k]))
+                ok = 0;
+        if (ok && k < cb->n && cb->b[k] == '}' && k - i - 1 >= 1 && k - i - 1 <= 3) {
             *at = i;
             *len = k - i + 1;
             return 1;
@@ -306,21 +325,18 @@ PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf
         r->has_altitude = 1;
         r->altitude_feet = feet;
     }
-    if (((r->symbol.table == '\\' && r->symbol.code == 'm') ||
-         (r->has_area && (r->area.shape == PDN_APRS_AREA_LINE_DOWN_RIGHT ||
-                          r->area.shape == PDN_APRS_AREA_LINE_DOWN_LEFT))) &&
-        find_braces(cb, &at, &len)) {
-        if (r->has_area && r->symbol.code == 'l') {
-            long v = pdn_aprs__digits(cb->b + at + 1, len - 2);
-            if (v >= 0) {
-                r->area.has_corridor = 1;
-                r->area.corridor_width_miles = (uint16_t)v;
-                pdn_aprs__cbuf_cut(cb, at, len);
-            }
-        } else {
-            pdn_aprs__memlcpy(r->signpost, sizeof r->signpost, cb->b + at + 1, len - 2);
+    if (r->has_area &&
+        (r->area.shape == PDN_APRS_AREA_LINE_DOWN_RIGHT || r->area.shape == PDN_APRS_AREA_LINE_DOWN_LEFT)) {
+        /* a line area object's corridor width is digits */
+        if (find_braces(cb, 1, &at, &len)) {
+            r->area.has_corridor = 1;
+            r->area.corridor_width_miles = (uint16_t)pdn_aprs__digits(cb->b + at + 1, len - 2);
             pdn_aprs__cbuf_cut(cb, at, len);
         }
+    } else if (r->symbol.table == '\\' && r->symbol.code == 'm' && find_braces(cb, 0, &at, &len)) {
+        /* a signpost overlay is printable ASCII, as every overlay is */
+        pdn_aprs__memlcpy(r->signpost, sizeof r->signpost, cb->b + at + 1, len - 2);
+        pdn_aprs__cbuf_cut(cb, at, len);
     }
     if (!had_extension && !pdn_aprs__rejects(c, PDN_APRS_CODE_DATA_EXTENSION_IN_COMMENT)) {
         static const char *const kinds[3] = {"PHG", "RNG", "DFS"};

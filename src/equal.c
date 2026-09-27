@@ -239,7 +239,8 @@ PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_apr
     case PDN_APRS_TYPE_NMEA: {
         const pdn_aprs_nmea *s = &a->as.nmea, *t = &b->as.nmea;
         return s->sentence_len == t->sentence_len && memcmp(s->sentence, t->sentence, s->sentence_len) == 0 &&
-               !s->has_checksum == !t->has_checksum;
+               !s->has_checksum == !t->has_checksum && s->comment_len == t->comment_len &&
+               memcmp(s->comment, t->comment, s->comment_len) == 0;
     }
     case PDN_APRS_TYPE_MAIDENHEAD_BEACON:
         return str_eq(a->as.maidenhead.locator, b->as.maidenhead.locator) &&

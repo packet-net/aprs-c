@@ -68,9 +68,8 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_status(pdn_aprs__dctx *c)
         st->has_beam = 1;
         st->beam_heading = (char)s[n - 2];
         st->beam_power = (char)s[n - 1];
+        /* the text before it is kept as sent, spaces included */
         n -= 3;
-        while (n > 0 && s[n - 1] == ' ')
-            n--;
     }
     if (!pdn_aprs__check_text(c, s, n))
         return;
@@ -114,10 +113,13 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_telemetry(pdn_aprs__dctx *c)
             ;
         if (q == p) {
             v->is_null = 1;
-        } else if (q - p >= sizeof v->text || !pdn_aprs__parse_number(s + p, q - p, 0, &v->value)) {
+        } else if (!pdn_aprs__parse_number(s + p, q - p, 0, &v->value)) {
+            /* an optional -, digits and a decimal point: no +, no spaces,
+               nothing else, and a finite number */
             pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_TELEMETRY);
             return;
-        } else {
+        } else if (q - p < sizeof v->text) {
+            /* kept as sent for identical re-encoding, when it fits */
             memcpy(v->text, s + p, q - p);
             v->text[q - p] = 0;
         }
@@ -220,41 +222,66 @@ static int nmea_char(const uint8_t *s, size_t n, int index, char *ch)
     return 1;
 }
 
-static int nmea_coord(const uint8_t *s, size_t n, int index, char pos, char neg, double *out)
+/* A coordinate (NMEA 0183 llll.ll / yyyyy.yy, read as gpsd reads it): digits
+   with an optional point and fraction, at least three digits before the
+   point, the last two of them minutes (below 60) and the rest degrees however
+   many there are; at most max degrees; and a hemisphere letter. */
+static int nmea_coord(const uint8_t *s, size_t n, int index, char pos, char neg, double max, double *out)
 {
-    double v, deg;
+    const uint8_t *f;
+    size_t fl, k, i;
+    double deg = 0, minutes, v;
     char h;
-    if (!nmea_number(s, n, index, &v) || !nmea_char(s, n, index + 1, &h) || v < 0)
+    if (!nmea_field(s, n, index, &f, &fl) || !nmea_char(s, n, index + 1, &h) || (h != pos && h != neg))
         return 0;
-    if (h != pos && h != neg)
+    for (k = 0; k < fl && A_DIGIT(f[k]); k++)
+        ;
+    if (k < 3)
         return 0;
-    deg = floor(v / 100.0);
-    *out = deg + (v - deg * 100.0) / 60.0;
-    if (h == neg)
-        *out = -*out;
+    if (k < fl) {
+        if (f[k] != '.')
+            return 0;
+        for (i = k + 1; i < fl; i++)
+            if (!A_DIGIT(f[i]))
+                return 0;
+    }
+    for (i = 0; i + 2 < k; i++)
+        deg = deg * 10 + (f[i] - '0');
+    if (!pdn_aprs__parse_number(f + k - 2, fl - (k - 2), 0, &minutes) || minutes >= 60)
+        return 0;
+    v = deg + minutes / 60.0;
+    if (!(v <= max))
+        return 0;
+    *out = h == neg ? -v : v;
     return 1;
 }
 
-static void nmea_time(const uint8_t *s, size_t n, int index, char *out)
+/* A time: exactly hhmmss (hours 00-23, minutes and seconds 00-59), then
+   optionally a point and a fraction, written HH:MM:SS with the fraction as
+   sent, less trailing zeros. Anything else leaves the time out. */
+static void nmea_time(const uint8_t *s, size_t n, int index, char *out, size_t cap)
 {
     const uint8_t *f;
-    size_t fl, i, end;
+    size_t fl, i, end = 6;
     if (!nmea_field(s, n, index, &f, &fl) || fl < 6 || pdn_aprs__digits(f, 6) < 0)
         return;
-    end = fl;
+    if ((f[0] - '0') * 10 + (f[1] - '0') > 23 || (f[2] - '0') * 10 + (f[3] - '0') > 59 ||
+        (f[4] - '0') * 10 + (f[5] - '0') > 59)
+        return;
     if (fl > 6) {
         if (f[6] != '.')
             return;
         for (i = 7; i < fl; i++)
             if (!A_DIGIT(f[i]))
                 return;
+        end = fl;
         while (end > 7 && f[end - 1] == '0')
             end--;
         if (end == 7)
             end = 6;
     }
-    if (end > 6 + 1 + 6)
-        end = 13;
+    if (end + 3 > cap)
+        return;
     out[0] = (char)f[0];
     out[1] = (char)f[1];
     out[2] = ':';
@@ -271,24 +298,40 @@ static void nmea_time(const uint8_t *s, size_t n, int index, char *out)
 PDN_APRS__PRIVATE void pdn_aprs__decode_nmea(pdn_aprs__dctx *c)
 {
     pdn_aprs_nmea *m = &c->data->as.nmea;
-    const uint8_t *s = c->info + 1;
-    size_t n = c->len - 1, body, i;
-    const uint8_t *f0;
-    size_t f0l;
+    const uint8_t *s = c->info + 1, *f;
+    size_t n = c->len - 1, body, end, alen, fl, i;
     char kind[4] = {0, 0, 0, 0}, ch;
     c->data->type = PDN_APRS_TYPE_NMEA;
     memset(m, 0, sizeof *m);
     pdn_aprs__diag(c, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_OBSOLETE_FORMAT);
-    for (i = 0; i < n; i++) {
-        if (!A_PRINT(s[i])) {
+    /* The sentence is read in order (NMEA 0183): printable ASCII with $ and *
+       reserved, up to the first * followed by two hex digits, which starts
+       its checksum. A * that is not followed by two is a reserved character. */
+    for (body = 0; body < n; body++) {
+        if (s[body] == '*') {
+            if (body + 3 <= n && hexval(s[body + 1]) >= 0 && hexval(s[body + 2]) >= 0)
+                break;
+            pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_NMEA);
+            return;
+        }
+        if (!A_PRINT(s[body]) || s[body] == '$') {
             pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_NMEA);
             return;
         }
     }
-    body = n;
-    if (n >= 3 && s[n - 3] == '*' && hexval(s[n - 2]) >= 0 && hexval(s[n - 1]) >= 0) {
-        int sum = 0, want = hexval(s[n - 2]) * 16 + hexval(s[n - 1]);
-        body = n - 3;
+    /* The address field: five upper-case letters or digits (a talker and a
+       sentence formatter, or a query), or P and three or more (proprietary),
+       and at least one field after it. */
+    for (alen = 0; alen < body && (A_UPPER(s[alen]) || A_DIGIT(s[alen])); alen++)
+        ;
+    if (alen == body || s[alen] != ',' || !(alen == 5 || (s[0] == 'P' && alen >= 4))) {
+        pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_NMEA);
+        return;
+    }
+    /* The checksum, last: the sentence ends there, and the rest is a comment. */
+    end = body;
+    if (body < n) {
+        int sum = 0, want = hexval(s[body + 1]) * 16 + hexval(s[body + 2]);
         for (i = 0; i < body; i++)
             sum ^= s[i];
         if (sum != want) {
@@ -296,34 +339,40 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_nmea(pdn_aprs__dctx *c)
             return;
         }
         m->has_checksum = 1;
+        end = body + 3;
     }
-    m->sentence_len = (uint16_t)pdn_aprs__text(m->sentence, sizeof m->sentence, s, n, 0);
-    if (nmea_field(s, body, 0, &f0, &f0l) && f0l == 5)
-        memcpy(kind, f0 + 2, 3);
+    m->sentence_len = (uint16_t)pdn_aprs__text(m->sentence, sizeof m->sentence, s, end, 0);
+    /* Only an approved address has a sentence formatter, in its last three
+       characters; a proprietary sentence is kept as text. */
+    if (alen == 5 && s[0] != 'P')
+        memcpy(kind, s + 2, 3);
     if (memcmp(kind, "RMC", 3) == 0) {
-        nmea_time(s, body, 1, m->time);
+        nmea_time(s, body, 1, m->time, sizeof m->time);
         if (nmea_char(s, body, 2, &ch) && (ch == 'A' || ch == 'V')) {
             m->has_fix = 1;
             m->fix_valid = ch == 'A';
         }
-        if (nmea_coord(s, body, 3, 'N', 'S', &m->latitude) && nmea_coord(s, body, 5, 'E', 'W', &m->longitude))
+        if (nmea_coord(s, body, 3, 'N', 'S', 90, &m->latitude) &&
+            nmea_coord(s, body, 5, 'E', 'W', 180, &m->longitude))
             m->has_position = 1;
         m->has_speed = (uint8_t)nmea_number(s, body, 7, &m->speed_knots);
         m->has_course = (uint8_t)nmea_number(s, body, 8, &m->course_degrees);
     } else if (memcmp(kind, "GGA", 3) == 0) {
-        double q;
-        nmea_time(s, body, 1, m->time);
-        if (nmea_coord(s, body, 2, 'N', 'S', &m->latitude) && nmea_coord(s, body, 4, 'E', 'W', &m->longitude))
+        nmea_time(s, body, 1, m->time, sizeof m->time);
+        if (nmea_coord(s, body, 2, 'N', 'S', 90, &m->latitude) &&
+            nmea_coord(s, body, 4, 'E', 'W', 180, &m->longitude))
             m->has_position = 1;
-        if (nmea_number(s, body, 6, &q)) {
+        /* the quality indicator is one digit, 0 for no fix */
+        if (nmea_field(s, body, 6, &f, &fl) && fl == 1 && A_DIGIT(f[0])) {
             m->has_fix = 1;
-            m->fix_valid = q != 0;
+            m->fix_valid = f[0] != '0';
         }
         m->has_altitude = (uint8_t)nmea_number(s, body, 9, &m->altitude_m);
     } else if (memcmp(kind, "GLL", 3) == 0) {
-        if (nmea_coord(s, body, 1, 'N', 'S', &m->latitude) && nmea_coord(s, body, 3, 'E', 'W', &m->longitude))
+        if (nmea_coord(s, body, 1, 'N', 'S', 90, &m->latitude) &&
+            nmea_coord(s, body, 3, 'E', 'W', 180, &m->longitude))
             m->has_position = 1;
-        nmea_time(s, body, 5, m->time);
+        nmea_time(s, body, 5, m->time, sizeof m->time);
         if (nmea_char(s, body, 6, &ch) && (ch == 'A' || ch == 'V')) {
             m->has_fix = 1;
             m->fix_valid = ch == 'A';
@@ -332,12 +381,17 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_nmea(pdn_aprs__dctx *c)
         m->has_course = (uint8_t)nmea_number(s, body, 1, &m->course_degrees);
         m->has_speed = (uint8_t)nmea_number(s, body, 5, &m->speed_knots);
     } else if (memcmp(kind, "WPL", 3) == 0) {
-        const uint8_t *w;
-        size_t wl;
-        if (nmea_coord(s, body, 1, 'N', 'S', &m->latitude) && nmea_coord(s, body, 3, 'E', 'W', &m->longitude))
+        if (nmea_coord(s, body, 1, 'N', 'S', 90, &m->latitude) &&
+            nmea_coord(s, body, 3, 'E', 'W', 180, &m->longitude))
             m->has_position = 1;
-        if (nmea_field(s, body, 5, &w, &wl))
-            pdn_aprs__memlcpy(m->waypoint, sizeof m->waypoint, w, wl);
+        if (nmea_field(s, body, 5, &f, &fl))
+            pdn_aprs__memlcpy(m->waypoint, sizeof m->waypoint, f, fl);
+    }
+    /* TinyTrack and FreeTrak send a comment after the checksum. */
+    if (end < n) {
+        if (!pdn_aprs__check_text(c, s + end, n - end))
+            return;
+        m->comment_len = (uint16_t)pdn_aprs__take_text(c, m->comment, sizeof m->comment, s + end, n - end);
     }
 }
 
@@ -353,15 +407,23 @@ static uint16_t pool_put(char *pool, size_t cap, size_t *out, const uint8_t *s, 
     return (uint16_t)len;
 }
 
-/* Splits the items of a capabilities report into cap. Returns 0 if there
-   are too many; sets *free_text if a token holds a space or control byte. */
+static int control_byte(uint8_t ch)
+{
+    return ch < 0x20 || ch == 0x7f;
+}
+
+/* Splits the items of a capabilities report into cap: at commas, and each
+   item at its first = into a token and a value. Spaces (U+0020 only) around
+   an item, a token or a value are padding; an item left empty is skipped.
+   Returns 0 if there are too many items. Sets *free_text when a token is
+   empty or holds a space or a control byte, or a value holds a control byte. */
 static int split_capabilities(const uint8_t *s, size_t n, int latin1, pdn_aprs_capabilities *cap, int *free_text)
 {
     size_t i, start = 0, out = 0;
     memset(cap, 0, sizeof *cap);
     *free_text = 0;
     for (i = 0; i <= n; i++) {
-        size_t a, b, eq, k;
+        size_t a, b, eq, te, vs, k;
         if (i < n && s[i] != ',')
             continue;
         a = start;
@@ -377,16 +439,24 @@ static int split_capabilities(const uint8_t *s, size_t n, int latin1, pdn_aprs_c
             return 0;
         for (eq = a; eq < b && s[eq] != '='; eq++)
             ;
-        for (k = a; k < eq; k++)
-            if (s[k] == ' ' || s[k] < 0x20 || s[k] == 0x7f)
+        for (te = eq; te > a && s[te - 1] == ' '; te--)
+            ;
+        if (te == a)
+            *free_text = 1;
+        for (k = a; k < te; k++)
+            if (s[k] == ' ' || control_byte(s[k]))
                 *free_text = 1;
         cap->item[cap->count].token_offset = (uint16_t)out;
-        cap->item[cap->count].token_length = pool_put(cap->text, sizeof cap->text, &out, s + a, eq - a, latin1);
+        cap->item[cap->count].token_length = pool_put(cap->text, sizeof cap->text, &out, s + a, te - a, latin1);
         if (eq < b) {
+            for (vs = eq + 1; vs < b && s[vs] == ' '; vs++)
+                ;
+            for (k = vs; k < b; k++)
+                if (control_byte(s[k]))
+                    *free_text = 1;
             cap->item[cap->count].has_value = 1;
             cap->item[cap->count].value_offset = (uint16_t)out;
-            cap->item[cap->count].value_length =
-                pool_put(cap->text, sizeof cap->text, &out, s + eq + 1, b - eq - 1, latin1);
+            cap->item[cap->count].value_length = pool_put(cap->text, sizeof cap->text, &out, s + vs, b - vs, latin1);
         }
         cap->count++;
     }
@@ -451,13 +521,22 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_query(pdn_aprs__dctx *c)
             return;
         }
         {
+            /* "Note the leading space in the latitude, as its value is
+               positive" (APRS12c ch. 15): a space only before a positive
+               value, so a space then a minus sign is not a number */
             size_t a = i, b = c1 + 1;
-            if (s[a] == ' ')
+            int spaced_negative = 0;
+            if (s[a] == ' ') {
                 a++;
-            if (b < c2 && s[b] == ' ')
+                spaced_negative |= a < c1 && s[a] == '-';
+            }
+            if (b < c2 && s[b] == ' ') {
                 b++;
+                spaced_negative |= b < c2 && s[b] == '-';
+            }
             rad = pdn_aprs__digits(s + c2 + 1, n - c2 - 1);
-            if (!pdn_aprs__parse_number(s + a, c1 - a, 0, &lat) || !pdn_aprs__parse_number(s + b, c2 - b, 0, &lon) ||
+            if (spaced_negative || !pdn_aprs__parse_number(s + a, c1 - a, 0, &lat) ||
+                !pdn_aprs__parse_number(s + b, c2 - b, 0, &lon) ||
                 rad < 0 || n - c2 - 1 != 4 || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
                 pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_GENERAL_QUERY);
                 return;
@@ -478,15 +557,20 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_third_party(pdn_aprs__dctx *c)
     pdn_aprs_header h;
     const pdn_aprs_decode_options *saved = c->opt;
     size_t at;
-    int mark;
+    int mark, k, rejected = 0;
     c->data->type = PDN_APRS_TYPE_THIRD_PARTY;
-    /* the inner header's own diagnostics belong to the inner packet */
+    /* The inner header's own diagnostics belong to the inner packet, which
+       is read leniently. A defect there that the options in force reject
+       (all of them, when strict) makes the packet invalid-third-party. */
     mark = pdn_aprs__mark(c);
     c->opt = NULL;
     at = pdn_aprs__parse_tnc2_header(c, c->info + 1, c->len - 1, &h, 1);
     c->opt = saved;
+    for (k = mark & 0xFF; at && k < c->pkt->diagnostic_count; k++)
+        if (pdn_aprs__rejects(c, c->pkt->diagnostics[k].code))
+            rejected = 1;
     pdn_aprs__rewind(c, mark);
-    if (!at) {
+    if (!at || rejected) {
         pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_THIRD_PARTY);
         return;
     }

@@ -139,6 +139,15 @@ static void dao_digits(int precision, double lat_extra, double lon_extra, char *
     }
 }
 
+/* A !DAO! datum is a letter, whose case says how A and O are written, or a
+   digit (a local datum, APRS12c ch. 5), which has no case and so carries no
+   added precision. */
+static int dao_datum_ok(const pdn_aprs_dao *d)
+{
+    return A_ALPHA(d->datum) || (A_DIGIT(d->datum) && d->precision == PDN_APRS_DAO_NONE);
+}
+#define DAO_DATUM_REFUSAL "a !DAO! datum is a letter, or a digit with no added precision"
+
 static int put_uncompressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, char dao[5])
 {
     int ldeg, gdeg, dao_prec = r->has_dao ? r->dao.precision : -1;
@@ -180,8 +189,8 @@ static int put_uncompressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, char da
     pdn_aprs__putc(e->b, r->symbol.code);
     if (r->has_dao) {
         char dc = A_TOUPPER(r->dao.datum);
-        if (!A_UPPER(dc))
-            return pdn_aprs__refuse(e, "a !DAO! datum is a letter");
+        if (!dao_datum_ok(&r->dao))
+            return pdn_aprs__refuse(e, DAO_DATUM_REFUSAL);
         if (r->dao.precision == PDN_APRS_DAO_BASE91)
             dc = (char)(dc + 32);
         dao[0] = '!';
@@ -209,6 +218,20 @@ static int t_byte(const pdn_aprs_report *r)
     if (r->has_compression)
         return 33 + ((r->compression.fix & 1) << 5) + ((r->compression.source & 3) << 3) + (r->compression.origin & 7);
     return 33 + (1 << 5) + PDN_APRS_ORIGIN_SOFTWARE;
+}
+
+/* A GGA altitude in the cs bytes, 1.002^cs feet: the nearest they can hold
+   (1 foot for anything at or below it). *exact says whether that is the
+   altitude itself; if not, a /A= that wins carries it. */
+static void put_gga_altitude(pdn_aprs__buf *b, double feet, int *exact)
+{
+    long cs = 0;
+    if (feet >= 1)
+        cs = (long)floor(log(feet) / log(1.002) + 0.5);
+    if (cs > 8280)
+        cs = 8280;
+    put_b91(b, cs, 2);
+    *exact = feet >= 1 && fabs(pow(1.002, (double)cs) - feet) <= 1e-9 * feet;
 }
 
 /* A compressed position. *alt_in_cs is set when the cs bytes hold the
@@ -256,14 +279,9 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
             pdn_aprs__putc(e->b, (int)(33 + c));
             pdn_aprs__putc(e->b, (int)(33 + s));
             pdn_aprs__putc(e->b, t_byte(r));
-        } else if (r->has_compression && r->compression.source == PDN_APRS_NMEA_GGA && r->has_altitude &&
-                   r->altitude_feet >= 1) {
-            long cs = (long)floor(log(r->altitude_feet) / log(1.002) + 0.5);
-            if (cs > 8280)
-                cs = 8280;
-            put_b91(e->b, cs, 2);
+        } else if (r->has_compression && r->compression.source == PDN_APRS_NMEA_GGA && r->has_altitude) {
+            put_gga_altitude(e->b, r->altitude_feet, alt_in_cs);
             pdn_aprs__putc(e->b, t_byte(r));
-            *alt_in_cs = fabs(pow(1.002, (double)cs) - r->altitude_feet) <= 1e-9 * r->altitude_feet;
         } else if (r->has_range && r->range_miles >= 2) {
             long s = (long)floor(log(r->range_miles / 2.0) / log(1.08) + 0.5);
             if (s > 90)
@@ -278,15 +296,10 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
             pdn_aprs__puts(e->b, " sT");
         }
     } else if (r->has_compression && r->compression.source == PDN_APRS_NMEA_GGA) {
-        long cs;
-        if (!r->has_altitude || r->altitude_feet < 1)
-            return pdn_aprs__refuse(e, "a GGA compressed position needs an altitude of at least 1 foot");
-        cs = (long)floor(log(r->altitude_feet) / log(1.002) + 0.5);
-        if (cs > 8280)
-            cs = 8280;
-        put_b91(e->b, cs, 2);
+        if (!r->has_altitude)
+            return pdn_aprs__refuse(e, "a GGA compressed position needs an altitude");
+        put_gga_altitude(e->b, r->altitude_feet, alt_in_cs);
         pdn_aprs__putc(e->b, t_byte(r));
-        *alt_in_cs = fabs(pow(1.002, (double)cs) - r->altitude_feet) <= 1e-9 * r->altitude_feet;
     } else if (r->has_course || r->has_speed) {
         long c, s;
         double spd = r->has_speed ? r->speed_knots : 0;
@@ -326,8 +339,8 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         long hund, lc, gc;
         double lx, gx;
         char a, o, dc = A_TOUPPER(r->dao.datum);
-        if (!A_UPPER(dc))
-            return pdn_aprs__refuse(e, "a !DAO! datum is a letter");
+        if (!dao_datum_ok(&r->dao))
+            return pdn_aprs__refuse(e, DAO_DATUM_REFUSAL);
         split_coord(r->latitude, 1, &deg, &hund, &lx);
         split_coord(r->longitude, 1, &deg, &hund, &gx);
         dao_digits(r->dao.precision, lx, gx, &a, &o, &lc, &gc);
@@ -535,7 +548,9 @@ static int put_comment_part(pdn_aprs__ectx *e, const pdn_aprs_report *r, int at_
             if (open == 0 && !ext_counts && starts_extension(c, n, r->symbol.table == '\\' && r->symbol.code == 'l'))
                 slash = 1;
         } else {
-            if (open < 1 && (c[0] == '`' || c[0] == '\'' || c[0] == '>' || c[0] == ']'))
+            /* status text must not start with a type code character or
+               0x1D, the obsolete telemetry (APRS12c ch. 10) */
+            if (open < 1 && (c[0] == '`' || c[0] == '\'' || c[0] == '>' || c[0] == ']' || c[0] == 0x1d))
                 slash = 1;
             if (open < 2 && n >= 4 && A_B91((uint8_t)c[0]) && A_B91((uint8_t)c[1]) && A_B91((uint8_t)c[2]) &&
                 c[3] == '}')
@@ -576,8 +591,8 @@ static int put_comment_part(pdn_aprs__ectx *e, const pdn_aprs_report *r, int at_
             for (i = 0; i < r->telemetry.analog_count; i++)
                 if (r->telemetry.analog[i] > 8280)
                     return pdn_aprs__refuse(e, "invalid base-91 telemetry");
-            if (r->telemetry.digital > 8280)
-                return pdn_aprs__refuse(e, "invalid base-91 telemetry");
+            if (r->telemetry.has_digital && r->telemetry.digital > 255)
+                return pdn_aprs__refuse(e, "base-91 telemetry has eight binary channels, 0-255");
         }
         put_telemetry(e->b, &r->telemetry);
     }
@@ -646,8 +661,14 @@ static int put_wx_field(pdn_aprs__ectx *e, char letter, const pdn_aprs_weather *
             pdn_aprs__putu(&tmp, (unsigned long)w->value[idx], 3);
         else
             pdn_aprs__putd(&tmp, w->value[idx]); /* "1.5" fits; "12.5" does not */
+        /* written exactly in three characters, the decimal point where it
+           needs one: 0.32 is ".32" */
+        if (tmp.len == 4 && s[0] == '0' && s[1] == '.') {
+            memmove(s, s + 1, 3);
+            tmp.len = 3;
+        }
         if (tmp.len != 3)
-            return pdn_aprs__refuse(e, "snowfall has no three-character form");
+            return pdn_aprs__refuse(e, "snowfall has no exact three-character form");
         pdn_aprs__putc(e->b, 's');
         pdn_aprs__put(e->b, s, 3);
         return 1;
@@ -684,8 +705,7 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const p
         }
     }
     if (w->has[PDN_APRS_WX_SNOW_24H]) {
-        if (positionless)
-            return pdn_aprs__refuse(e, "a positionless report has no snowfall field");
+        /* after the wind speed, which is always written, s is snowfall */
         if (!put_wx_field(e, 's', w, PDN_APRS_WX_SNOW_24H, 0))
             return 0;
     }
@@ -828,8 +848,8 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
             }
             if (r->has_df_bearing) {
                 const pdn_aprs_df_bearing *df = &r->df_bearing;
-                if (df->bearing_degrees > 999 || df->number > 9 || df->range > 9 || df->quality > 9)
-                    return pdn_aprs__refuse(e, "DF bearing out of range");
+                if (df->bearing_degrees > 360 || df->number > 9 || df->range > 9 || df->quality > 9)
+                    return pdn_aprs__refuse(e, "a DF bearing is 0-360 degrees, and N, R and Q one digit each");
                 pdn_aprs__putc(e->b, '/');
                 pdn_aprs__putu(e->b, df->bearing_degrees, 3);
                 pdn_aprs__putc(e->b, '/');
@@ -918,6 +938,9 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         if (!(r->symbol.table == '\\' && r->symbol.code == 'm') || n < 1 || n > 3 || strchr(r->signpost, '{') ||
             strchr(r->signpost, '}'))
             return pdn_aprs__refuse(e, "a signpost is 1-3 characters with the signpost symbol");
+        for (i = 0; i < n; i++)
+            if (!A_PRINT(r->signpost[i]))
+                return pdn_aprs__refuse(e, "a signpost overlay is printable ASCII");
         pdn_aprs__putc(e->b, '{');
         pdn_aprs__puts(e->b, r->signpost);
         pdn_aprs__putc(e->b, '}');
@@ -1159,6 +1182,8 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     }
     if (r->has_dao) {
         char dc = A_TOUPPER(r->dao.datum);
+        if (!dao_datum_ok(&r->dao))
+            return pdn_aprs__refuse(e, DAO_DATUM_REFUSAL);
         if (r->dao.precision == PDN_APRS_DAO_BASE91 && A_UPPER(dc))
             dc = (char)(dc + 32);
         pdn_aprs__putc(e->b, '!');
@@ -1216,10 +1241,12 @@ static int encode_message(pdn_aprs__ectx *e, const pdn_aprs_data *d)
     if (memchr(m->text, '{', m->text_len))
         return pdn_aprs__refuse(e, "message text cannot contain {");
     chars = utf8_chars(m->text, m->text_len);
+    if (d->type != PDN_APRS_TYPE_MESSAGE && m->has_reply_ack)
+        return pdn_aprs__refuse(e, "bulletins are not acknowledged, so they take no reply-ack");
     if (d->type == PDN_APRS_TYPE_BULLETIN) {
         const char *a = m->addressee;
         size_t n = strlen(a);
-        if (!(n >= 4 && memcmp(a, "BLN", 3) == 0 && A_ALNUM(a[3]) && (A_DIGIT(a[3]) || n == 4)))
+        if (!(n >= 4 && memcmp(a, "BLN", 3) == 0 && (A_DIGIT(a[3]) || (A_UPPER(a[3]) && n == 4))))
             return pdn_aprs__refuse(e, "a bulletin is addressed BLN and a digit (and group), or BLN and a letter");
         if (chars > 67)
             return pdn_aprs__refuse(e, "bulletin text is at most 67 characters");
@@ -1243,6 +1270,45 @@ static int encode_message(pdn_aprs__ectx *e, const pdn_aprs_data *d)
             pdn_aprs__putc(e->b, '}');
             pdn_aprs__puts(e->b, m->reply_ack);
         }
+    }
+    return 1;
+}
+
+/* A directed query: the target straight after a type the spec defines, an
+   APRSH target padded to 9 characters, and after one space for any other
+   type, which has no fixed length (?FOO N0QBF). */
+static int encode_directed_query(pdn_aprs__ectx *e, const pdn_aprs_directed_query *q)
+{
+    static const char *const defined[] = {"APRSD", "APRSH", "APRSM", "APRSO", "APRSP", "APRSS", "APRST", "PING?"};
+    size_t tl = strlen(q->target), i;
+    int known = 0;
+    if (!addressee_ok(q->addressee))
+        return pdn_aprs__refuse(e, "an addressee is 1-9 printable characters without spaces or colons");
+    for (i = 0; i < sizeof defined / sizeof defined[0]; i++)
+        if (strcmp(q->query_type, defined[i]) == 0)
+            known = 1;
+    if (!known) {
+        size_t n = strlen(q->query_type);
+        if (n == 0)
+            return pdn_aprs__refuse(e, "a query needs a type");
+        for (i = 0; i < n; i++)
+            if (!A_UPPER(q->query_type[i]))
+                return pdn_aprs__refuse(e, "a query type is upper-case letters");
+    }
+    if (tl > 9)
+        return pdn_aprs__refuse(e, "a query target is one callsign of 1-9 letters, digits or -");
+    for (i = 0; i < tl; i++)
+        if (!(A_ALNUM(q->target[i]) || q->target[i] == '-'))
+            return pdn_aprs__refuse(e, "a query target is one callsign of 1-9 letters, digits or -");
+    put_addressee(e->b, q->addressee);
+    pdn_aprs__putc(e->b, '?');
+    pdn_aprs__puts(e->b, q->query_type);
+    if (tl) {
+        if (!known)
+            pdn_aprs__putc(e->b, ' ');
+        pdn_aprs__puts(e->b, q->target);
+        if (strcmp(q->query_type, "APRSH") == 0)
+            pdn_aprs__put(e->b, "         ", 9 - tl);
     }
     return 1;
 }
@@ -1397,10 +1463,10 @@ static int encode_status(pdn_aprs__ectx *e, const pdn_aprs_status *s)
         if (s->text_len || s->has_beam)
             pdn_aprs__putc(e->b, ' ');
     }
+    /* the text is written as it is, spaces included, and a beam heading
+       straight after it */
     pdn_aprs__put(e->b, s->text, s->text_len);
     if (s->has_beam) {
-        if (s->text_len)
-            pdn_aprs__putc(e->b, ' ');
         pdn_aprs__putc(e->b, '^');
         pdn_aprs__putc(e->b, s->beam_heading);
         pdn_aprs__putc(e->b, s->beam_power);
@@ -1433,6 +1499,8 @@ static int encode_positionless_weather(pdn_aprs__ectx *e, const pdn_aprs_weather
 static int encode_nmea(pdn_aprs__ectx *e, const pdn_aprs_nmea *m)
 {
     size_t n = m->sentence_len, i;
+    if (n >= sizeof m->sentence || m->comment_len >= sizeof m->comment)
+        return pdn_aprs__refuse(e, "NMEA sentence or comment too long");
     for (i = 0; i < n; i++)
         if (!A_PRINT(m->sentence[i]))
             return pdn_aprs__refuse(e, "an NMEA sentence is printable ASCII");
@@ -1449,8 +1517,17 @@ static int encode_nmea(pdn_aprs__ectx *e, const pdn_aprs_nmea *m)
         if (sum != want)
             return pdn_aprs__refuse(e, "the NMEA checksum does not match");
     }
+    if (m->comment_len) {
+        /* the sentence ends at its checksum, so only a checksum can end it
+           before a comment */
+        if (!m->has_checksum)
+            return pdn_aprs__refuse(e, "a comment after an NMEA sentence needs the sentence's checksum");
+        if (!valid_text(m->comment, m->comment_len))
+            return pdn_aprs__refuse(e, "the comment has a line break or is not UTF-8");
+    }
     pdn_aprs__putc(e->b, '$');
     pdn_aprs__put(e->b, m->sentence, n);
+    pdn_aprs__put(e->b, m->comment, m->comment_len);
     return 1;
 }
 
@@ -1464,23 +1541,45 @@ static int encode_capabilities(pdn_aprs__ectx *e, const pdn_aprs_capabilities *c
         const char *t = c->text + c->item[i].token_offset;
         size_t tl = c->item[i].token_length, k;
         if (tl == 0)
-            return pdn_aprs__refuse(e, "an empty capability");
+            return pdn_aprs__refuse(e, "an empty capability token");
         for (k = 0; k < tl; k++)
             if (t[k] == ',' || t[k] == '=' || t[k] == ' ' || (uint8_t)t[k] < 0x20 || t[k] == 0x7f)
-                return pdn_aprs__refuse(e, "a capability token has no spaces, commas or =");
+                return pdn_aprs__refuse(e, "a capability token has no spaces, control characters, commas or =");
         if (i)
             pdn_aprs__putc(e->b, ',');
         pdn_aprs__put(e->b, t, tl);
         if (c->item[i].has_value) {
             const char *v = c->text + c->item[i].value_offset;
             size_t vl = c->item[i].value_length;
-            if (memchr(v, ',', vl) || has_line_break(v, vl))
+            /* a control character would read back as free text, and a space
+               at either end as padding */
+            if (memchr(v, ',', vl))
                 return pdn_aprs__refuse(e, "a capability value has no commas");
+            for (k = 0; k < vl; k++)
+                if ((uint8_t)v[k] < 0x20 || v[k] == 0x7f)
+                    return pdn_aprs__refuse(e, "a capability value has no control characters");
+            if (vl > 0 && (v[0] == ' ' || v[vl - 1] == ' '))
+                return pdn_aprs__refuse(e, "a capability value cannot start or end with a space");
             pdn_aprs__putc(e->b, '=');
             pdn_aprs__put(e->b, v, vl);
         }
     }
     return 1;
+}
+
+/* 1 if the header inside a third-party packet decodes with no diagnostic:
+   one with a defect a decoder tolerates (several used markers, an empty path
+   entry) is written back only as it came, defect and all. */
+static int third_party_header_clean(const pdn_aprs_third_party *t)
+{
+    pdn_aprs_packet p;
+    pdn_aprs__dctx c;
+    size_t n = t->len <= PDN_APRS_MAX_INFO ? t->len : PDN_APRS_MAX_INFO;
+    memset(&c, 0, sizeof c);
+    p.diagnostic_count = 0;
+    c.pkt = &p;
+    c.data = &p.data;
+    return pdn_aprs__parse_tnc2_header(&c, t->packet, n, &p.header, 1) != 0 && p.diagnostic_count == 0;
 }
 
 PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_data *d)
@@ -1504,18 +1603,8 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_da
     case PDN_APRS_TYPE_TELEMETRY_COEFFICIENTS:
     case PDN_APRS_TYPE_TELEMETRY_BITS:
         return encode_meta(e, d);
-    case PDN_APRS_TYPE_DIRECTED_QUERY: {
-        const pdn_aprs_directed_query *q = &d->as.directed_query;
-        if (!addressee_ok(q->addressee))
-            return pdn_aprs__refuse(e, "an addressee is 1-9 printable characters without spaces or colons");
-        if (!q->query_type[0] || strchr(q->query_type, ' ') || strchr(q->target, ' ') || strlen(q->target) > 9)
-            return pdn_aprs__refuse(e, "invalid query");
-        put_addressee(e->b, q->addressee);
-        pdn_aprs__putc(e->b, '?');
-        pdn_aprs__puts(e->b, q->query_type);
-        pdn_aprs__puts(e->b, q->target);
-        return 1;
-    }
+    case PDN_APRS_TYPE_DIRECTED_QUERY:
+        return encode_directed_query(e, &d->as.directed_query);
     case PDN_APRS_TYPE_STATUS:
         return encode_status(e, &d->as.status);
     case PDN_APRS_TYPE_TELEMETRY:
@@ -1563,7 +1652,10 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_da
             if (!finite_number(q->latitude) || !finite_number(q->longitude) || q->latitude < -90 || q->latitude > 90 ||
                 q->longitude < -180 || q->longitude > 180 || q->radius_miles > 9999)
                 return pdn_aprs__refuse(e, "footprint out of range");
-            pdn_aprs__putc(e->b, ' ');
+            /* the leading space marks a positive latitude; never before a
+               minus sign (APRS12c ch. 15) */
+            if (!(q->latitude < 0))
+                pdn_aprs__putc(e->b, ' ');
             pdn_aprs__putd(e->b, q->latitude);
             pdn_aprs__putc(e->b, ',');
             pdn_aprs__putd(e->b, q->longitude);
@@ -1575,6 +1667,9 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_da
     case PDN_APRS_TYPE_CAPABILITIES:
         return encode_capabilities(e, &d->as.capabilities);
     case PDN_APRS_TYPE_THIRD_PARTY:
+        if (!third_party_header_clean(&d->as.third_party))
+            return pdn_aprs__refuse(e, "the header inside the third-party packet has a defect, which is part of its "
+                                       "data, so no clean form reproduces it");
         pdn_aprs__putc(e->b, '}');
         pdn_aprs__put(e->b, d->as.third_party.packet,
                       d->as.third_party.len <= PDN_APRS_MAX_INFO ? d->as.third_party.len : PDN_APRS_MAX_INFO);
