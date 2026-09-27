@@ -99,8 +99,12 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_telemetry(pdn_aprs__dctx *c)
     } else {
         for (q = p; q < n && A_ALNUM(s[q]); q++)
             ;
-        if (q == p || q >= n || s[q] != ',' || q - p >= sizeof t->sequence) {
+        if (q == p || q >= n || s[q] != ',') {
             pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_TELEMETRY);
+            return;
+        }
+        if (q - p >= sizeof t->sequence) {
+            pdn_aprs__overflow(c);
             return;
         }
         memcpy(t->sequence, s + p, q - p);
@@ -170,7 +174,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_raw_weather(pdn_aprs__dctx *c, int forma
         }
     }
     w->format = (uint8_t)format;
-    w->data_len = (uint16_t)pdn_aprs__text(w->data, sizeof w->data, c->info + at, c->len - at, 0);
+    w->data_len = (uint16_t)pdn_aprs__take(c, w->data, sizeof w->data, c->info + at, c->len - at, 0);
 }
 
 /* ---- NMEA ---- */
@@ -341,7 +345,9 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_nmea(pdn_aprs__dctx *c)
         m->has_checksum = 1;
         end = body + 3;
     }
-    m->sentence_len = (uint16_t)pdn_aprs__text(m->sentence, sizeof m->sentence, s, end, 0);
+    m->sentence_len = (uint16_t)pdn_aprs__take(c, m->sentence, sizeof m->sentence, s, end, 0);
+    if (c->too_long)
+        return;
     /* Only an approved address has a sentence formatter, in its last three
        characters; a proprietary sentence is kept as text. */
     if (alen == 5 && s[0] != 'P')
@@ -397,13 +403,20 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_nmea(pdn_aprs__dctx *c)
 
 /* ---- capabilities ---- */
 
-/* Appends text to a pool of NUL-terminated strings, never past cap. */
-static uint16_t pool_put(char *pool, size_t cap, size_t *out, const uint8_t *s, size_t n, int latin1)
+/* Appends text to a pool of NUL-terminated strings, never past cap; sets
+   *full if it does not fit. */
+static uint16_t pool_put(char *pool, size_t cap, size_t *out, const uint8_t *s, size_t n, int latin1, int *full)
 {
-    size_t len = *out < cap ? pdn_aprs__text(pool + *out, cap - *out, s, n, latin1) : 0;
+    size_t need = n, i, len;
+    if (latin1)
+        for (i = 0; i < n; i++)
+            need += s[i] >= 0x80;
+    if (*out + need >= cap) {
+        *full = 1;
+        return 0;
+    }
+    len = pdn_aprs__text(pool + *out, cap - *out, s, n, latin1);
     *out += len + 1;
-    if (*out > cap)
-        *out = cap;
     return (uint16_t)len;
 }
 
@@ -417,7 +430,8 @@ static int control_byte(uint8_t ch)
    an item, a token or a value are padding; an item left empty is skipped.
    Returns 0 if there are too many items. Sets *free_text when a token is
    empty or holds a space or a control byte, or a value holds a control byte. */
-static int split_capabilities(const uint8_t *s, size_t n, int latin1, pdn_aprs_capabilities *cap, int *free_text)
+static int split_capabilities(const uint8_t *s, size_t n, int latin1, pdn_aprs_capabilities *cap, int *free_text,
+                              int *full)
 {
     size_t i, start = 0, out = 0;
     memset(cap, 0, sizeof *cap);
@@ -447,7 +461,7 @@ static int split_capabilities(const uint8_t *s, size_t n, int latin1, pdn_aprs_c
             if (s[k] == ' ' || control_byte(s[k]))
                 *free_text = 1;
         cap->item[cap->count].token_offset = (uint16_t)out;
-        cap->item[cap->count].token_length = pool_put(cap->text, sizeof cap->text, &out, s + a, te - a, latin1);
+        cap->item[cap->count].token_length = pool_put(cap->text, sizeof cap->text, &out, s + a, te - a, latin1, full);
         if (eq < b) {
             for (vs = eq + 1; vs < b && s[vs] == ' '; vs++)
                 ;
@@ -456,7 +470,7 @@ static int split_capabilities(const uint8_t *s, size_t n, int latin1, pdn_aprs_c
                     *free_text = 1;
             cap->item[cap->count].has_value = 1;
             cap->item[cap->count].value_offset = (uint16_t)out;
-            cap->item[cap->count].value_length = pool_put(cap->text, sizeof cap->text, &out, s + vs, b - vs, latin1);
+            cap->item[cap->count].value_length = pool_put(cap->text, sizeof cap->text, &out, s + vs, b - vs, latin1, full);
         }
         cap->count++;
     }
@@ -468,9 +482,9 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_capabilities(pdn_aprs__dctx *c)
     pdn_aprs_capabilities *cap = &c->data->as.capabilities;
     const uint8_t *s = c->info + 1;
     size_t n = c->len - 1;
-    int free_text = 0;
+    int free_text = 0, full = 0;
     c->data->type = PDN_APRS_TYPE_CAPABILITIES;
-    if (!split_capabilities(s, n, 0, cap, &free_text) || cap->count == 0) {
+    if (!split_capabilities(s, n, 0, cap, &free_text, &full) || cap->count == 0) {
         pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_CAPABILITIES);
         return;
     }
@@ -478,7 +492,11 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_capabilities(pdn_aprs__dctx *c)
     if (!pdn_aprs__check_text(c, s, n))
         return;
     if (c->latin1)
-        split_capabilities(s, n, 1, cap, &free_text);
+        split_capabilities(s, n, 1, cap, &free_text, &full);
+    if (full) {
+        pdn_aprs__overflow(c);
+        return;
+    }
     if (free_text && !pdn_aprs__tolerate(c, PDN_APRS_CODE_FREE_TEXT_CAPABILITIES))
         return;
 }
@@ -494,8 +512,12 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_query(pdn_aprs__dctx *c)
     memset(q, 0, sizeof *q);
     for (i = 1; i < n && s[i] != '?'; i++)
         ;
-    if (i >= n || i == 1 || i - 1 >= sizeof q->query_type) {
+    if (i >= n || i == 1) {
         pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_GENERAL_QUERY);
+        return;
+    }
+    if (i - 1 >= sizeof q->query_type) {
+        pdn_aprs__overflow(c);
         return;
     }
     for (k = 1; k < i; k++) {
@@ -574,6 +596,10 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_third_party(pdn_aprs__dctx *c)
         pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_THIRD_PARTY);
         return;
     }
+    if (c->len - 1 > sizeof t->packet) {
+        pdn_aprs__overflow(c);
+        return;
+    }
     t->len = (uint16_t)(c->len - 1);
     memcpy(t->packet, c->info + 1, c->len - 1);
 }
@@ -591,6 +617,10 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_user_defined(pdn_aprs__dctx *c)
     }
     u->user_id = (char)c->info[1];
     u->packet_type = (char)c->info[2];
+    if (c->len - 3 > sizeof u->data) {
+        pdn_aprs__overflow(c);
+        return;
+    }
     u->data_len = (uint16_t)(c->len - 3);
     memcpy(u->data, c->info + 3, c->len - 3);
 }

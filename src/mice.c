@@ -137,7 +137,6 @@ static int locator_at(const uint8_t *s, size_t n, size_t *len)
 PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
 {
     pdn_aprs_report *r = &c->data->as.report;
-    uint8_t stripped[PDN_APRS_MAX_INFO];
     size_t n = 0, i, tl;
     const uint8_t *s, *t;
     int msg = 0, amb = 0, west = 0, lon100 = 0, had_ext = 0;
@@ -233,13 +232,20 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
     r->symbol.code = (char)s[7];
     r->symbol.table = (char)s[8];
 
-    /* the status text, less any 0xFF padding (UAP 5.10) */
-    for (i = 9; i < c->len; i++)
-        if (s[i] != 0xFF)
-            stripped[n++] = s[i];
+    /* the status text, less any 0xFF padding (UAP 5.10), in the comment's
+       working copy */
+    for (i = 9; i < c->len; i++) {
+        if (s[i] == 0xFF)
+            continue;
+        if (n == sizeof cb.b) {
+            pdn_aprs__overflow(c);
+            return;
+        }
+        cb.b[n++] = s[i];
+    }
     if (n != c->len - 9 && !pdn_aprs__tolerate(c, PDN_APRS_CODE_KENWOOD_FF_PADDING))
         return;
-    t = stripped;
+    t = cb.b;
     tl = n;
     if (tl >= 6 && t[0] == 0x1d) {
         /* obsolete Mic-E telemetry (APRS12c ch. 10): five binary channels */
@@ -302,7 +308,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
             tl -= e;
         }
     }
-    pdn_aprs__cbuf_set(&cb, t, tl);
+    pdn_aprs__cbuf_set(c, &cb, t, tl);
     if (!r->has_altitude) {
         /* an altitude later in the text: the first xxx} */
         size_t k;

@@ -81,7 +81,7 @@ comment: Mobile
 
 The shape of the API:
 
-- `pdn_aprs_decode_tnc2()`, `pdn_aprs_decode_ax25()` and `pdn_aprs_decode_info()` fill a `pdn_aprs_packet`. They return `PDN_APRS_OK`, or `PDN_APRS_ERR_HEADER` when the header is unusable (the packet's diagnostics still say why), or `PDN_APRS_ERR_TOO_LONG` for an information field over 512 bytes, which nothing valid has.
+- `pdn_aprs_decode_tnc2()`, `pdn_aprs_decode_ax25()` and `pdn_aprs_decode_info()` fill a `pdn_aprs_packet`. They return `PDN_APRS_OK`, or `PDN_APRS_ERR_HEADER` when the header is unusable (the packet's diagnostics still say why), or `PDN_APRS_ERR_TOO_LONG` for an information field over 512 bytes, which nothing on the air or on APRS-IS has. `pdn_aprs_decode_written()` reads back a field the encoder wrote, which can be longer (below).
 - `packet.header` has the source, destination, path (each entry with its used flag) and the index of any APRS-IS q-construct.
 - `packet.data.type` says which member of the `packet.data.as` union to read. Positions, Mic-E, objects and items share `as.report`; messages, bulletins and NWS bulletins `as.message`; the telemetry metadata types `as.meta`; and so on, one struct per kind.
 - Optional fields have a `has_` flag, or are an empty string. Numbers are in the units APRS sends (`speed_knots`, `altitude_feet`, `temperature_f`), as the vectors' neutral form names them.
@@ -225,7 +225,7 @@ The library was written to be added to the source tree of a program like LinBPQ/
 
 **Names.** Every public function, type and macro starts `pdn_aprs_` or `PDN_APRS_`, so nothing collides with a program's own APRS code. Internal functions are `static`, and the internal macros are undefined at the end of `pdn_aprs.c`, so it can even be `#include`d into another file.
 
-**Memory.** Nothing is allocated. You own every struct and buffer. A `pdn_aprs_packet` is about 3.4 KB and a `pdn_aprs_data` about 2.6 KB; keep them static, in your own structures, or on a stack with room. Measured over the vectors and a fuzzing corpus on x86-64, decoding uses up to about 13 KB of stack, and encoding or building up to about 20 KB, most of it the decode the encoder does to check its own output. Outputs never go past the capacity you pass; an information field over 512 bytes is refused before anything is copied.
+**Memory.** Nothing is allocated. You own every struct and buffer. A `pdn_aprs_packet` is about 3.4 KB and a `pdn_aprs_data` about 2.6 KB; keep them static, in your own structures, or on a stack with room. Measured over the vectors and a fuzzing corpus on x86-64, decoding uses up to about 13 KB of stack, and encoding or building up to about 20 KB, most of it the decode the encoder does to check its own output. Outputs never go past the capacity you pass. The decoder refuses an information field over 512 bytes before anything is copied; the encoder sets no limit but the buffer you give it, since text received as Latin-1 is written back as UTF-8, up to twice as long.
 
 **Threads.** There is no global mutable state. Every function is reentrant and can run on any number of threads at once, as long as each call has its own packet and buffers. The device table is read-only.
 

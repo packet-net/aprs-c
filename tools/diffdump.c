@@ -74,7 +74,7 @@ static const char *reencode(const uint8_t *line, size_t len, const jval *lenient
         int rc, clean = 1, eq;
         if (p->data.type == PDN_APRS_TYPE_MIC_E)
             snprintf(h.destination, sizeof h.destination, "%s", enc.destination);
-        rc = pdn_aprs_decode_info(&h, buf, (size_t)n, o, &again_pkt);
+        rc = pdn_aprs_decode_written(&h, buf, (size_t)n, o, &again_pkt);
         again = neutral_result(&again_pkt, rc, o);
         for (i = 0; i < again_pkt.diagnostic_count; i++)
             if (again_pkt.diagnostics[i].severity != PDN_APRS_SEVERITY_INFO)

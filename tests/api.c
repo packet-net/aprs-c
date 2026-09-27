@@ -143,6 +143,43 @@ static void test_encoding(void)
     /* refusals say why */
     d.as.report.latitude = 91;
     CHECK(pdn_aprs_encode_info(&d, NULL, frame, sizeof frame, &enc) == PDN_APRS_ERR_REFUSED && enc.reason != NULL);
+
+    /* no size limit: Latin-1 text is written back as UTF-8, longer than the
+       decoder takes off the air, and pdn_aprs_decode_written reads it */
+    {
+        static char in[PDN_APRS_MAX_INFO + 16];
+        static uint8_t out[3 * PDN_APRS_MAX_INFO];
+        static char line[3 * PDN_APRS_MAX_INFO];
+        size_t k;
+        memcpy(in, "N0CALL>APZ001:>", 15);
+        for (k = 15; k < 15 + PDN_APRS_MAX_INFO - 1; k++)
+            in[k] = '\xE9';
+        CHECK(pdn_aprs_decode_tnc2(in, 15 + PDN_APRS_MAX_INFO - 1, NULL, &pkt) == PDN_APRS_OK);
+        d = pkt.data;
+        n = pdn_aprs_encode_info(&d, NULL, out, sizeof out, &enc);
+        CHECK(n == 1 + 2 * (PDN_APRS_MAX_INFO - 1) && out[1] == 0xC3 && out[2] == 0xA9);
+        CHECK(pdn_aprs_encode_info(&d, NULL, out, (size_t)n - 1, &enc) == PDN_APRS_ERR_BUFFER);
+        CHECK(pdn_aprs_decode_info(NULL, out, (size_t)n, NULL, &pkt2) == PDN_APRS_ERR_TOO_LONG);
+        CHECK(pdn_aprs_decode_written(NULL, out, (size_t)n, NULL, &pkt2) == PDN_APRS_OK && pkt2.info_len == 0 &&
+              pkt2.diagnostic_count == 0 && pkt2.data.as.status.text_len == d.as.status.text_len &&
+              memcmp(pkt2.data.as.status.text, d.as.status.text, d.as.status.text_len) == 0);
+        n = pdn_aprs_encode_tnc2(&pkt.header, &d, NULL, line, sizeof line, &enc);
+        CHECK(n == 14 + 1 + 2 * (PDN_APRS_MAX_INFO - 1) && memcmp(line, "N0CALL>APZ001:>\xC3\xA9", 17) == 0 &&
+              line[n] == 0);
+        CHECK(pdn_aprs_encode_tnc2(&pkt.header, &d, NULL, line, (size_t)n - 1, &enc) == PDN_APRS_ERR_BUFFER);
+        /* a field the packet's data cannot hold */
+        memset(out, 'x', sizeof out);
+        out[0] = '>';
+        CHECK(pdn_aprs_decode_written(NULL, out, sizeof out, NULL, &pkt2) == PDN_APRS_ERR_TOO_LONG &&
+              pkt2.data.type == PDN_APRS_TYPE_UNRECOGNIZED);
+        memcpy(out, "}N0CALL>APZ001:>", 16);
+        CHECK(pdn_aprs_decode_written(NULL, out, sizeof out, NULL, &pkt2) == PDN_APRS_ERR_TOO_LONG);
+        CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/]hi") == PDN_APRS_OK && pkt.data.type == PDN_APRS_TYPE_MIC_E);
+        memcpy(out, "`(_fn\"Oj/", 9);
+        CHECK(pdn_aprs_decode_written(&pkt.header, out, sizeof out, NULL, &pkt2) == PDN_APRS_ERR_TOO_LONG);
+        CHECK(pdn_aprs_decode_written(&pkt.header, out, 600, NULL, &pkt2) == PDN_APRS_OK &&
+              pkt2.data.type == PDN_APRS_TYPE_MIC_E && pkt2.data.as.report.comment_len == 591);
+    }
 }
 
 static void test_builders(void)

@@ -329,7 +329,8 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_positionless_weather(pdn_aprs__dctx *c)
             !pdn_aprs__tolerate(c, PDN_APRS_CODE_INVALID_TIMESTAMP))
             return;
     }
-    pdn_aprs__cbuf_set(&cb, c->info + 9, c->len - 9);
+    if (!pdn_aprs__cbuf_set(c, &cb, c->info + 9, c->len - 9))
+        return;
     pdn_aprs__decode_weather_fields(c, &cb, &wr->weather, 0, 0, NULL, wr->comment, sizeof wr->comment,
                                     &wr->comment_len);
 }

@@ -48,9 +48,32 @@ PDN_APRS__PRIVATE int pdn_aprs__check_text(pdn_aprs__dctx *c, const uint8_t *s, 
     return 1;
 }
 
+PDN_APRS__PRIVATE int pdn_aprs__overflow(pdn_aprs__dctx *c)
+{
+    c->too_long = 1;
+    c->failed = 1;
+    return 0;
+}
+
+PDN_APRS__PRIVATE size_t pdn_aprs__take(pdn_aprs__dctx *c, char *dst, size_t cap, const uint8_t *s, size_t n,
+                                        int latin1)
+{
+    size_t need = n, i;
+    if (latin1)
+        for (i = 0; i < n; i++)
+            need += s[i] >= 0x80;
+    if (need >= cap) {
+        pdn_aprs__overflow(c);
+        if (cap)
+            dst[0] = 0;
+        return 0;
+    }
+    return pdn_aprs__text(dst, cap, s, n, latin1);
+}
+
 PDN_APRS__PRIVATE size_t pdn_aprs__take_text(pdn_aprs__dctx *c, char *dst, size_t cap, const uint8_t *s, size_t n)
 {
-    return pdn_aprs__text(dst, cap, s, n, c->latin1);
+    return pdn_aprs__take(c, dst, cap, s, n, c->latin1);
 }
 
 PDN_APRS__PRIVATE int pdn_aprs__mark(pdn_aprs__dctx *c)
@@ -378,25 +401,37 @@ static void packet_reset(pdn_aprs_packet *p)
     p->header.q_construct = -1;
 }
 
+/* Decodes the information field into the packet, keeping a copy of it
+   (keep), or not, in which case it may be longer than PDN_APRS_MAX_INFO. */
 static int decode_info_into(pdn_aprs_packet *packet, const pdn_aprs_decode_options *options, const uint8_t *info,
-                            size_t len)
+                            size_t len, int keep)
 {
     pdn_aprs__dctx c;
-    if (len > PDN_APRS_MAX_INFO) {
+    uint8_t mark = packet->diagnostic_count;
+    if (keep && len > PDN_APRS_MAX_INFO) {
         packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
         packet->data.reason = PDN_APRS_REASON_MALFORMED;
         return PDN_APRS_ERR_TOO_LONG;
     }
-    memcpy(packet->info, info, len);
-    packet->info_len = (uint16_t)len;
+    if (keep) {
+        memcpy(packet->info, info, len);
+        packet->info_len = (uint16_t)len;
+    }
     memset(&c, 0, sizeof c);
     c.opt = options;
     c.pkt = packet;
     c.data = &packet->data;
-    c.info = packet->info;
+    c.info = keep ? packet->info : info;
     c.len = len;
     c.dest = packet->header.destination;
     pdn_aprs__decode_field(&c);
+    if (c.too_long) {
+        memset(&packet->data, 0, sizeof packet->data);
+        packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
+        packet->data.reason = PDN_APRS_REASON_MALFORMED;
+        packet->diagnostic_count = mark;
+        return PDN_APRS_ERR_TOO_LONG;
+    }
     return PDN_APRS_OK;
 }
 
@@ -420,11 +455,11 @@ int pdn_aprs_decode_tnc2(const void *line, size_t len, const pdn_aprs_decode_opt
         return PDN_APRS_ERR_HEADER;
     }
     packet->header_ok = 1;
-    return decode_info_into(packet, options, s + at, len - at);
+    return decode_info_into(packet, options, s + at, len - at, 1);
 }
 
-int pdn_aprs_decode_info(const pdn_aprs_header *header, const void *info, size_t len,
-                         const pdn_aprs_decode_options *options, pdn_aprs_packet *packet)
+static int decode_field_with(const pdn_aprs_header *header, const void *info, size_t len,
+                             const pdn_aprs_decode_options *options, pdn_aprs_packet *packet, int keep)
 {
     if (!packet || (!info && len))
         return PDN_APRS_ERR_ARGUMENT;
@@ -445,7 +480,19 @@ int pdn_aprs_decode_info(const pdn_aprs_header *header, const void *info, size_t
     if (packet->header.q_construct >= (int)packet->header.path_count)
         packet->header.q_construct = -1;
     packet->header_ok = 1;
-    return decode_info_into(packet, options, (const uint8_t *)info, len);
+    return decode_info_into(packet, options, (const uint8_t *)info, len, keep);
+}
+
+int pdn_aprs_decode_info(const pdn_aprs_header *header, const void *info, size_t len,
+                         const pdn_aprs_decode_options *options, pdn_aprs_packet *packet)
+{
+    return decode_field_with(header, info, len, options, packet, 1);
+}
+
+int pdn_aprs_decode_written(const pdn_aprs_header *header, const void *info, size_t len,
+                            const pdn_aprs_decode_options *options, pdn_aprs_packet *packet)
+{
+    return decode_field_with(header, info, len, options, packet, 0);
 }
 
 int pdn_aprs_decode_third_party(const pdn_aprs_data *outer, const pdn_aprs_decode_options *options,
@@ -469,7 +516,7 @@ int pdn_aprs_decode_third_party(const pdn_aprs_data *outer, const pdn_aprs_decod
         return PDN_APRS_ERR_HEADER;
     }
     inner->header_ok = 1;
-    return decode_info_into(inner, options, t->packet + at, t->len - at);
+    return decode_info_into(inner, options, t->packet + at, t->len - at, 1);
 }
 
 /* ---- AX.25 ---- */
@@ -572,5 +619,5 @@ int pdn_aprs_decode_ax25(const void *frame, size_t len, const pdn_aprs_decode_op
         return PDN_APRS_ERR_HEADER;
     packet->header_ok = 1;
     packet->data.reason = 0;
-    return decode_info_into(packet, options, f + at + 2, len - at - 2);
+    return decode_info_into(packet, options, f + at + 2, len - at - 2, 1);
 }

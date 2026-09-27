@@ -96,6 +96,7 @@ typedef struct pdn_aprs__dctx {
     size_t len;
     int latin1;          /* the text being taken is not UTF-8 and is read as Latin-1 */
     int failed;          /* an error stopped decoding */
+    int too_long;        /* a part of the field is longer than the packet holds */
     const char *dest;    /* the destination address, for Mic-E */
 } pdn_aprs__dctx;
 
@@ -112,6 +113,14 @@ PDN_APRS__PRIVATE int pdn_aprs__tolerate(pdn_aprs__dctx *c, int code);
 PDN_APRS__PRIVATE int pdn_aprs__check_text(pdn_aprs__dctx *c, const uint8_t *s, size_t n);
 /* Copies text from the field into dst, honouring the field's encoding. */
 PDN_APRS__PRIVATE size_t pdn_aprs__take_text(pdn_aprs__dctx *c, char *dst, size_t cap, const uint8_t *s, size_t n);
+/* The same with the encoding given; both mark the field too long (see
+   pdn_aprs__overflow) rather than cut the text short. */
+PDN_APRS__PRIVATE size_t pdn_aprs__take(pdn_aprs__dctx *c, char *dst, size_t cap, const uint8_t *s, size_t n,
+                                        int latin1);
+/* A part of the field is longer than the packet can hold, which only a field
+   longer than PDN_APRS_MAX_INFO can be (pdn_aprs_decode_written): decoding
+   stops, and the result is PDN_APRS_ERR_TOO_LONG. Returns 0. */
+PDN_APRS__PRIVATE int pdn_aprs__overflow(pdn_aprs__dctx *c);
 
 /* Diagnostic-count checkpoints, for trial decodes. */
 PDN_APRS__PRIVATE int pdn_aprs__mark(pdn_aprs__dctx *c);
@@ -144,13 +153,16 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_test(pdn_aprs__dctx *c);
 PDN_APRS__PRIVATE void pdn_aprs__decode_agrelo(pdn_aprs__dctx *c);
 PDN_APRS__PRIVATE void pdn_aprs__decode_maidenhead(pdn_aprs__dctx *c);
 
-/* Comment processing (comment.c). A working copy of a comment, as bytes. */
+/* Comment processing (comment.c). A working copy of a comment, as bytes:
+   room for the longest the encoder writes, a comment of PDN_APRS_TEXT_SIZE
+   bytes and the elements around it. */
 typedef struct pdn_aprs__cbuf {
-    uint8_t b[PDN_APRS_MAX_INFO];
+    uint8_t b[PDN_APRS_TEXT_SIZE + 256];
     size_t n;
 } pdn_aprs__cbuf;
 
-PDN_APRS__PRIVATE void pdn_aprs__cbuf_set(pdn_aprs__cbuf *cb, const uint8_t *s, size_t n);
+/* Returns 1, or 0 (after pdn_aprs__overflow) if [s, s+n) does not fit. */
+PDN_APRS__PRIVATE int pdn_aprs__cbuf_set(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, const uint8_t *s, size_t n);
 PDN_APRS__PRIVATE void pdn_aprs__cbuf_cut(pdn_aprs__cbuf *cb, size_t at, size_t n);
 /* Lifts base-91 telemetry (between the last two |) and the last !DAO!
    outside it. */

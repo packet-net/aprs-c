@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+API changes:
+
+- New `pdn_aprs_decode_written()`: decodes an information field as `pdn_aprs_decode_info()` does, but keeps no copy of it, so it takes one longer than `PDN_APRS_MAX_INFO`. It returns `PDN_APRS_ERR_TOO_LONG` only when a part of the field is longer than the packet's data holds.
+
+Encoding:
+
+- No size limit (vectors ruling E11: the rules set none). The encoder refused an information field over 512 bytes, which text received as Latin-1 and written back as UTF-8 can be; it now writes any length that fits the buffer, straight into it, and checks what it wrote with `pdn_aprs_decode_written()`. `PDN_APRS_ERR_BUFFER` means the buffer is too small to write and check the field.
+
 ## 0.2.0
 
 Brings the library into line with the rulings from differential fuzzing of all five implementations (packet-net/aprs-vectors, "Rulings from differential fuzzing: 120 cases and the rules behind them"). The vectors move to dc3854a, which adds rounds 2 to 7 of the fuzzing rulings and settles signpost and corridor braces.

@@ -470,7 +470,8 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_positioned(pdn_aprs__dctx *c, size_t at, 
                 n -= 7;
             }
         }
-        pdn_aprs__cbuf_set(&cb, s, n);
+        if (!pdn_aprs__cbuf_set(c, &cb, s, n))
+            return 0;
         return pdn_aprs__decode_weather_fields(c, &cb, w, mode, wind_known, r, r->comment, sizeof r->comment,
                                                &r->comment_len);
     }
@@ -515,7 +516,8 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_positioned(pdn_aprs__dctx *c, size_t at, 
     } else if (cs_kind == CS_RANGE) {
         had_extension = 1;
     }
-    pdn_aprs__cbuf_set(&cb, s, n);
+    if (!pdn_aprs__cbuf_set(c, &cb, s, n))
+        return 0;
     return pdn_aprs__finish_comment(c, &cb, r, had_extension);
 }
 

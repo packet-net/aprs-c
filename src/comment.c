@@ -6,13 +6,16 @@
  */
 #include "internal.h"
 
-PDN_APRS__PRIVATE void pdn_aprs__cbuf_set(pdn_aprs__cbuf *cb, const uint8_t *s, size_t n)
+PDN_APRS__PRIVATE int pdn_aprs__cbuf_set(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, const uint8_t *s, size_t n)
 {
-    if (n > sizeof cb->b)
-        n = sizeof cb->b;
+    if (n > sizeof cb->b) {
+        cb->n = 0;
+        return pdn_aprs__overflow(c);
+    }
     if (n)
         memmove(cb->b, s, n);
     cb->n = n;
+    return 1;
 }
 
 PDN_APRS__PRIVATE void pdn_aprs__cbuf_cut(pdn_aprs__cbuf *cb, size_t at, size_t n)

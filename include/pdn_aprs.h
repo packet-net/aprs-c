@@ -978,6 +978,17 @@ int pdn_aprs_decode_info(const pdn_aprs_header *header, const void *info, size_t
                          const pdn_aprs_decode_options *options, pdn_aprs_packet *packet);
 
 /*
+ * Decodes an information field as pdn_aprs_decode_info does, but keeps no
+ * copy of it in the packet (info_len is 0), so it may be longer than
+ * PDN_APRS_MAX_INFO. The encoder writes a field of any length (text received
+ * as Latin-1 is written back as UTF-8, up to twice as long), and this reads
+ * one back. Returns PDN_APRS_ERR_TOO_LONG, the data unrecognized, if a part
+ * of the field is longer than the packet's data holds.
+ */
+int pdn_aprs_decode_written(const pdn_aprs_header *header, const void *info, size_t len,
+                            const pdn_aprs_decode_options *options, pdn_aprs_packet *packet);
+
+/*
  * Decodes the packet inside a third-party packet (data.type
  * PDN_APRS_TYPE_THIRD_PARTY) into inner, which has its own header, data and
  * diagnostics.
@@ -1037,9 +1048,14 @@ typedef struct pdn_aprs_encoded {
 
 /*
  * Encodes data as an information field. Writes at most cap bytes and no NUL.
- * Returns the length, or PDN_APRS_ERR_REFUSED (encoded->reason says why),
- * PDN_APRS_ERR_BUFFER or PDN_APRS_ERR_ARGUMENT. options and encoded may be
- * NULL, though a Mic-E report needs encoded for its destination address.
+ * There is no limit on the length but cap: a field may be longer than
+ * PDN_APRS_MAX_INFO (text received as Latin-1 is written back as UTF-8, up
+ * to twice as long), and pdn_aprs_decode_written reads one back. Returns the
+ * length, or PDN_APRS_ERR_REFUSED (encoded->reason says why),
+ * PDN_APRS_ERR_BUFFER (buf is too small to write and check the field) or
+ * PDN_APRS_ERR_ARGUMENT; on failure buf holds nothing of use. options and
+ * encoded may be NULL, though a Mic-E report needs encoded for its
+ * destination address.
  */
 int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf,
                          size_t cap, pdn_aprs_encoded *encoded);

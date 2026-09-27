@@ -1736,7 +1736,7 @@ static int reads_back(const pdn_aprs_data *d, const uint8_t *info, size_t n, con
             o.devices = &table;
         }
     }
-    if (pdn_aprs_decode_info(&h, info, n, &o, &p) != PDN_APRS_OK)
+    if (pdn_aprs_decode_written(&h, info, n, &o, &p) != PDN_APRS_OK)
         return 0;
     for (i = 0; i < p.diagnostic_count; i++)
         if (p.diagnostics[i].severity != PDN_APRS_SEVERITY_INFO)
@@ -1749,8 +1749,7 @@ int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_option
 {
     pdn_aprs__buf b;
     pdn_aprs__ectx e;
-    uint8_t tmp[PDN_APRS_MAX_INFO];
-    int ok = 0, variant;
+    int ok = 0, full = 0, variant;
     if (encoded) {
         encoded->len = 0;
         encoded->destination[0] = 0;
@@ -1758,21 +1757,23 @@ int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_option
     }
     if (!data || (!buf && cap))
         return PDN_APRS_ERR_ARGUMENT;
-    /* the canonical form first; if that would not read back, the same with a
-       delimiter before the comment */
+    /* written straight into buf, whatever its length: the canonical form
+       first; if that would not read back, the same with a delimiter before
+       the comment */
     for (variant = 0; variant < 2; variant++) {
         memset(&e, 0, sizeof e);
-        pdn_aprs__buf_init(&b, tmp, sizeof tmp);
+        pdn_aprs__buf_init(&b, buf, cap);
         e.b = &b;
         e.variant = variant;
         ok = pdn_aprs__encode_data(&e, data);
-        if (ok && b.overflow) {
-            ok = 0;
-            e.reason = "longer than an information field can be";
-        }
         if (!ok)
             break;
-        if (reads_back(data, tmp, b.len, e.dest, options ? options->devices : NULL))
+        if (b.overflow) {
+            /* too long for buf, and so for checking */
+            full = 1;
+            break;
+        }
+        if (reads_back(data, (const uint8_t *)buf, b.len, e.dest, options ? options->devices : NULL))
             break;
         ok = 0;
         e.reason = "what the encoder would write does not read back as the same data";
@@ -1783,42 +1784,50 @@ int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_option
     }
     if (!ok)
         return PDN_APRS_ERR_REFUSED;
-    if (b.len > cap)
+    if (full)
         return PDN_APRS_ERR_BUFFER;
-    memcpy(buf, tmp, b.len);
     if (encoded)
         encoded->len = b.len;
     return (int)b.len;
 }
 
+/* Room for any header: every address and a separator or two, or seven
+   bytes each in AX.25, and the control and PID bytes. */
+#define HEADER_ROOM ((PDN_APRS_MAX_PATH + 2) * (PDN_APRS_ADDR_SIZE + 2) + 2)
+
 static int encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *data,
                          const pdn_aprs_encode_options *options, void *buf, size_t cap, pdn_aprs_encoded *encoded,
                          int ax25)
 {
-    uint8_t info[PDN_APRS_MAX_INFO];
+    uint8_t head[HEADER_ROOM];
+    uint8_t *out = (uint8_t *)buf;
     pdn_aprs_encoded local;
-    pdn_aprs__buf b;
+    pdn_aprs__buf hb;
     int n, rc;
     const char *dest;
     if (!header || !data || (!buf && cap))
         return PDN_APRS_ERR_ARGUMENT;
     if (!encoded)
         encoded = &local;
-    n = pdn_aprs_encode_info(data, options, info, sizeof info, encoded);
+    /* the information field first, at the start of buf, then moved along
+       to make room for the header, which for Mic-E carries what the encoder
+       computed */
+    n = pdn_aprs_encode_info(data, options, buf, cap, encoded);
     if (n < 0)
         return n;
     dest = data->type == PDN_APRS_TYPE_MIC_E ? encoded->destination : header->destination;
-    pdn_aprs__buf_init(&b, buf, cap);
-    rc = ax25 ? pdn_aprs__write_header_ax25(&b, header, dest) : pdn_aprs__write_header_tnc2(&b, header, dest);
+    pdn_aprs__buf_init(&hb, head, sizeof head);
+    rc = ax25 ? pdn_aprs__write_header_ax25(&hb, header, dest) : pdn_aprs__write_header_tnc2(&hb, header, dest);
     if (rc != PDN_APRS_OK)
         return rc;
-    pdn_aprs__put(&b, info, (size_t)n);
-    if (b.overflow)
+    if (hb.overflow || hb.len > cap - (size_t)n)
         return PDN_APRS_ERR_BUFFER;
-    if (!ax25 && b.len < cap)
-        ((char *)buf)[b.len] = 0;
-    encoded->len = b.len;
-    return (int)b.len;
+    memmove(out + hb.len, out, (size_t)n);
+    memcpy(out, head, hb.len);
+    if (!ax25 && hb.len + (size_t)n < cap)
+        out[hb.len + (size_t)n] = 0;
+    encoded->len = hb.len + (size_t)n;
+    return (int)encoded->len;
 }
 
 int pdn_aprs_encode_tnc2(const pdn_aprs_header *header, const pdn_aprs_data *data,
