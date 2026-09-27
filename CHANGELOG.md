@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Brings the library into line with the rulings from differential fuzzing of all five implementations (packet-net/aprs-vectors, "Rulings from differential fuzzing: 120 cases and the rules behind them"). The vectors move to b41427a, which adds a second round of fuzzing rulings.
+Brings the library into line with the rulings from differential fuzzing of all five implementations (packet-net/aprs-vectors, "Rulings from differential fuzzing: 120 cases and the rules behind them"). The vectors move to 8a22ebd, which adds a second round of fuzzing rulings.
 
 API changes. Struct layouts change, so rebuild everything that includes `pdn_aprs.h`:
 
