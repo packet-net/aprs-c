@@ -2294,16 +2294,21 @@ PDN_APRS__PRIVATE int pdn_aprs__lift_frequency(pdn_aprs__cbuf *cb, pdn_aprs_freq
 
 /* ---- braces ---- */
 
-static int find_braces(const pdn_aprs__cbuf *cb, size_t *at, size_t *len)
+/* The first well-formed braces, wherever they are: {, 1-3 characters that
+   are not braces, and }, the characters digits for a corridor or printable
+   ASCII for a signpost. Braces that do not qualify are comment text and do
+   not stop the search, as a malformed data extension does not. */
+static int find_braces(const pdn_aprs__cbuf *cb, int digits, size_t *at, size_t *len)
 {
     size_t i, k;
-    /* the first { followed by 1-3 characters and a }, wherever it is */
     for (i = 0; i < cb->n; i++) {
+        int ok = 1;
         if (cb->b[i] != '{')
             continue;
-        for (k = i + 1; k < cb->n && k <= i + 4 && cb->b[k] != '}'; k++)
-            ;
-        if (k < cb->n && cb->b[k] == '}' && k - i - 1 >= 1 && k - i - 1 <= 3) {
+        for (k = i + 1; k < cb->n && k <= i + 4 && cb->b[k] != '}' && cb->b[k] != '{'; k++)
+            if (digits ? !A_DIGIT(cb->b[k]) : !A_PRINT(cb->b[k]))
+                ok = 0;
+        if (ok && k < cb->n && cb->b[k] == '}' && k - i - 1 >= 1 && k - i - 1 <= 3) {
             *at = i;
             *len = k - i + 1;
             return 1;
@@ -2333,30 +2338,18 @@ PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf
         r->has_altitude = 1;
         r->altitude_feet = feet;
     }
-    if (((r->symbol.table == '\\' && r->symbol.code == 'm') ||
-         (r->has_area && (r->area.shape == PDN_APRS_AREA_LINE_DOWN_RIGHT ||
-                          r->area.shape == PDN_APRS_AREA_LINE_DOWN_LEFT))) &&
-        find_braces(cb, &at, &len)) {
-        if (r->has_area && r->symbol.code == 'l') {
-            /* a corridor width is digits */
-            long v = pdn_aprs__digits(cb->b + at + 1, len - 2);
-            if (v >= 0) {
-                r->area.has_corridor = 1;
-                r->area.corridor_width_miles = (uint16_t)v;
-                pdn_aprs__cbuf_cut(cb, at, len);
-            }
-        } else {
-            /* a signpost overlay is printable ASCII, as every overlay is */
-            size_t k;
-            int printable = 1;
-            for (k = at + 1; k + 1 < at + len; k++)
-                if (!A_PRINT(cb->b[k]))
-                    printable = 0;
-            if (printable) {
-                pdn_aprs__memlcpy(r->signpost, sizeof r->signpost, cb->b + at + 1, len - 2);
-                pdn_aprs__cbuf_cut(cb, at, len);
-            }
+    if (r->has_area &&
+        (r->area.shape == PDN_APRS_AREA_LINE_DOWN_RIGHT || r->area.shape == PDN_APRS_AREA_LINE_DOWN_LEFT)) {
+        /* a line area object's corridor width is digits */
+        if (find_braces(cb, 1, &at, &len)) {
+            r->area.has_corridor = 1;
+            r->area.corridor_width_miles = (uint16_t)pdn_aprs__digits(cb->b + at + 1, len - 2);
+            pdn_aprs__cbuf_cut(cb, at, len);
         }
+    } else if (r->symbol.table == '\\' && r->symbol.code == 'm' && find_braces(cb, 0, &at, &len)) {
+        /* a signpost overlay is printable ASCII, as every overlay is */
+        pdn_aprs__memlcpy(r->signpost, sizeof r->signpost, cb->b + at + 1, len - 2);
+        pdn_aprs__cbuf_cut(cb, at, len);
     }
     if (!had_extension && !pdn_aprs__rejects(c, PDN_APRS_CODE_DATA_EXTENSION_IN_COMMENT)) {
         static const char *const kinds[3] = {"PHG", "RNG", "DFS"};
