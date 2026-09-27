@@ -3,9 +3,12 @@
  * aprs-vectors README describes under "Comparing two implementations".
  *
  * Reads hex-encoded TNC2 lines (one per line) and writes one JSON object per
- * line: {"n", "lenient", "strict", "reencode"}, where lenient and strict are
- * {"header", "data", "diagnostics"} or {"header_error"} in the neutral form,
- * and reencode is identical, equivalent, refused, fails or none.
+ * line: {"n", "lenient", "strict", "reencode", "written",
+ * "written_destination"}, where lenient and strict are {"header", "data",
+ * "diagnostics"} or {"header_error"} in the neutral form, reencode is
+ * identical, equivalent, refused, fails or none, written is the information
+ * field the encoder wrote (whenever it wrote one), as hex, and
+ * written_destination the Mic-E destination it computed.
  *
  *   zcat lines.hex.gz | diffdump [-n first-line-number] | gzip > c.jsonl.gz
  *
@@ -20,6 +23,8 @@
 #include "pdn_aprs.h"
 
 static pdn_aprs_packet lenient_pkt, strict_pkt, again_pkt;
+static char written_hex[8193];
+static char written_destination[16];
 
 static int hexval(int c)
 {
@@ -50,6 +55,10 @@ static const char *reencode(const uint8_t *line, size_t len, const jval *lenient
         return "refused";
     if (n < 0)
         return "fails";
+    for (i = 0; i < n && (size_t)i * 2 + 2 < sizeof written_hex; i++)
+        snprintf(written_hex + i * 2, 3, "%02x", buf[i]);
+    if (p->data.type == PDN_APRS_TYPE_MIC_E)
+        snprintf(written_destination, sizeof written_destination, "%s", enc.destination);
     for (info_at = 0; info_at < len && line[info_at] != ':'; info_at++)
         ;
     info_at++;
@@ -116,7 +125,12 @@ int main(int argc, char **argv)
         sr = neutral_result(&strict_pkt, rc, &strict);
         out = json_obj();
         json_set(out, "n", json_int(n));
+        written_hex[0] = written_destination[0] = 0;
         json_set(out, "reencode", json_str(reencode(line, len, lr, &lenient)));
+        if (written_hex[0])
+            json_set(out, "written", json_str(written_hex));
+        if (written_destination[0])
+            json_set(out, "written_destination", json_str(written_destination));
         json_set(out, "lenient", lr);
         json_set(out, "strict", sr);
         s = json_write(out, NULL);
