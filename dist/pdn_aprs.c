@@ -2839,6 +2839,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
     tl = c->len - 9;
     if (tl >= 6 && t[0] == 0x1d) {
         /* obsolete Mic-E telemetry (APRS12c ch. 10): five binary channels */
+        pdn_aprs__diag(c, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_OBSOLETE_FORMAT);
         r->has_legacy_telemetry = 1;
         memcpy(r->legacy_telemetry, t + 1, 5);
         t += 6;
@@ -5294,7 +5295,10 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     info[8] = (uint8_t)r->symbol.table;
     pdn_aprs__put(e->b, info, 9);
     if (r->has_legacy_telemetry) {
-        /* obsolete Mic-E telemetry: 0x1d and five binary channels */
+        /* obsolete Mic-E telemetry: 0x1d and five binary channels. A 255 would be taken for
+           Kenwood 0xFF padding and removed on the way back in. */
+        if (memchr(r->legacy_telemetry, 0xFF, 5) != NULL)
+            return pdn_aprs__refuse(e, "obsolete Mic-E binary telemetry values are 0-254");
         pdn_aprs__putc(e->b, 0x1d);
         pdn_aprs__put(e->b, r->legacy_telemetry, 5);
     }
