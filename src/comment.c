@@ -32,8 +32,10 @@ static int dao_at(const uint8_t *s)
     uint8_t d = s[1], a = s[2], o = s[3];
     if (s[0] != '!' || s[4] != '!')
         return 0;
+    /* a digit is a local datum (APRS12c ch. 5); it has no case to say how A
+       and O are written, so it is read only with spaces there */
     if (a == ' ' && o == ' ')
-        return A_ALPHA(d);
+        return A_ALPHA(d) || A_DIGIT(d);
     if (A_UPPER(d))
         return A_DIGIT(a) && A_DIGIT(o);
     if (A_LOWER(d))
@@ -72,8 +74,9 @@ PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs
             for (p = 1; p < pairs && p <= PDN_APRS_MAX_ANALOG; p++)
                 r->telemetry.analog[r->telemetry.analog_count++] = (uint16_t)pdn_aprs__b91(t + 2 * p, 2);
             if (pairs == 7) {
+                /* eight binary channels; bits 9-13 are reserved (APRS12c ch. 13) */
                 r->telemetry.has_digital = 1;
-                r->telemetry.digital = (uint16_t)pdn_aprs__b91(t + 12, 2);
+                r->telemetry.digital = (uint16_t)(pdn_aprs__b91(t + 12, 2) & 0xFF);
             }
             have_tlm = 1;
             tstart = prev;
@@ -311,6 +314,7 @@ PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf
                           r->area.shape == PDN_APRS_AREA_LINE_DOWN_LEFT))) &&
         find_braces(cb, &at, &len)) {
         if (r->has_area && r->symbol.code == 'l') {
+            /* a corridor width is digits */
             long v = pdn_aprs__digits(cb->b + at + 1, len - 2);
             if (v >= 0) {
                 r->area.has_corridor = 1;
@@ -318,8 +322,16 @@ PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf
                 pdn_aprs__cbuf_cut(cb, at, len);
             }
         } else {
-            pdn_aprs__memlcpy(r->signpost, sizeof r->signpost, cb->b + at + 1, len - 2);
-            pdn_aprs__cbuf_cut(cb, at, len);
+            /* a signpost overlay is printable ASCII, as every overlay is */
+            size_t k;
+            int printable = 1;
+            for (k = at + 1; k + 1 < at + len; k++)
+                if (!A_PRINT(cb->b[k]))
+                    printable = 0;
+            if (printable) {
+                pdn_aprs__memlcpy(r->signpost, sizeof r->signpost, cb->b + at + 1, len - 2);
+                pdn_aprs__cbuf_cut(cb, at, len);
+            }
         }
     }
     if (!had_extension && !pdn_aprs__rejects(c, PDN_APRS_CODE_DATA_EXTENSION_IN_COMMENT)) {

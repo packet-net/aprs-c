@@ -37,12 +37,17 @@ PDN_APRS__PRIVATE int pdn_aprs__timestamp_valid(const uint8_t *t)
 
 /* ---- uncompressed positions ---- */
 
-/* Parses ddmm.hh (latitude, deg_digits 2) or dddmm.hh (longitude, 3) with
-   ambiguity spaces. Returns the number of blanked digits (0-4) or -1. Sets
-   degrees, minutes (whole) and hundredths with blanks as zero. */
-static int parse_coordinate(const uint8_t *s, int deg_digits, int *deg, int *min, int *hund)
+/* Parses ddmm.hh (a latitude, deg_digits 2, amb -1) or dddmm.hh (a
+   longitude, deg_digits 3, amb the latitude's level). A latitude's ambiguity
+   is a trailing run of spaces over its minutes and hundredths, and the
+   number of them (0-4) is returned. The latitude alone sets the ambiguity
+   (APRS12c ch. 6): in the longitude the places that level blanks are ignored
+   and may hold digits or spaces in any mix, and every other place must be a
+   digit. Returns -1 for anything else. Sets degrees, minutes (whole) and
+   hundredths, blanked or ignored places reading as zero. */
+static int parse_coordinate(const uint8_t *s, int deg_digits, int amb, int *deg, int *min, int *hund)
 {
-    int i, blanks = 0, seen_blank = 0;
+    int i, blanks = 0;
     int positions[4];
     int vals[4];
     for (i = 0; i < deg_digits; i++)
@@ -56,11 +61,14 @@ static int parse_coordinate(const uint8_t *s, int deg_digits, int *deg, int *min
     positions[3] = deg_digits + 4;
     for (i = 0; i < 4; i++) {
         uint8_t ch = s[positions[i]];
-        if (ch == ' ') {
-            seen_blank = 1;
+        if (amb >= 0 && i >= 4 - amb) {
+            if (ch != ' ' && !A_DIGIT(ch))
+                return -1;
+            vals[i] = 0;
+        } else if (amb < 0 && ch == ' ') {
             blanks++;
             vals[i] = 0;
-        } else if (A_DIGIT(ch) && !seen_blank) {
+        } else if (A_DIGIT(ch) && blanks == 0) {
             vals[i] = ch - '0';
         } else {
             return -1;
@@ -107,7 +115,7 @@ static int parse_uncompressed(pdn_aprs__dctx *c, const uint8_t *s, pdn_aprs_repo
 {
     int ldeg, lmin, lhund, gdeg, gmin, ghund, amb, lamb;
     uint8_t hem;
-    amb = parse_coordinate(s, 2, &ldeg, &lmin, &lhund);
+    amb = parse_coordinate(s, 2, -1, &ldeg, &lmin, &lhund);
     hem = s[7];
     if (amb < 0 || ldeg > 90 || lmin > 59 || (ldeg == 90 && (lmin || lhund)) ||
         !(hem == 'N' || hem == 'S' || hem == 'n' || hem == 's'))
@@ -116,7 +124,7 @@ static int parse_uncompressed(pdn_aprs__dctx *c, const uint8_t *s, pdn_aprs_repo
         return 0;
     if (!pdn_aprs__symbol_table_ok(s[8]))
         return pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_SYMBOL_TABLE);
-    lamb = parse_coordinate(s + 9, 3, &gdeg, &gmin, &ghund);
+    lamb = parse_coordinate(s + 9, 3, amb, &gdeg, &gmin, &ghund);
     hem = s[17];
     if (lamb < 0 || gdeg > 180 || gmin > 59 || (gdeg == 180 && (gmin || ghund)) ||
         !(hem == 'E' || hem == 'W' || hem == 'e' || hem == 'w'))
@@ -349,33 +357,52 @@ static int is_weather_symbol(const pdn_aprs_report *r)
 
 /* ---- a whole position report ---- */
 
+/* The position itself at at: latitude, symbol table, longitude and symbol
+   code, or the 13 bytes of a compressed position. Returns the bytes used, or
+   0 with the error recorded. */
+static size_t decode_position(pdn_aprs__dctx *c, size_t at, pdn_aprs_report *r, int *cs_kind, int *cs_c, int *cs_s)
+{
+    const uint8_t *s;
+    size_t n;
+    if (at >= c->len)
+        return (size_t)pdn_aprs__fail(c, PDN_APRS_CODE_TRUNCATED);
+    s = c->info + at;
+    n = c->len - at;
+    if (A_DIGIT(s[0])) {
+        if (n < 19)
+            return (size_t)pdn_aprs__fail(c, PDN_APRS_CODE_TRUNCATED);
+        return parse_uncompressed(c, s, r) ? 19 : 0;
+    }
+    if (s[0] == '/' || s[0] == '\\' || A_UPPER(s[0]) || (s[0] >= 'a' && s[0] <= 'j')) {
+        if (n < 13)
+            return (size_t)pdn_aprs__fail(c, PDN_APRS_CODE_TRUNCATED);
+        return parse_compressed(c, s, r, cs_kind, cs_c, cs_s) ? 13 : 0;
+    }
+    return (size_t)pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_POSITION);
+}
+
+/* 1 if a position decodes at at, under the options in force; a trial, which
+   records nothing but leaves r to be cleared. A garbled timestamp is judged
+   on the position after it, not on anything later in the report. */
+static int position_decodes(pdn_aprs__dctx *c, size_t at, pdn_aprs_report *r)
+{
+    int mark = pdn_aprs__mark(c), cs_kind = CS_NONE, cs_c = 0, cs_s = 0;
+    size_t used = decode_position(c, at, r, &cs_kind, &cs_c, &cs_s);
+    pdn_aprs__rewind(c, mark);
+    return used != 0;
+}
+
 PDN_APRS__PRIVATE int pdn_aprs__decode_positioned(pdn_aprs__dctx *c, size_t at, pdn_aprs_report *r)
 {
     const uint8_t *s;
     size_t n, used;
     int cs_kind = CS_NONE, cs_c = 0, cs_s = 0, had_extension = 0;
     pdn_aprs__cbuf cb;
-    if (at >= c->len)
-        return pdn_aprs__fail(c, PDN_APRS_CODE_TRUNCATED);
-    s = c->info + at;
-    n = c->len - at;
-    if (A_DIGIT(s[0])) {
-        if (n < 19)
-            return pdn_aprs__fail(c, PDN_APRS_CODE_TRUNCATED);
-        if (!parse_uncompressed(c, s, r))
-            return 0;
-        used = 19;
-    } else if (s[0] == '/' || s[0] == '\\' || A_UPPER(s[0]) || (s[0] >= 'a' && s[0] <= 'j')) {
-        if (n < 13)
-            return pdn_aprs__fail(c, PDN_APRS_CODE_TRUNCATED);
-        if (!parse_compressed(c, s, r, &cs_kind, &cs_c, &cs_s))
-            return 0;
-        used = 13;
-    } else {
-        return pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_POSITION);
-    }
-    s += used;
-    n -= used;
+    used = decode_position(c, at, r, &cs_kind, &cs_c, &cs_s);
+    if (!used)
+        return 0;
+    s = c->info + at + used;
+    n = c->len - at - used;
 
     if (is_weather_symbol(r)) {
         /* weather: the extension (or cs bytes) is the wind */
@@ -400,6 +427,12 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_positioned(pdn_aprs__dctx *c, size_t at, 
             if (course_speed(s, n, &dir, &spd)) {
                 if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_WIND_EXTENSION_AFTER_COMPRESSED))
                     return 0;
+                if (dir > 360) {
+                    /* over 360 degrees is out of range, and dropped */
+                    if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_OUT_OF_RANGE_VALUE))
+                        return 0;
+                    dir = -2;
+                }
                 w->has[PDN_APRS_WX_WIND_DIRECTION] = dir >= 0;
                 w->value[PDN_APRS_WX_WIND_DIRECTION] = dir >= 0 ? dir : 0;
                 w->has[PDN_APRS_WX_WIND_SPEED] = spd >= 0;
@@ -482,7 +515,6 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_position_report(pdn_aprs__dctx *c)
     memset(r, 0, sizeof *r);
     r->messaging = (uint8_t)(dti == '=' || dti == '@');
     if (dti == '/' || dti == '@') {
-        int mark;
         if (c->len >= 8 && timestamp_form(c->info + 1)) {
             memcpy(r->timestamp, c->info + 1, 7);
             r->timestamp[7] = 0;
@@ -492,18 +524,14 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_position_report(pdn_aprs__dctx *c)
             return;
         }
         {
+            /* the position straight after the DTI if that position decodes,
+               else after seven bytes */
             size_t at = 0;
-            int ok;
-            mark = pdn_aprs__mark(c);
-            ok = pdn_aprs__decode_positioned(c, 1, r);
-            pdn_aprs__rewind(c, mark);
-            if (ok) {
+            if (position_decodes(c, 1, r)) {
                 at = 1;
             } else {
                 memset(r, 0, sizeof *r);
-                ok = pdn_aprs__decode_positioned(c, 8, r);
-                pdn_aprs__rewind(c, mark);
-                if (ok)
+                if (position_decodes(c, 8, r))
                     at = 8;
             }
             memset(r, 0, sizeof *r);
@@ -564,7 +592,6 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_object(pdn_aprs__dctx *c)
 {
     pdn_aprs_report *r = &c->data->as.report;
     size_t k, name_len, at;
-    int mark;
     c->data->type = PDN_APRS_TYPE_OBJECT;
     memset(r, 0, sizeof *r);
     if (c->len < 11) {
@@ -603,12 +630,12 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_object(pdn_aprs__dctx *c)
         return;
     }
     if (at + 7 <= c->len && timestamp_lookalike(c->info + at)) {
+        /* judged on the position after the seven bytes, not on anything
+           later in the report */
         pdn_aprs_report save;
         int ok;
         memcpy(&save, r, sizeof save);
-        mark = pdn_aprs__mark(c);
-        ok = pdn_aprs__decode_positioned(c, at + 7, r);
-        pdn_aprs__rewind(c, mark);
+        ok = position_decodes(c, at + 7, r);
         memcpy(r, &save, sizeof save);
         if (ok) {
             if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_MALFORMED_TIMESTAMP))

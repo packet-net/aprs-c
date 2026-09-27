@@ -132,6 +132,12 @@ if(PDN_APRS_BUILD_TESTS)
   add_test(NAME vectors COMMAND pdn_aprs_vectors ${CMAKE_CURRENT_SOURCE_DIR}/vectors
                                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/known-differences.txt)
 
+  # the JSON writer the tests and pdn_aprs_diffdump share
+  add_executable(pdn_aprs_json_test tests/json_test.c)
+  target_link_libraries(pdn_aprs_json_test PRIVATE pdn_aprs_test_support)
+  target_compile_options(pdn_aprs_json_test PRIVATE ${PDN_APRS_WARNINGS})
+  add_test(NAME json COMMAND pdn_aprs_json_test)
+
   add_executable(pdn_aprs_api_test tests/api.c)
   target_link_libraries(pdn_aprs_api_test PRIVATE pdn_aprs_test_support)
   target_compile_options(pdn_aprs_api_test PRIVATE ${PDN_APRS_WARNINGS})

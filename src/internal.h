@@ -58,9 +58,10 @@ PDN_APRS__PRIVATE void pdn_aprs__putd(pdn_aprs__buf *b, double v);
 
 /* Parses digits [s, s+n) as an unsigned integer; -1 if any is not a digit or n is 0. */
 PDN_APRS__PRIVATE long pdn_aprs__digits(const uint8_t *s, size_t n);
-/* Parses a decimal number: optional sign, digits, optional point and digits,
-   optional exponent when allow_exp. The whole of [s, s+n) must be used.
-   Returns 1 and sets *out, or 0. */
+/* Parses a decimal number: an optional minus sign (no plus), digits, an
+   optional point and digits, and an exponent (e or E, an optional sign,
+   digits) when allow_exp. The whole of [s, s+n) must be used, and the value
+   must be a finite number (0eN is 0). Returns 1 and sets *out, or 0. */
 PDN_APRS__PRIVATE int pdn_aprs__parse_number(const uint8_t *s, size_t n, int allow_exp, double *out);
 /* 10 to an integer power, exactly for small powers. */
 PDN_APRS__PRIVATE double pdn_aprs__pow10i(int e);

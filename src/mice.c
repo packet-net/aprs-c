@@ -142,16 +142,14 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
     uint8_t dti = c->info[0];
     c->data->type = PDN_APRS_TYPE_MIC_E;
     memset(r, 0, sizeof *r);
-    for (i = 0; i < c->len; i++)
-        if (c->info[i] != 0xFF)
-            stripped[n++] = c->info[i];
-    if (n != c->len) {
-        if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_KENWOOD_FF_PADDING))
-            return;
-        c->info = stripped;
-        c->len = n;
-    }
+    /* 0x1C and 0x1D are the Rev 0 beta data type identifiers (APRS12c ch.
+       10, obsolete): the info is for the identifier, whatever follows it */
+    if (dti == 0x1c || dti == 0x1d)
+        pdn_aprs__diag(c, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_OBSOLETE_FORMAT);
     r->old_data = (uint8_t)(dti == '\'' || dti == 0x1d);
+    /* read in order: the destination, then the nine fixed bytes as sent (an
+       0xFF among them is out of range like any other byte), and only then
+       the status text, where Kenwood's 0xFF padding is removed */
     if (!c->dest || !pdn_aprs__mic_e_dest(c->dest, &lat, &msg, &amb, &west, &lon100)) {
         pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_MIC_E_DESTINATION);
         return;
@@ -231,9 +229,14 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
     r->symbol.code = (char)s[7];
     r->symbol.table = (char)s[8];
 
-    /* the status text */
-    t = s + 9;
-    tl = c->len - 9;
+    /* the status text, less any 0xFF padding (UAP 5.10) */
+    for (i = 9; i < c->len; i++)
+        if (s[i] != 0xFF)
+            stripped[n++] = s[i];
+    if (n != c->len - 9 && !pdn_aprs__tolerate(c, PDN_APRS_CODE_KENWOOD_FF_PADDING))
+        return;
+    t = stripped;
+    tl = n;
     if (tl >= 6 && t[0] == 0x1d) {
         /* obsolete Mic-E telemetry (APRS12c ch. 10): five binary channels */
         pdn_aprs__diag(c, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_OBSOLETE_FORMAT);

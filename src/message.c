@@ -5,10 +5,13 @@
  */
 #include "internal.h"
 
-/* A message ID {MM or {MM}AA at the end of [s, s+n). Returns the offset of
-   the '{' or n if there is none, and fills id / reply-ack. *brace is set when
-   the text holds a { that does not start a valid ID. */
-static size_t split_message_id(const uint8_t *s, size_t n, char *id, char *ack, uint8_t *has_ack, int *brace)
+/* A message ID {MM, or with allow_ack {MM}AA, at the end of [s, s+n).
+   Returns the offset of the '{' or n if there is none, and fills id /
+   reply-ack. *brace is set when the text holds a { that does not start a
+   valid ID. Only messages take the reply-ack form: on a bulletin, an NWS
+   bulletin or telemetry metadata, {MM}AA is not an ID but a stray brace. */
+static size_t split_message_id(const uint8_t *s, size_t n, int allow_ack, char *id, char *ack, uint8_t *has_ack,
+                               int *brace)
 {
     size_t i, k, open = n, close;
     *brace = 0;
@@ -33,7 +36,7 @@ static size_t split_message_id(const uint8_t *s, size_t n, char *id, char *ack, 
     close = k;
     if (close < n) {
         size_t a;
-        if (s[close] != '}') {
+        if (s[close] != '}' || !allow_ack) {
             *brace = 1;
             return n;
         }
@@ -151,7 +154,7 @@ static const char *const known_queries[] = {"APRSD", "APRSH", "APRSM", "APRSO", 
 /* 0: not a query; 1: a directed query; 2: a malformed one (plain message, info). */
 static int parse_query(const uint8_t *s, size_t n, int has_id, pdn_aprs_directed_query *q)
 {
-    size_t i, tl, tstart;
+    size_t i, tl, tstart, end;
     int k, found = -1;
     if (n < 1 || s[0] != '?')
         return 0;
@@ -193,15 +196,22 @@ static int parse_query(const uint8_t *s, size_t n, int has_id, pdn_aprs_directed
     }
     if (has_id)
         return 2;
-    while (tstart < n && s[tstart] == ' ')
+    /* One space between the type and the target is a separator (a type the
+       spec does not define has no fixed length, so it needs one), and spaces
+       after the target are padding (APRSH pads it to 9 characters). */
+    if (tstart < n && s[tstart] == ' ')
         tstart++;
-    if (tstart < n) {
-        size_t len = n - tstart;
-        for (i = tstart; i < n; i++)
-            if (s[i] == ' ')
-                return 2;
+    end = n;
+    while (end > tstart && s[end - 1] == ' ')
+        end--;
+    if (tstart < end) {
+        /* the target is one callsign: 1-9 letters, digits or - */
+        size_t len = end - tstart;
         if (len > 9)
             return 2;
+        for (i = tstart; i < end; i++)
+            if (!(A_ALNUM(s[i]) || s[i] == '-'))
+                return 2;
         memcpy(q->target, s + tstart, len);
         q->target[len] = 0;
     }
@@ -300,31 +310,34 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_message(pdn_aprs__dctx *c)
         pdn_aprs_telemetry_meta *m = &d->as.meta;
         char id[PDN_APRS_NAME_SIZE], ack[PDN_APRS_NAME_SIZE];
         uint8_t has_ack;
-        size_t body_end = split_message_id(t, tl, id, ack, &has_ack, &brace);
+        /* metadata takes a message ID but not the reply-ack form; a stray {
+           stays where it is in the list (brace-in-message-text) */
+        size_t body_end = split_message_id(t, tl, 0, id, ack, &has_ack, &brace);
         int ok;
         memset(m, 0, sizeof *m);
-        if (!brace && !has_ack) {
-            if (t[0] == 'P' || t[0] == 'U')
-                ok = decode_names(c, t + 5, body_end - 5, m);
-            else if (t[0] == 'E')
-                ok = decode_coefficients(t + 5, body_end - 5, m);
-            else
-                ok = decode_bits(c, t + 5, body_end - 5, m);
-            if (ok && !pdn_aprs__check_text(c, t + 5, body_end - 5))
+        if (t[0] == 'P' || t[0] == 'U')
+            ok = decode_names(c, t + 5, body_end - 5, m);
+        else if (t[0] == 'E')
+            ok = decode_coefficients(t + 5, body_end - 5, m);
+        else
+            ok = decode_bits(c, t + 5, body_end - 5, m);
+        if (ok) {
+            /* the structure (list and braces) before the text's encoding */
+            if (brace && !pdn_aprs__tolerate(c, PDN_APRS_CODE_BRACE_IN_MESSAGE_TEXT))
                 return;
-            if (ok && c->latin1 && (t[0] == 'P' || t[0] == 'U'))
+            if (!pdn_aprs__check_text(c, t + 5, body_end - 5))
+                return;
+            if (c->latin1 && (t[0] == 'P' || t[0] == 'U'))
                 decode_names(c, t + 5, body_end - 5, m);
-            else if (ok && c->latin1 && t[0] == 'B')
+            else if (c->latin1 && t[0] == 'B')
                 decode_bits(c, t + 5, body_end - 5, m);
-            if (ok) {
-                d->type = t[0] == 'P'   ? PDN_APRS_TYPE_TELEMETRY_NAMES
-                          : t[0] == 'U' ? PDN_APRS_TYPE_TELEMETRY_UNITS
-                          : t[0] == 'E' ? PDN_APRS_TYPE_TELEMETRY_COEFFICIENTS
-                                        : PDN_APRS_TYPE_TELEMETRY_BITS;
-                memcpy(m->addressee, addressee, alen + 1);
-                memcpy(m->message_id, id, strlen(id) + 1);
-                return;
-            }
+            d->type = t[0] == 'P'   ? PDN_APRS_TYPE_TELEMETRY_NAMES
+                      : t[0] == 'U' ? PDN_APRS_TYPE_TELEMETRY_UNITS
+                      : t[0] == 'E' ? PDN_APRS_TYPE_TELEMETRY_COEFFICIENTS
+                                    : PDN_APRS_TYPE_TELEMETRY_BITS;
+            memcpy(m->addressee, addressee, alen + 1);
+            memcpy(m->message_id, id, strlen(id) + 1);
+            return;
         }
         memset(m, 0, sizeof *m);
         pdn_aprs__diag(c, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_INVALID_TELEMETRY_METADATA);
@@ -334,7 +347,13 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_message(pdn_aprs__dctx *c)
         pdn_aprs_message *msg = &d->as.message;
         char id[PDN_APRS_NAME_SIZE], ack[PDN_APRS_NAME_SIZE];
         uint8_t has_ack;
-        size_t body_end = split_message_id(t, tl, id, ack, &has_ack, &brace);
+        /* A bulletin is BLN then a digit or an upper-case letter. Bulletins
+           and NWS bulletins are not acknowledged, so they take a message ID
+           but not the reply-ack form. */
+        int bulletin =
+            alen >= 4 && memcmp(addressee, "BLN", 3) == 0 && (A_DIGIT(addressee[3]) || A_UPPER(addressee[3]));
+        int nws = !bulletin && alen >= 4 && (memcmp(addressee, "NWS-", 4) == 0 || memcmp(addressee, "NWS_", 4) == 0);
+        size_t body_end = split_message_id(t, tl, !bulletin && !nws, id, ack, &has_ack, &brace);
 
         /* a directed query */
         if (tl > 0 && t[0] == '?') {
@@ -353,11 +372,11 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_message(pdn_aprs__dctx *c)
         }
 
         memset(msg, 0, sizeof *msg);
-        if (alen >= 3 && memcmp(addressee, "BLN", 3) == 0 && alen >= 4 && A_ALNUM(addressee[3])) {
+        if (bulletin) {
             d->type = PDN_APRS_TYPE_BULLETIN;
-            if (A_ALPHA(addressee[3]) && alen > 4 && !pdn_aprs__tolerate(c, PDN_APRS_CODE_LETTER_GROUP_BULLETIN))
+            if (A_UPPER(addressee[3]) && alen > 4 && !pdn_aprs__tolerate(c, PDN_APRS_CODE_LETTER_GROUP_BULLETIN))
                 return;
-        } else if (alen >= 4 && (memcmp(addressee, "NWS-", 4) == 0 || memcmp(addressee, "NWS_", 4) == 0)) {
+        } else if (nws) {
             d->type = PDN_APRS_TYPE_NWS_BULLETIN;
         }
         if (brace && !pdn_aprs__tolerate(c, PDN_APRS_CODE_BRACE_IN_MESSAGE_TEXT))

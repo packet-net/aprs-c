@@ -83,7 +83,8 @@ PDN_APRS__PRIVATE void pdn_aprs__putd(pdn_aprs__buf *b, double v)
 {
     int d;
     double mag;
-    if (v != v) {
+    if (v != v || v - v != 0.0) {
+        /* not finite: callers refuse these before writing */
         pdn_aprs__puts(b, "0");
         return;
     }
@@ -114,8 +115,23 @@ PDN_APRS__PRIVATE void pdn_aprs__putd(pdn_aprs__buf *b, double v)
     /* Too large or too precise for a plain form within 15 digits: round. */
     if (v < 0)
         pdn_aprs__putc(b, '-');
-    if (mag >= 9.0e15) {
-        put_scaled(b, (uint64_t)(mag >= 1.8e19 ? 1.8e19 : mag), 0);
+    if (mag >= 1.8e19) {
+        /* the fewest significant digits (up to 17) that read back, then zeros */
+        int e = (int)floor(log10(mag)), sd, p = 0;
+        uint64_t r = 0;
+        for (sd = 1; sd <= 17; sd++) {
+            double back;
+            p = e - sd + 1;
+            r = (uint64_t)floor(mag / pdn_aprs__pow10i(p) + 0.5);
+            back = (double)r * pdn_aprs__pow10i(p);
+            if (fabs(back - mag) <= 1e-13 * mag)
+                break;
+        }
+        put_scaled(b, r, 0);
+        for (; p > 0; p--)
+            pdn_aprs__putc(b, '0');
+    } else if (mag >= 9.0e15) {
+        put_scaled(b, (uint64_t)floor(mag + 0.5), 0);
     } else {
         for (d = 15; d > 0 && mag * pdn_aprs__pow10i(d) >= 9.0e15; d--)
             ;
@@ -147,8 +163,9 @@ PDN_APRS__PRIVATE int pdn_aprs__parse_number(const uint8_t *s, size_t n, int all
     double v;
     if (n == 0)
         return 0;
-    if (s[0] == '-' || s[0] == '+') {
-        neg = s[0] == '-';
+    /* a minus sign only: APRS numbers have no + (APRS12c ch. 13) */
+    if (s[0] == '-') {
+        neg = 1;
         i++;
     }
     for (; i < n && A_DIGIT(s[i]); i++, digits++) {
@@ -188,7 +205,10 @@ PDN_APRS__PRIVATE int pdn_aprs__parse_number(const uint8_t *s, size_t n, int all
         return 0;
     scale += exp;
     v = (double)mant;
-    if (scale < 0) {
+    if (mant == 0) {
+        /* zero whatever the exponent (0e16016), not 0 times infinity */
+        v = 0.0;
+    } else if (scale < 0) {
         if (scale >= -22)
             v /= pdn_aprs__pow10i(-scale);
         else
@@ -196,6 +216,9 @@ PDN_APRS__PRIVATE int pdn_aprs__parse_number(const uint8_t *s, size_t n, int all
     } else if (scale > 0) {
         v *= pdn_aprs__pow10i(scale);
     }
+    /* beyond what a double holds (1e400): not a number here */
+    if (!(v == v) || v - v != 0.0)
+        return 0;
     *out = neg ? -v : v;
     return 1;
 }
