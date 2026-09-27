@@ -827,6 +827,11 @@ typedef struct pdn_aprs_query {
     uint8_t has_footprint;
     double latitude, longitude;
     uint16_t radius_miles;
+    /* The footprint's latitude and longitude as sent (" 34.0", "-.1715"),
+       any leading space included, for identical re-encoding; "" to format
+       the value, and "" too when the text sent is longer than fits here. */
+    char latitude_text[24];
+    char longitude_text[24];
 } pdn_aprs_query;
 
 /* Station capabilities: count items, each a token and an optional value,

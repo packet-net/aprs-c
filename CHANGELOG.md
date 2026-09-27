@@ -5,10 +5,19 @@
 API changes:
 
 - New `pdn_aprs_decode_written()`: decodes an information field as `pdn_aprs_decode_info()` does, but keeps no copy of it, so it takes one longer than `PDN_APRS_MAX_INFO`. It returns `PDN_APRS_ERR_TOO_LONG` only when a part of the field is longer than the packet's data holds.
+- `pdn_aprs_query` gains `latitude_text` and `longitude_text`, a general query's footprint numbers as sent, so struct layouts change: rebuild everything that includes `pdn_aprs.h`.
 
 Encoding:
 
 - No size limit (vectors ruling E11: the rules set none). The encoder refused an information field over 512 bytes, which text received as Latin-1 and written back as UTF-8 can be; it now writes any length that fits the buffer, straight into it, and checks what it wrote with `pdn_aprs_decode_written()`. `PDN_APRS_ERR_BUFFER` means the buffer is too small to write and check the field.
+- Exact bytes (vectors rulings E1-E12): the vectors' `canonical_info` is now binding, so where the spec allows several forms the encoder writes the one the Encoding rule names.
+  - A general query's footprint numbers are written as sent, with or without a leading space (`?APRS? 34.0,-117.15,0200`, `-.1715`); it wrote them normalised (E1).
+  - After the data extension a position, object or item report's comment is written in the order the voice frequency with its fields, the braces, the `/A=` altitude, the free text after a space, base-91 telemetry, the `!DAO!` (`j006/058/146.520MHz/A=000889 Dayton Bound`): the frequency comes first, in the bytes radios read (APRS12c ch. 18); it came after the altitude (E3).
+  - A Mic-E speed of 190-199 knots is written with `/`, the printable one of its two forms; it wrote DEL (E5).
+  - Mic-E status text starting with 0x1D after Rev 0 telemetry is written straight on; the `/` is only for status text that would start with 0x1D (E6).
+  - No delimiter where none is needed: none before `.../...` text after a compressed position, which has no data extension to mistake it for, and none before text after a Mic-E type code that only looks like a locator (`wO91SX/G`: a locator's first two letters are A-R). The space after a frequency is written before a comment that starts with a NUL, which was taken for a tone letter (E7).
+  - Snowfall under 1 inch is `.` and two digits (0.5 as `.50`); it wrote `0.5` (E8).
+  - A compressed wind direction that rounds to 360 degrees is written as north (c = 0); a 358-degree wind was refused (E9).
 
 ## 0.2.0
 

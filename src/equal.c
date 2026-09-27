@@ -36,9 +36,14 @@ static int weather_eq(const pdn_aprs_weather *a, const pdn_aprs_weather *b, int 
     static const double tol[PDN_APRS_WX_COUNT] = {2.01, 0.51, 0.51, 0.51, 0.0051, 0.0051,
                                                    0.0051, 0.51, 0.051, 0.51, 0.051, 0.51};
     for (i = 0; i < PDN_APRS_WX_COUNT; i++) {
+        double va = a->value[i], vb = b->value[i];
         if (!a->has[i] != !b->has[i])
             return 0;
-        if (a->has[i] && !near(a->value[i], b->value[i], tol[i], i == PDN_APRS_WX_WIND_SPEED ? 0.045 : 0, loose))
+        /* a direction that rounds to 360 is written as north, which a
+           compressed wind reads back as 0 */
+        if (loose && i == PDN_APRS_WX_WIND_DIRECTION && fabs(va - vb) > 180)
+            va += va < vb ? 360 : -360;
+        if (a->has[i] && !near(va, vb, tol[i], i == PDN_APRS_WX_WIND_SPEED ? 0.045 : 0, loose))
             return 0;
     }
     if (a->software != b->software || !str_eq(a->unit, b->unit) || a->extra_count != b->extra_count)

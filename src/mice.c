@@ -134,6 +134,14 @@ static int locator_at(const uint8_t *s, size_t n, size_t *len)
     return 1;
 }
 
+PDN_APRS__PRIVATE size_t pdn_aprs__mic_e_locator_len(const uint8_t *s, size_t n)
+{
+    size_t ll;
+    if (locator_at(s, n, &ll) && n >= ll + 2 && s[ll] == '/' && s[ll + 1] == 'G')
+        return ll + 2;
+    return 0;
+}
+
 PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
 {
     pdn_aprs_report *r = &c->data->as.report;
@@ -282,14 +290,14 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
         tl -= 4;
     }
     {
-        size_t ll;
-        if (locator_at(t, tl, &ll) && tl >= ll + 2 && t[ll] == '/' && t[ll + 1] == 'G') {
+        size_t ll = pdn_aprs__mic_e_locator_len(t, tl);
+        if (ll) {
             size_t k;
-            for (k = 0; k < ll; k++)
+            for (k = 0; k + 2 < ll; k++)
                 r->locator[k] = A_TOUPPER(t[k]);
-            r->locator[ll] = 0;
-            t += ll + 2;
-            tl -= ll + 2;
+            r->locator[ll - 2] = 0;
+            t += ll;
+            tl -= ll;
             if (tl > 0) {
                 if (t[0] == ' ') {
                     t++;

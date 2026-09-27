@@ -194,6 +194,10 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
 PDN_APRS__PRIVATE int pdn_aprs__mic_e_dest(const char *dest, double *lat, int *msg, int *amb, int *west,
                                            int *lon100);
 
+/* The length of a Mic-E locator and its /G at s (AA00/G or AA00aa/G, the
+   letters in either case), or 0. */
+PDN_APRS__PRIVATE size_t pdn_aprs__mic_e_locator_len(const uint8_t *s, size_t n);
+
 /* Devices (device.c). */
 PDN_APRS__PRIVATE int pdn_aprs__mic_e_suffix_known(const pdn_aprs_device_table *t, char type_code,
                                                    const uint8_t *s, size_t n);

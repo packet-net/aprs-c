@@ -270,8 +270,9 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         if (w->has[PDN_APRS_WX_WIND_DIRECTION] && w->has[PDN_APRS_WX_WIND_SPEED] &&
             !(r->has_compression && r->compression.source == PDN_APRS_NMEA_GGA)) {
             double dir = w->value[PDN_APRS_WX_WIND_DIRECTION], mph = w->value[PDN_APRS_WX_WIND_SPEED];
-            long c = (long)floor(dir / 4.0 + 0.5), s;
-            if (dir < 0 || c > 89 || mph < 0)
+            long c = (long)floor(dir / 4.0 + 0.5) % 90, s;
+            /* rounded to the nearest 4 degrees; 360 is north, c = 0 */
+            if (dir < 0 || dir > 360 || mph < 0)
                 return pdn_aprs__refuse(e, "wind out of range for a compressed position");
             s = (long)floor(log(mph / PDN_APRS__KNOTS_TO_MPH + 1.0) / log(1.08) + 0.5);
             if (s > 90)
@@ -390,7 +391,7 @@ static int starts_freq_field(const char *s, size_t n)
         kind = 1;
     else if ((s[0] == '1' || s[0] == 'l') && s[1] == '7' && s[2] == '5' && s[3] == '0')
         kind = 1;
-    else if (strchr("TtCcDd", s[0]) && A_DIGIT(s[1]) && A_DIGIT(s[2]) && A_DIGIT(s[3]))
+    else if (s[0] && strchr("TtCcDd", s[0]) && A_DIGIT(s[1]) && A_DIGIT(s[2]) && A_DIGIT(s[3]))
         kind = 1;
     else if ((s[0] == '+' || s[0] == '-') && A_DIGIT(s[1]) && A_DIGIT(s[2]) && A_DIGIT(s[3]))
         kind = 2;
@@ -505,27 +506,10 @@ static void put_telemetry(pdn_aprs__buf *b, const pdn_aprs_comment_telemetry *t)
     pdn_aprs__putc(b, '|');
 }
 
-/* Mic-E status text openings that a comment must not look like. */
-static int looks_like_mic_e_opening(const char *s, size_t n, int type_written, int alt_written, int loc_written)
-{
-    if (!type_written && n > 0 && (s[0] == '`' || s[0] == '\'' || s[0] == '>' || s[0] == ']'))
-        return 1;
-    if (!alt_written && n >= 4 && A_B91((uint8_t)s[0]) && A_B91((uint8_t)s[1]) && A_B91((uint8_t)s[2]) && s[3] == '}')
-        return 1;
-    if (!loc_written && n >= 6) {
-        size_t ll = 0;
-        if (n >= 8 && A_ALPHA(s[0]) && A_ALPHA(s[1]) && A_DIGIT(s[2]) && A_DIGIT(s[3]) && A_ALPHA(s[4]) &&
-            A_ALPHA(s[5]) && s[6] == '/' && s[7] == 'G')
-            ll = 6;
-        else if (A_ALPHA(s[0]) && A_ALPHA(s[1]) && A_DIGIT(s[2]) && A_DIGIT(s[3]) && s[4] == '/' && s[5] == 'G')
-            ll = 4;
-        if (ll)
-            return 1;
-    }
-    return 0;
-}
-
-/* The comment and what follows it: [freq][comment][telemetry][DAO]. at_ext:
+/* The free text and what follows it: [frequency][comment][telemetry] for
+   Mic-E status text, where the frequency comes last of the opening elements;
+   for a position, object or item the caller has written the frequency before
+   the braces and the altitude, and this writes [comment][telemetry]. at_ext:
    a 7-byte data extension was the last thing written. open: how far the
    decoder's opening elements have been passed. For a position, object or
    item: 0 if nothing follows the symbol yet, else 1. For Mic-E status text:
@@ -543,19 +527,26 @@ static int put_comment_part(pdn_aprs__ectx *e, const pdn_aprs_report *r, int at_
         return pdn_aprs__refuse(e, "the comment has a line break or is not UTF-8");
     if (n > 0 && (c[0] == ' ' || c[0] == '/' || (e->variant & 1)))
         slash = 1;
+    /* a delimiter only where the comment would otherwise read as something
+       else (interpretations.md) */
     if (!slash && n > 0 && !r->has_frequency) {
         if (!mic_e) {
-            if (open == 0 && !ext_counts && starts_extension(c, n, r->symbol.table == '\\' && r->symbol.code == 'l'))
+            /* a data extension is read straight after an uncompressed
+               position; a compressed one has none there */
+            if (open == 0 && !ext_counts && !r->compressed &&
+                starts_extension(c, n, r->symbol.table == '\\' && r->symbol.code == 'l'))
                 slash = 1;
         } else {
-            /* status text must not start with a type code character or
-               0x1D, the obsolete telemetry (APRS12c ch. 10) */
-            if (open < 1 && (c[0] == '`' || c[0] == '\'' || c[0] == '>' || c[0] == ']' || c[0] == 0x1d))
+            /* status text must not start with a type code character, or
+               0x1D, the obsolete telemetry (APRS12c ch. 10), which after that
+               telemetry is text */
+            if (open < 1 && (c[0] == '`' || c[0] == '\'' || c[0] == '>' || c[0] == ']' ||
+                             (c[0] == 0x1d && !r->has_legacy_telemetry)))
                 slash = 1;
             if (open < 2 && n >= 4 && A_B91((uint8_t)c[0]) && A_B91((uint8_t)c[1]) && A_B91((uint8_t)c[2]) &&
                 c[3] == '}')
                 slash = 1;
-            if (open < 3 && looks_like_mic_e_opening(c, n, 1, 1, 0))
+            if (open < 3 && pdn_aprs__mic_e_locator_len((const uint8_t *)c, n))
                 slash = 1;
             if (open < 4 && pdn_aprs__ext_len((const uint8_t *)c, n))
                 slash = 1;
@@ -564,10 +555,12 @@ static int put_comment_part(pdn_aprs__ectx *e, const pdn_aprs_report *r, int at_
     if (r->has_frequency) {
         const pdn_aprs_frequency *f = &r->frequency;
         int last = f->has_range ? 3 : f->has_offset ? 2 : f->tone ? 1 : 0;
-        if (at_ext)
-            pdn_aprs__putc(e->b, '/');
-        if (!pdn_aprs__encode_frequency(e, f))
-            return 0;
+        if (mic_e) {
+            if (at_ext)
+                pdn_aprs__putc(e->b, '/');
+            if (!pdn_aprs__encode_frequency(e, f))
+                return 0;
+        }
         if (n > 0 && !slash && starts_freq_field(c, n) > last) {
             /* the comment would read as one of the frequency's fields: straight
                after the frequency when it has none, else after a delimiter */
@@ -651,24 +644,31 @@ static int put_wx_field(pdn_aprs__ectx *e, char letter, const pdn_aprs_weather *
         return 1;
     }
     if (letter == 's' && idx == PDN_APRS_WX_SNOW_24H) {
-        /* snowfall: three characters, a decimal point allowed */
-        pdn_aprs__buf tmp;
-        char s[16];
-        pdn_aprs__buf_init(&tmp, s, sizeof s);
-        if (w->value[idx] < 0)
+        /* snowfall: exactly three characters, a decimal point where the
+           value needs one: a whole number as three digits (002), under 1 as
+           . and two digits (.50, .32), and otherwise a digit, . and a digit
+           (2.5) */
+        double sv = w->value[idx];
+        char s[4];
+        long h = (long)floor(sv * 100 + 0.5), t = (long)floor(sv * 10 + 0.5);
+        if (sv < 0 || sv > 999)
             return pdn_aprs__refuse(e, "snowfall out of range");
-        if (w->value[idx] == floor(w->value[idx]) && w->value[idx] <= 999)
-            pdn_aprs__putu(&tmp, (unsigned long)w->value[idx], 3);
-        else
-            pdn_aprs__putd(&tmp, w->value[idx]); /* "1.5" fits; "12.5" does not */
-        /* written exactly in three characters, the decimal point where it
-           needs one: 0.32 is ".32" */
-        if (tmp.len == 4 && s[0] == '0' && s[1] == '.') {
-            memmove(s, s + 1, 3);
-            tmp.len = 3;
-        }
-        if (tmp.len != 3)
+        if (sv == floor(sv)) {
+            long whole = (long)sv;
+            s[0] = (char)('0' + whole / 100);
+            s[1] = (char)('0' + whole / 10 % 10);
+            s[2] = (char)('0' + whole % 10);
+        } else if (sv < 1 && h < 100 && fabs((double)h - sv * 100) <= 1e-9 * 100) {
+            s[0] = '.';
+            s[1] = (char)('0' + h / 10);
+            s[2] = (char)('0' + h % 10);
+        } else if (sv < 10 && t < 100 && fabs((double)t - sv * 10) <= 1e-9 * 10) {
+            s[0] = (char)('0' + t / 10);
+            s[1] = '.';
+            s[2] = (char)('0' + t % 10);
+        } else {
             return pdn_aprs__refuse(e, "snowfall has no exact three-character form");
+        }
         pdn_aprs__putc(e->b, 's');
         pdn_aprs__put(e->b, s, 3);
         return 1;
@@ -932,6 +932,17 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
     } else if (r->has_range && !range_in_cs) {
         return pdn_aprs__refuse(e, "a compressed position has room for a course/speed or a range, not both");
     }
+    /* then, in this order: the voice frequency, in the first bytes of the
+       comment where radios read it (APRS12c ch. 18), after a / straight
+       after a 7-byte data extension; the braces; the altitude; the free
+       text, telemetry and !DAO! */
+    if (r->has_frequency) {
+        if (at_ext)
+            pdn_aprs__putc(e->b, '/');
+        if (!pdn_aprs__encode_frequency(e, &r->frequency))
+            return 0;
+        at_ext = 0;
+    }
     /* braces */
     if (r->signpost[0]) {
         size_t n = strlen(r->signpost);
@@ -1074,7 +1085,9 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
         return pdn_aprs__refuse(e, "course or speed out of range for Mic-E");
     if (r->has_course && course == 0)
         return pdn_aprs__refuse(e, "a Mic-E course of 0 means unknown");
-    info[4] = (uint8_t)(speed < 200 ? speed / 10 + 108 : speed / 10 + 28);
+    /* speed tens + 80 below 190 knots; 190-199 is /, the printable one of
+       its two forms (APRS12c ch. 10), and 200 on + 0 */
+    info[4] = (uint8_t)(speed < 190 ? speed / 10 + 108 : speed / 10 + 28);
     info[5] = (uint8_t)((speed % 10) * 10 + course / 100 + 4 + 28);
     info[6] = (uint8_t)(course % 100 + 28);
     info[7] = (uint8_t)r->symbol.code;
@@ -1401,6 +1414,22 @@ static int encode_meta(pdn_aprs__ectx *e, const pdn_aprs_data *d)
     return 1;
 }
 
+/* Writes a number's text as sent, when there is one and it reads as the
+   value: an optional -, digits and a decimal point, after one space when
+   spaced and the value is not negative. Returns 0 to format the value. */
+static int put_number_as_sent(pdn_aprs__buf *b, const char *text, double value, int spaced)
+{
+    const char *t = text;
+    double check;
+    if (spaced && t[0] == ' ')
+        t++;
+    if (!t[0] || !pdn_aprs__parse_number((const uint8_t *)t, strlen(t), 0, &check) || check != value ||
+        (t != text && t[0] == '-'))
+        return 0;
+    pdn_aprs__puts(b, text);
+    return 1;
+}
+
 static int encode_telemetry(pdn_aprs__ectx *e, const pdn_aprs_telemetry *t)
 {
     size_t sl = strlen(t->sequence), i;
@@ -1422,17 +1451,13 @@ static int encode_telemetry(pdn_aprs__ectx *e, const pdn_aprs_telemetry *t)
         pdn_aprs__putc(e->b, ',');
     for (k = 0; k < 5; k++) {
         const pdn_aprs_number *v = &t->analog[k];
-        double check;
         if (k)
             pdn_aprs__putc(e->b, ',');
         if (v->is_null)
             continue;
         if (!finite_number(v->value))
             return pdn_aprs__refuse(e, "a telemetry value is a number");
-        if (v->text[0] && pdn_aprs__parse_number((const uint8_t *)v->text, strlen(v->text), 0, &check) &&
-            check == v->value)
-            pdn_aprs__puts(e->b, v->text);
-        else
+        if (!put_number_as_sent(e->b, v->text, v->value, 0))
             pdn_aprs__putd(e->b, v->value);
     }
     pdn_aprs__putc(e->b, ',');
@@ -1652,13 +1677,17 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_da
             if (!finite_number(q->latitude) || !finite_number(q->longitude) || q->latitude < -90 || q->latitude > 90 ||
                 q->longitude < -180 || q->longitude > 180 || q->radius_miles > 9999)
                 return pdn_aprs__refuse(e, "footprint out of range");
-            /* the leading space marks a positive latitude; never before a
-               minus sign (APRS12c ch. 15) */
-            if (!(q->latitude < 0))
-                pdn_aprs__putc(e->b, ' ');
-            pdn_aprs__putd(e->b, q->latitude);
+            /* the numbers as sent, like telemetry values; otherwise the
+               leading space marks a positive latitude, and is never before
+               a minus sign (APRS12c ch. 15) */
+            if (!put_number_as_sent(e->b, q->latitude_text, q->latitude, 1)) {
+                if (!(q->latitude < 0))
+                    pdn_aprs__putc(e->b, ' ');
+                pdn_aprs__putd(e->b, q->latitude);
+            }
             pdn_aprs__putc(e->b, ',');
-            pdn_aprs__putd(e->b, q->longitude);
+            if (!put_number_as_sent(e->b, q->longitude_text, q->longitude, 1))
+                pdn_aprs__putd(e->b, q->longitude);
             pdn_aprs__putc(e->b, ',');
             pdn_aprs__putu(e->b, q->radius_miles, 4);
         }

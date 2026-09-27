@@ -568,6 +568,11 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_query(pdn_aprs__dctx *c)
         q->latitude = lat;
         q->longitude = lon;
         q->radius_miles = (uint16_t)rad;
+        /* the numbers as sent, for identical re-encoding (round 7) */
+        if (c1 - i < sizeof q->latitude_text)
+            pdn_aprs__memlcpy(q->latitude_text, sizeof q->latitude_text, s + i, c1 - i);
+        if (c2 - c1 - 1 < sizeof q->longitude_text)
+            pdn_aprs__memlcpy(q->longitude_text, sizeof q->longitude_text, s + c1 + 1, c2 - c1 - 1);
     }
 }
 
