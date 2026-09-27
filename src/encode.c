@@ -1652,7 +1652,10 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_da
             if (!finite_number(q->latitude) || !finite_number(q->longitude) || q->latitude < -90 || q->latitude > 90 ||
                 q->longitude < -180 || q->longitude > 180 || q->radius_miles > 9999)
                 return pdn_aprs__refuse(e, "footprint out of range");
-            pdn_aprs__putc(e->b, ' ');
+            /* the leading space marks a positive latitude; never before a
+               minus sign (APRS12c ch. 15) */
+            if (!(q->latitude < 0))
+                pdn_aprs__putc(e->b, ' ');
             pdn_aprs__putd(e->b, q->latitude);
             pdn_aprs__putc(e->b, ',');
             pdn_aprs__putd(e->b, q->longitude);

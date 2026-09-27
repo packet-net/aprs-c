@@ -521,13 +521,22 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_query(pdn_aprs__dctx *c)
             return;
         }
         {
+            /* "Note the leading space in the latitude, as its value is
+               positive" (APRS12c ch. 15): a space only before a positive
+               value, so a space then a minus sign is not a number */
             size_t a = i, b = c1 + 1;
-            if (s[a] == ' ')
+            int spaced_negative = 0;
+            if (s[a] == ' ') {
                 a++;
-            if (b < c2 && s[b] == ' ')
+                spaced_negative |= a < c1 && s[a] == '-';
+            }
+            if (b < c2 && s[b] == ' ') {
                 b++;
+                spaced_negative |= b < c2 && s[b] == '-';
+            }
             rad = pdn_aprs__digits(s + c2 + 1, n - c2 - 1);
-            if (!pdn_aprs__parse_number(s + a, c1 - a, 0, &lat) || !pdn_aprs__parse_number(s + b, c2 - b, 0, &lon) ||
+            if (spaced_negative || !pdn_aprs__parse_number(s + a, c1 - a, 0, &lat) ||
+                !pdn_aprs__parse_number(s + b, c2 - b, 0, &lon) ||
                 rad < 0 || n - c2 - 1 != 4 || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
                 pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_GENERAL_QUERY);
                 return;

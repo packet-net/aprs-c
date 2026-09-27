@@ -3943,13 +3943,22 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_query(pdn_aprs__dctx *c)
             return;
         }
         {
+            /* "Note the leading space in the latitude, as its value is
+               positive" (APRS12c ch. 15): a space only before a positive
+               value, so a space then a minus sign is not a number */
             size_t a = i, b = c1 + 1;
-            if (s[a] == ' ')
+            int spaced_negative = 0;
+            if (s[a] == ' ') {
                 a++;
-            if (b < c2 && s[b] == ' ')
+                spaced_negative |= a < c1 && s[a] == '-';
+            }
+            if (b < c2 && s[b] == ' ') {
                 b++;
+                spaced_negative |= b < c2 && s[b] == '-';
+            }
             rad = pdn_aprs__digits(s + c2 + 1, n - c2 - 1);
-            if (!pdn_aprs__parse_number(s + a, c1 - a, 0, &lat) || !pdn_aprs__parse_number(s + b, c2 - b, 0, &lon) ||
+            if (spaced_negative || !pdn_aprs__parse_number(s + a, c1 - a, 0, &lat) ||
+                !pdn_aprs__parse_number(s + b, c2 - b, 0, &lon) ||
                 rad < 0 || n - c2 - 1 != 4 || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
                 pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_GENERAL_QUERY);
                 return;
@@ -6104,7 +6113,10 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_da
             if (!finite_number(q->latitude) || !finite_number(q->longitude) || q->latitude < -90 || q->latitude > 90 ||
                 q->longitude < -180 || q->longitude > 180 || q->radius_miles > 9999)
                 return pdn_aprs__refuse(e, "footprint out of range");
-            pdn_aprs__putc(e->b, ' ');
+            /* the leading space marks a positive latitude; never before a
+               minus sign (APRS12c ch. 15) */
+            if (!(q->latitude < 0))
+                pdn_aprs__putc(e->b, ' ');
             pdn_aprs__putd(e->b, q->latitude);
             pdn_aprs__putc(e->b, ',');
             pdn_aprs__putd(e->b, q->longitude);
