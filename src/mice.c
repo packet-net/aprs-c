@@ -148,10 +148,10 @@ PDN_APRS__PRIVATE size_t pdn_aprs__mic_e_locator_len(const uint8_t *s, size_t n)
    for before they are, so they are lifted here only from a copy. */
 static int rest_is_spaced(pdn_aprs__dctx *c, const uint8_t *t, size_t tl)
 {
-    static const pdn_aprs_report blank;
     pdn_aprs__cbuf copy;
-    pdn_aprs_report scratch = blank;
+    pdn_aprs_report scratch;
     uint8_t dao[5];
+    memset(&scratch, 0, sizeof scratch);
     if (!pdn_aprs__cbuf_set(c, &copy, t, tl))
         return 0;
     pdn_aprs__lift_telemetry_dao(&copy, &scratch, dao);
@@ -163,11 +163,11 @@ static int rest_is_spaced(pdn_aprs__dctx *c, const uint8_t *t, size_t tl)
    not joined. */
 static int joins_altitude(pdn_aprs__dctx *c, const pdn_aprs__cbuf *cb)
 {
-    static const pdn_aprs_report blank;
     pdn_aprs__cbuf copy;
-    pdn_aprs_report scratch = blank;
+    pdn_aprs_report scratch;
     uint8_t dao[5];
     size_t k;
+    memset(&scratch, 0, sizeof scratch);
     if (!pdn_aprs__cbuf_set(c, &copy, cb->b, cb->n))
         return 0;
     pdn_aprs__lift_telemetry_dao(&copy, &scratch, dao);
