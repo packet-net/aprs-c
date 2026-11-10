@@ -368,10 +368,11 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
             r->altitude_feet = (double)(pdn_aprs__b91(cb.b + k, 3) - 10000) * FEET_PER_METRE;
             pdn_aprs__cbuf_cut(&cb, k, 4);
             cb.cut = k + 1;
-        } else if (pdn_aprs__rejects(c, PDN_APRS_CODE_MIC_E_ALTITUDE_NOT_FIRST) &&
-                   joins_altitude(c, &cb, k + 4 <= cb.n ? k : cb.n)) {
-            /* left as text, lifting the !DAO! would make an altitude that
-               is not in the bytes */
+        } else if (k + 4 <= cb.n && joins_altitude(c, &cb, k)) {
+            /* a later altitude declined: left as text, lifting the !DAO!
+               would make one that is not in the bytes. With no later
+               altitude there is nothing to decline, and a strict decoder
+               reads the text as a lenient one does */
             pdn_aprs__fail(c, PDN_APRS_CODE_MIC_E_ALTITUDE_NOT_FIRST);
             return;
         }

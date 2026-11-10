@@ -528,6 +528,16 @@ static void test_batch2(void)
           pdn_aprs_encode_info(&pkt.data, NULL, buf, sizeof buf - 1, NULL) == 45 &&
           memcmp(buf, ";SEARCH   *092345z4903.50N\\07201.75Wl81019310", 45) == 0);
 
+    /* with no later altitude, a strict decoder reads Mic-E status text as a
+       lenient one does, though lifting telemetry leaves RWJ} */
+    {
+        pdn_aprs_decode_options so;
+        const char *t = "N0CALL>S32UVT:`j.po_Tk/`\"=K3RW|)>%v|J}146.520MHz 146.970(127.3)_6";
+        memset(&so, 0, sizeof so);
+        so.strict = 1;
+        CHECK(pdn_aprs_decode_tnc2(t, strlen(t), &so, &pkt) == PDN_APRS_OK && pkt.data.type == PDN_APRS_TYPE_MIC_E);
+    }
+
     /* a later Mic-E altitude is looked for before the !DAO! is lifted */
     CHECK(decode("K4NNW-13>SWQR1T:`lX\x1fn\"C>/]\"13.7V!w*@!7e}=") == PDN_APRS_OK &&
           pkt.data.as.report.has_altitude && !pkt.data.as.report.has_dao &&
