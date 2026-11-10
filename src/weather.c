@@ -20,26 +20,26 @@ static int field_index(uint8_t letter, int snow)
 {
     switch (letter) {
     case 'c':
-        return PDN_APRS_WX_WIND_DIRECTION;
+        return PDN_APRS_WX_WIND_DIRECTION_DEGREES;
     case 's':
-        return snow ? PDN_APRS_WX_SNOW_24H : PDN_APRS_WX_WIND_SPEED;
+        return snow ? PDN_APRS_WX_SNOW_24H_IN : PDN_APRS_WX_WIND_SPEED_MPH;
     case 'g':
-        return PDN_APRS_WX_WIND_GUST;
+        return PDN_APRS_WX_WIND_GUST_MPH;
     case 't':
-        return PDN_APRS_WX_TEMPERATURE;
+        return PDN_APRS_WX_TEMPERATURE_F;
     case 'r':
-        return PDN_APRS_WX_RAIN_1H;
+        return PDN_APRS_WX_RAIN_1H_IN;
     case 'p':
-        return PDN_APRS_WX_RAIN_24H;
+        return PDN_APRS_WX_RAIN_24H_IN;
     case 'P':
-        return PDN_APRS_WX_RAIN_MIDNIGHT;
+        return PDN_APRS_WX_RAIN_MIDNIGHT_IN;
     case 'h':
-        return PDN_APRS_WX_HUMIDITY;
+        return PDN_APRS_WX_HUMIDITY_PERCENT;
     case 'b':
-        return PDN_APRS_WX_PRESSURE;
+        return PDN_APRS_WX_PRESSURE_MBAR;
     case 'L':
     case 'l':
-        return PDN_APRS_WX_LUMINOSITY;
+        return PDN_APRS_WX_LUMINOSITY_W_M2;
     case '#':
         return PDN_APRS_WX_RAIN_RAW;
     default:
@@ -119,9 +119,9 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
                object or item report) and the speed is not known yet; it is
                snowfall otherwise (APRS12c ch. 12 defines s twice) */
             if (mode == 0)
-                snow = present[PDN_APRS_WX_WIND_SPEED];
+                snow = present[PDN_APRS_WX_WIND_SPEED_MPH];
             else
-                snow = wind_known || !present[PDN_APRS_WX_WIND_DIRECTION] || present[PDN_APRS_WX_WIND_SPEED];
+                snow = wind_known || !present[PDN_APRS_WX_WIND_DIRECTION_DEGREES] || present[PDN_APRS_WX_WIND_SPEED_MPH];
         }
         idx = field_index(L, snow);
         if (idx < 0) {
@@ -240,7 +240,7 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
        DDD/SSS extension belongs, before any field: wind sent as c and s
        fields, and wind that is missing or incomplete (not both c and s). */
     if (mode != 0) {
-        int wind = wind_known || mode == 3 || (present[PDN_APRS_WX_WIND_DIRECTION] && present[PDN_APRS_WX_WIND_SPEED]);
+        int wind = wind_known || mode == 3 || (present[PDN_APRS_WX_WIND_DIRECTION_DEGREES] && present[PDN_APRS_WX_WIND_SPEED_MPH]);
         if (wind_fields && !pdn_aprs__tolerate(c, PDN_APRS_CODE_WIND_FIELDS_INSTEAD_OF_EXTENSION))
             return 0;
         if (!wind && !pdn_aprs__tolerate(c, PDN_APRS_CODE_INCOMPLETE_WEATHER))
@@ -252,18 +252,18 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
 
     /* complete weather */
     if (mode == 0) {
-        if (!(present[PDN_APRS_WX_WIND_DIRECTION] && present[PDN_APRS_WX_WIND_SPEED] &&
-              present[PDN_APRS_WX_WIND_GUST] && present[PDN_APRS_WX_TEMPERATURE]) &&
+        if (!(present[PDN_APRS_WX_WIND_DIRECTION_DEGREES] && present[PDN_APRS_WX_WIND_SPEED_MPH] &&
+              present[PDN_APRS_WX_WIND_GUST_MPH] && present[PDN_APRS_WX_TEMPERATURE_F]) &&
             !pdn_aprs__tolerate(c, PDN_APRS_CODE_INCOMPLETE_WEATHER))
             return 0;
     } else {
-        if (!(present[PDN_APRS_WX_WIND_GUST] && present[PDN_APRS_WX_TEMPERATURE]) &&
+        if (!(present[PDN_APRS_WX_WIND_GUST_MPH] && present[PDN_APRS_WX_TEMPERATURE_F]) &&
             !pdn_aprs__tolerate(c, PDN_APRS_CODE_INCOMPLETE_WEATHER))
             return 0;
         if (mode == 3 && wind_fields_known && r && !r->has_compression) {
             r->has_compression = 1;
             r->compression.fix = PDN_APRS_FIX_CURRENT;
-            r->compression.source = PDN_APRS_NMEA_OTHER;
+            r->compression.source = PDN_APRS_SOURCE_OTHER;
             r->compression.origin = PDN_APRS_ORIGIN_SOFTWARE;
         }
     }

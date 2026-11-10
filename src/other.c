@@ -66,8 +66,8 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_status(pdn_aprs__dctx *c)
     }
     if (n >= 3 && s[n - 3] == '^' && (A_DIGIT(s[n - 2]) || A_UPPER(s[n - 2])) && s[n - 1] >= '1' && s[n - 1] <= 'K') {
         st->has_beam = 1;
-        st->beam_heading = (char)s[n - 2];
-        st->beam_power = (char)s[n - 1];
+        st->beam_heading_code = (char)s[n - 2];
+        st->beam_power_code = (char)s[n - 1];
         /* the text before it is kept as sent, spaces included */
         n -= 3;
     }
