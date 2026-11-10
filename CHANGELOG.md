@@ -17,10 +17,14 @@ Encoding:
   - Mic-E status text starting with 0x1D after Rev 0 telemetry is written straight on; the `/` is only for status text that would start with 0x1D (E6).
   - No delimiter where none is needed: none before `.../...` text after a compressed position, which has no data extension to mistake it for, and none before text after a Mic-E type code that only looks like a locator (`wO91SX/G`: a locator's first two letters are A-R). The space after a frequency is written before a comment that starts with a NUL, which was taken for a tone letter (E7).
   - Snowfall under 1 inch is `.` and two digits (0.5 as `.50`); it wrote `0.5` (E8).
-  - A compressed wind direction that rounds to 360 degrees is written as north (c = 0); a 358-degree wind was refused (E9).
+  - A compressed wind direction that rounds to 360 degrees is written as north (c = 0); a 358-degree wind was refused (E9). A compressed course that rounds to north (1 degree, say) is no longer refused either.
+  - A `!DAO!` on a compressed position carries the digits of the position the compressed bytes report; they were taken from the position given, which can differ by a fraction of a compressed step (E2).
+- A value is range-checked once rounded to the step its field holds: a humidity of 99.7% is written `h00` (100%), a speed of 999.4 knots `999`, a luminosity of 999.7 W/m2 `l000`. They were refused.
+- NMEA data whose position, fix, course, speed, altitude, time or waypoint disagrees with its sentence is refused, since the sentence is written as it is and would read back with its own; the fields were not checked. Fields left unset are not checked, so data holding only a sentence is still written.
 
 Tests and tools:
 
+- `pdn_aprs_diffdump` gains `--encode` (neutral data in, the bytes written and what they decode to out) and `--build` (builder recipes in, the line built out), and its decode records gain the API view, as the vectors' README describes. It reads stdin and writes stdout.
 - The vectors move to the exact-bytes branch. The runner compares the bytes written with `canonical_info` byte for byte for `equivalent` and the new `rounded` (whose data read back is not compared); it only checked that they decoded to the same data.
 
 ## 0.2.0
