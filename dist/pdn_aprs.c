@@ -4718,13 +4718,17 @@ enum { COORD_HUNDREDTHS, COORD_CUT, COORD_THOUSANDTHS, COORD_BASE91 };
 /* Whole degrees and hundredths of minutes of |v|, and in *digit the DAO
    digit's value (0 unless a DAO mode). The minutes are computed once from
    the degrees given and rounded once (ruling F2). */
-static void split_coord(double v, int mode, int *deg, long *hund, long *digit)
+static void split_coord(double v, int mode, int amb, int *deg, long *hund, long *digit)
 {
+    static const double box[5] = {1, 10, 100, 1000, 6000};
     double mag = fabs(v), d = floor(mag), h = (mag - d) * 6000.0;
     long units;
     *digit = 0;
     if (mode == COORD_CUT) {
-        units = (long)floor(h + 1e-6);
+        /* cut to the box, a value within 1e-6 of the edge above it (in the
+           box's units) being on it (ruling G2) */
+        double b = box[amb >= 0 && amb <= 4 ? amb : 0];
+        units = (long)(floor(h / b + 1e-6) * b);
     } else if (mode == COORD_THOUSANDTHS) {
         units = (long)pdn_aprs__round(h * 10.0);
         *digit = units % 10;
@@ -4814,8 +4818,8 @@ static int put_uncompressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, char da
         return pdn_aprs__refuse(e, "a !DAO! cannot add precision to an ambiguous position");
     /* with ambiguity the digits kept are those of the box the position is
        in (truncated); with a !DAO! the rest goes in its digits */
-    split_coord(r->latitude, coord_mode(dao_prec, r->ambiguity), &ldeg, &lh, &lx);
-    split_coord(r->longitude, coord_mode(dao_prec, r->ambiguity), &gdeg, &gh, &gx);
+    split_coord(r->latitude, coord_mode(dao_prec, r->ambiguity), r->ambiguity, &ldeg, &lh, &lx);
+    split_coord(r->longitude, coord_mode(dao_prec, r->ambiguity), r->ambiguity, &gdeg, &gh, &gx);
     dao_digits(dao_prec, lx, gx, &a, &o);
     if (ldeg > 90 || gdeg > 180)
         return pdn_aprs__refuse(e, "position out of range");
@@ -4872,17 +4876,18 @@ static void put_gga_altitude(pdn_aprs__buf *b, double feet, int *exact)
     *exact = feet >= 1 && fabs(pow(1.002, (double)cs) - feet) <= 1e-9 * feet;
 }
 
-/* The cs step of a speed in knots, 1.08^s - 1, rounded once (ruling F2);
-   a speed that rounds to 0 knots is s = 0. -1 if none holds it. */
+/* The cs step of a speed in knots, 1.08^s - 1, rounded once (rulings F2
+   and G3); -1 if none holds it. */
 static long cs_speed_step(double knots)
 {
     double s;
-    if (!finite_number(knots) || pdn_aprs__round(knots) < 0)
+    /* the steps follow the formula for every whole s, and a value outside
+       the byte's 0-90 is refused (ruling G3): -0.03 knots is s = 0, -0.3 is
+       s = -5 */
+    if (!finite_number(knots) || knots <= -1)
         return -1;
-    if (knots <= 0)
-        return 0;
     s = pdn_aprs__round(log(knots + 1.0) / log(1.08));
-    return s > 90 ? -1 : (long)s;
+    return s < 0 || s > 90 ? -1 : (long)s;
 }
 
 /* The cs step of a range, 2 x 1.08^s miles, rounded once; -1 if none
@@ -5005,8 +5010,8 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         if (!dao_datum_ok(&r->dao))
             return pdn_aprs__refuse(e, DAO_DATUM_REFUSAL);
         /* the position reported: what the compressed bytes decode to */
-        split_coord(90.0 - y / 380926.0, mode, &deg, &hund, &lx);
-        split_coord(x / 190463.0 - 180.0, mode, &deg, &hund, &gx);
+        split_coord(90.0 - y / 380926.0, mode, 0, &deg, &hund, &lx);
+        split_coord(x / 190463.0 - 180.0, mode, 0, &deg, &hund, &gx);
         dao_digits(r->dao.precision, lx, gx, &a, &o);
         dao[0] = '!';
         dao[1] = r->dao.precision == PDN_APRS_DAO_BASE91 ? (char)(dc + 32) : dc;
@@ -5702,8 +5707,8 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
         return pdn_aprs__refuse(e, "a Mic-E message type mixing standard and custom bits has no meaning");
     if (r->destination_ssid > 15)
         return pdn_aprs__refuse(e, "destination SSID out of range");
-    split_coord(r->latitude, coord_mode(dao_prec, amb), &ldeg, &lh, &lx);
-    split_coord(r->longitude, coord_mode(dao_prec, amb), &gdeg, &gh, &gx);
+    split_coord(r->latitude, coord_mode(dao_prec, amb), amb, &ldeg, &lh, &lx);
+    split_coord(r->longitude, coord_mode(dao_prec, amb), amb, &gdeg, &gh, &gx);
     dao_digits(dao_prec, lx, gx, &a, &o);
     if (amb) {
         /* the longitude digits a decoder ignores hold the centre it reports

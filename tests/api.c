@@ -390,11 +390,12 @@ static void test_batch2(void)
     pos.speed_knots = 10;
     CHECK(pdn_aprs_build_position(&me, &pos, NULL, 0, line, sizeof line) > 0 && (info = strchr(line, ':')) != NULL &&
           info[12] == 'l');
-    /* a compressed speed of -0.3 rounds to 0 knots and is written (F2) */
-    pos.speed_knots = -0.3;
+    /* cs steps follow the formula for every whole s (G3): -0.03 knots is the
+       nearest s = 0 and written, -0.3 is s = -5 and refused */
+    pos.speed_knots = -0.03;
     CHECK(pdn_aprs_build_position(&me, &pos, NULL, 0, line, sizeof line) > 0 && decode(line) == PDN_APRS_OK &&
           pkt.data.as.report.speed_knots == 0);
-    pos.speed_knots = -0.6;
+    pos.speed_knots = -0.3;
     CHECK(pdn_aprs_build_position(&me, &pos, NULL, 0, line, sizeof line) == PDN_APRS_ERR_REFUSED);
     /* a compressed course that rounds to 0 is refused (B1, F1) */
     pos.speed_knots = 10;
@@ -442,6 +443,16 @@ static void test_batch2(void)
     mic.has_course = 0;
     mic.ambiguity = 2;
     CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line) > 0 && strstr(line, ":`(_N") != NULL);
+    /* the cut takes the 1e-6 tolerance (G2): 80.49 degrees is 29.40 minutes,
+       which at one level is the box 29.4x, centre 29.45 */
+    mic.ambiguity = 1;
+    mic.longitude = 80.49;
+    CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line) > 0 && decode(line) == PDN_APRS_OK &&
+          fabs(pkt.data.as.report.longitude - (80 + 29.45 / 60)) < 1e-9);
+    /* a PHG after a Mic-E locator and its space is lifted before the
+       altitude search, so its digits are not an altitude (G1) */
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91SX/G PHG1060}AB") == PDN_APRS_OK && pkt.data.as.report.has_phg &&
+          !pkt.data.as.report.has_altitude && strcmp(pkt.data.as.report.locator, "IO91SX") == 0);
 
     /* an empty message ID is refused, not taken as none (B8) */
     CHECK(pdn_aprs_build_message(&me, "G4XYZ", "hi", "", line, sizeof line) == PDN_APRS_ERR_REFUSED);

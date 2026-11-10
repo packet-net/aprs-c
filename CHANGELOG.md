@@ -24,14 +24,15 @@ Encoding:
   - A `!DAO!` on a compressed position carries the digits of the position the compressed bytes report; they were taken from the position given, which can differ by a fraction of a compressed step (E2).
 - A value is range-checked once rounded to the step its field holds: a humidity of 99.7% is written `h00` (100%), a speed of 999.4 knots `999`, a luminosity of 999.7 W/m2 `l000`. They were refused.
 - NMEA data whose position, fix, course, speed, altitude, time or waypoint disagrees with its sentence is refused, since the sentence is written as it is and would read back with its own; the fields were not checked. Fields left unset are not checked, so data holding only a sentence is still written.
-- Exact bytes, batch 2 (vectors rulings F1-F17, B1-B8; vectors f205471):
-  - Values between steps are rounded once to the nearest step, halves away from zero, a value within 1e-6 of a half (measured in steps) being the half, and checked after rounding (F2): a course or speed, `/A=` feet, Mic-E speed and course, latitude and longitude minutes, DAO digits, weather values, RNG miles, a footprint radius, a voice frequency, and what the cs bytes carry. Negative halves went toward +infinity (-0.5 was `t000` and `/A=000000`; now `t-01` and `/A=-00001`), and halves were decided without the tolerance (58.584999999999996 minutes from 0.9764166666666666 degrees is now `58.59`). A course of -0.3 is 0, a course of 360.4 is 360, and a compressed speed of -0.3 rounds to 0 knots and is written; it was refused. With a `!DAO!` the position is taken in DAO steps, rounded once, and split into the main digits and the DAO digit.
+- Exact bytes, batch 2 (vectors rulings F1-F17, B1-B8 and G1-G3; vectors 08cecbe):
+  - Values between steps are rounded once to the nearest step, halves away from zero, a value within 1e-6 of a half (measured in steps) being the half, and checked after rounding (F2): a course or speed, `/A=` feet, Mic-E speed and course, latitude and longitude minutes, DAO digits, weather values, RNG miles, a footprint radius, a voice frequency, and what the cs bytes carry. Negative halves went toward +infinity (-0.5 was `t000` and `/A=000000`; now `t-01` and `/A=-00001`), and halves were decided without the tolerance (58.584999999999996 minutes from 0.9764166666666666 degrees is now `58.59`). A course of -0.3 is 0 and a course of 360.4 is 360. A value the cs bytes carry rounds to the nearest step of their formula for any whole s, and is refused when that s is outside the byte (G3): a compressed speed of -0.03 knots is written as 0, -0.3 is refused, a range of 1.95 miles is written as 2. With a `!DAO!` the position is taken in DAO steps, rounded once, and split into the main digits and the DAO digit.
   - A course of 0 is written only where it reads back as 0: `000` uncompressed, refused in Mic-E and compressed reports, after rounding (F1). A compressed course needs a speed and a speed a course (F5).
   - Snowfall that rounds to a whole number is three digits (0.995 is `001`, 9.96 is `010`), and one that rounds past 999 is refused (F3).
   - A frequency after a DF bearing or storm data follows a `/` (F9).
   - Numbers given without their text (F11): a telemetry value that is a whole number 0-999 is three digits (`005`, `000`, `091`); a general query's footprint latitude and longitude that are not negative take a leading space, 0 included (F15), and the radius is rounded to whole miles.
   - A compressed weather report's GGA altitude goes in the cs bytes alone, rounded to their step, as it has no comment for a `/A=` (F14); it was refused.
   - Comment text holding a PHG, RNG or DFS after an area is refused, since it now reads back as the data extension (F7a). A Mic-E locator followed straight by base-91 telemetry or a `!DAO!` is written (F16).
+  - The ambiguity cut takes the 1e-6 tolerance in the box's units, so 80.49 degrees (29.40 minutes) is the box 29.4x (G2).
   - With ambiguity, the Mic-E longitude digits a decoder ignores hold the centre it reports (README Mic-E rule); they held the position's own digits.
   - Where neither the canonical form nor a `/` reads back, a space is written before the comment: a Mic-E comment such as `{5}` after a `/A=` would join its digits into a Mic-E altitude, and `/` is a base-91 byte itself (README Encoding rule, E12).
   - The builder passes a compressed course on as given, so it is rounded once: 301.7 degrees is `l`, where whole degrees first gave `m`. A Mic-E builder course that rounds to 0 is the spec's unknown (B1).
@@ -39,6 +40,7 @@ Encoding:
 Decoding:
 
 - A PHG, RNG or DFS later in an area object's comment is found as the data extension, as after a course/speed (ruling F7a: an area, like a DF bearing or storm data, describes the object, not the station's radio).
+- A PHG or RNG straight after a Mic-E locator and its space is lifted before a later Mic-E altitude is looked for, so its digits are never one (G1; this already held, and is now tested).
 - Base-91 telemetry and a `!DAO!` come out of Mic-E status text before the locator is read, so a locator followed straight by either has no `missing-space-after-locator` (F16).
 
 Tests and tools:

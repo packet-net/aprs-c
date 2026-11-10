@@ -239,7 +239,7 @@ The library was written to be added to the source tree of a program like LinBPQ/
 
 The tests run every check the vectors' README defines against every case in [packet-net/aprs-vectors](https://github.com/packet-net/aprs-vectors), which is a submodule at `vectors/`: the lenient decode, the strict decode, the decode with each single tolerance switched off, the re-encode (identical; `canonical_info` byte for byte, for equivalent and rounded; or refused) and the encode cases.
 
-- **Vectors:** all 6,137 checks pass over 1,945 cases: 1,835 lenient decodes, 1,835 strict decodes, 694 decodes with a single tolerance switched off, 1,663 re-encodes and 110 encode cases. `pdn_aprs_vectors vectors -v` lists every check by case id.
+- **Vectors:** all 6,142 checks pass over 1,950 cases: 1,835 lenient decodes, 1,835 strict decodes, 694 decodes with a single tolerance switched off, 1,663 re-encodes and 115 encode cases. `pdn_aprs_vectors vectors -v` lists every check by case id.
 - **A real capture:** at 0.1.0, on 6,879,893 packets from APRS-IS, the decodings (lenient and strict) and re-encodings agreed with the Rust library's on every packet, by the vectors' `tools/compare.py`. The only differences were encoder choices the comparison does not count: for 114 objects this library wrote the original bytes back where Rust wrote different but equivalent ones.
 - **Differential fuzzing:** the five implementations were also compared over 2,000,000 mutated packets (2026-09-27). Every disagreement was settled by a ruling, and the rulings are in the vectors as cases.
 
@@ -251,7 +251,7 @@ zcat data.jsonl.gz | build/pdn_aprs_diffdump --encode | gzip > c-encode.jsonl.gz
 zcat recipes.jsonl.gz | build/pdn_aprs_diffdump --build | gzip > c-build.jsonl.gz # build: builder recipes
 ```
 
-A decode record holds the bytes the encoder writes and the API view (the source, destination, path, q-construct, device and symbol description, and `inner` for a third-party packet). In build mode a recipe key the builder has no way to take, such as an empty telemetry channel, a status locator or beam heading, a message's reply-ack, text holding a NUL, or text longer than the C data holds (1024 bytes), is reported as `unsupported`, naming the key.
+A decode record holds the bytes the encoder writes and the API view (the source, destination, path, q-construct, device and symbol description, and `inner` for a third-party packet). In build mode a recipe key the builder has no way to take, such as an empty telemetry channel, a status locator or beam heading, a message's reply-ack, text holding a NUL, or text longer than the C data holds (1024 bytes), is reported as `unsupported`, naming the key. The vectors accept that last one: the rules set no size limit (ruling E11), and the C data model holds text of up to 1,024 bytes, twice the longest information field the decoder takes, so a longer text is something the builder has no way to say rather than data the Encoding rule declines.
 
 The decoder is also fuzzed with libFuzzer, AddressSanitizer and UndefinedBehaviorSanitizer (`fuzz/fuzz_decode.c`): every input is decoded as a TNC2 line, an AX.25 frame and an information field, leniently and strictly, and whatever decodes is re-encoded and decoded again to check it reads back the same. Inputs that once failed are kept in `fuzz/regressions/`, and the tests replay them on every platform.
 
