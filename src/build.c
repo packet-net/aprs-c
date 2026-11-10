@@ -66,6 +66,13 @@ static size_t set_text(char *dst, size_t cap, const char *src)
     return n;
 }
 
+static void upper_case(char *s)
+{
+    for (; *s; s++)
+        if (*s >= 'a' && *s <= 'z')
+            *s = (char)(*s - 'a' + 'A');
+}
+
 static int fill_position(pdn_aprs_report *r, const pdn_aprs_position *p)
 {
     size_t n;
@@ -181,6 +188,7 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e *
     if (set_text(r->device_suffix, sizeof r->device_suffix, m->device_suffix) == (size_t)-1 ||
         set_text(r->locator, sizeof r->locator, m->locator) == (size_t)-1)
         return PDN_APRS_ERR_ARGUMENT;
+    upper_case(r->locator);
     if (m->frequency) {
         r->has_frequency = 1;
         r->frequency = *m->frequency;
@@ -312,9 +320,7 @@ int pdn_aprs_build_status_options(const pdn_aprs_station *station, const pdn_apr
         return PDN_APRS_ERR_ARGUMENT;
     s->text_len = (uint16_t)n;
     /* a locator is sent in upper case */
-    for (n = 0; s->locator[n]; n++)
-        if (s->locator[n] >= 'a' && s->locator[n] <= 'z')
-            s->locator[n] = (char)(s->locator[n] - 'a' + 'A');
+    upper_case(s->locator);
     s->symbol = o->symbol;
     s->has_beam = o->has_beam != 0;
     s->beam_heading = o->beam_heading;

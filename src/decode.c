@@ -504,6 +504,8 @@ int pdn_aprs_decode_third_party(const pdn_aprs_data *outer, const pdn_aprs_decod
     if (!outer || !inner || outer->type != PDN_APRS_TYPE_THIRD_PARTY)
         return PDN_APRS_ERR_ARGUMENT;
     t = &outer->as.third_party;
+    if (t->len > sizeof t->packet)
+        return PDN_APRS_ERR_ARGUMENT;
     packet_reset(inner);
     memset(&c, 0, sizeof c);
     c.opt = options;

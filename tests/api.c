@@ -571,6 +571,28 @@ static void test_batch2(void)
           strcmp(pkt.data.as.report.comment, "\"13.7V!w*@") == 0);
 }
 
+static void test_long_third_party(void)
+{
+    static pdn_aprs_data d;
+    static pdn_aprs_packet inner;
+    static char line[4096];
+    static const char head[] = "WB4APR-14>APRS:>";
+    pdn_aprs_station me = {"G9RXG", NULL, NULL, 0, NULL};
+    size_t h = sizeof head - 1, n = h + 600;
+    int w;
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_THIRD_PARTY;
+    memcpy(d.as.third_party.packet, head, h);
+    memset(d.as.third_party.packet + h, 'x', 600);
+    d.as.third_party.len = (uint16_t)n;
+    w = pdn_aprs_build(&me, &d, line, sizeof line);
+    CHECK(w > 0 && (size_t)w > PDN_APRS_MAX_INFO && strstr(line, ":}WB4APR-14>APRS:>xxx") != NULL);
+    CHECK(pdn_aprs_decode_third_party(&d, NULL, &inner) == PDN_APRS_OK &&
+          inner.data.type == PDN_APRS_TYPE_STATUS && inner.data.as.status.text_len == 600);
+    d.as.third_party.len = 60000;
+    CHECK(pdn_aprs_decode_third_party(&d, NULL, &inner) == PDN_APRS_ERR_ARGUMENT);
+}
+
 int main(void)
 {
     test_basics();
@@ -582,6 +604,7 @@ int main(void)
     test_batch2();
     test_legacy_mic_e();
     test_locale();
+    test_long_third_party();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

@@ -1204,8 +1204,7 @@ int pdn_aprs_build_status(const pdn_aprs_station *station, const char *text, con
    locator (4 or 6 characters, with symbol after it) may be set, not both;
    NULL or "" leaves either out. beam_heading and beam_power, when has_beam is
    set, are the meteor scatter ^HP codes after the text. A locator is sent in
-   upper case. Zero the struct
-   first (memset, or = {0}). */
+   upper case. Zero the struct first (memset, or = {0}). */
 typedef struct pdn_aprs_status_options {
     const char *text;
     const char *timestamp;
@@ -1228,7 +1227,7 @@ int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const char *sequen
 /* As pdn_aprs_build_telemetry, with channels that can be empty: present has
    one entry per analog value, 0 for an empty channel (sent as nothing between
    the commas; its analog value is ignored). present NULL means all five are
-   present. */
+   present. analog must not be NULL, even when every channel is empty. */
 int pdn_aprs_build_telemetry_channels(const pdn_aprs_station *station, const char *sequence,
                                       const double analog[5], const uint8_t present[5], const char *bits,
                                       const char *comment, void *buf, size_t cap);
