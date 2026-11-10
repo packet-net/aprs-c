@@ -60,7 +60,7 @@ int main(void)
         const pdn_aprs_report *r = &p.data.as.report;
         printf("at %.4f, %.4f: %s\n", r->latitude, r->longitude, pdn_aprs_symbol_description(r->symbol));
         if (r->has_course && r->has_speed)
-            printf("heading %u degrees at %.0f knots\n", (unsigned)r->course_degrees, r->speed_knots);
+            printf("heading %.0f degrees at %.0f knots\n", r->course_degrees, r->speed_knots);
         printf("comment: %s\n", r->comment);
     }
     for (i = 0; i < p.diagnostic_count; i++)
@@ -165,7 +165,7 @@ M0LTE-9>APZ001,WIDE1-1,WIDE2-1:T#005,199,0,255,73,123,01101001
 long message: the encoder refuses this data
 ```
 
-The encoder writes only what APRS allows. It refuses, with `PDN_APRS_ERR_REFUSED`, data it cannot write faithfully: message text over 67 characters, a comment that would read back as an altitude or a `!DAO!`, two data extensions, an object without a timestamp, a weather report with a comment, and so on. When it refuses, `pdn_aprs_encoded.reason` says why in plain words. As a last check it decodes what it has written and refuses if that does not read back as the same data, so what it writes always decodes cleanly. Numbers are rounded to what the format carries: a compressed position to its base-91 step, an uncompressed one to a hundredth of a minute unless a `!DAO!` asks for more.
+The encoder writes only what APRS allows. It refuses, with `PDN_APRS_ERR_REFUSED`, data it cannot write faithfully: message text over 67 characters, a comment that would read back as an altitude or a `!DAO!`, two data extensions, an object without a timestamp, a weather report with a comment, and so on. When it refuses, `pdn_aprs_encoded.reason` says why in plain words. As a last check it decodes what it has written and refuses if that does not read back as the same data, so what it writes always decodes cleanly. Numbers are rounded once to the step of the field they go in, to the nearest, halves away from zero, and checked after rounding: a compressed position to its base-91 step, an uncompressed one to a hundredth of a minute unless a `!DAO!` asks for more, a course to a whole degree (4 degrees in compressed bytes), an altitude to a foot, a temperature to a degree. A course of 0 is the spec's unknown: `000` uncompressed, and refused in Mic-E and compressed reports, where 0 has no form. A Mic-E altitude given to the builder in feet goes in a `/A=`, and one in metres (`altitude_m`) in the Mic-E altitude bytes.
 
 For full control, fill a `pdn_aprs_data` yourself (or take one from the decoder) and call `pdn_aprs_encode_info()`, `pdn_aprs_encode_tnc2()` or `pdn_aprs_encode_ax25()`. A Mic-E report's destination address is computed from its latitude and message type; the encoder returns it in `pdn_aprs_encoded.destination`. Pass the device table in `pdn_aprs_encode_options` (or a station's `devices`) when you have it: the encoder then also refuses a Mic-E comment that happens to end in a known device suffix, which would read back as the suffix.
 
@@ -239,7 +239,7 @@ The library was written to be added to the source tree of a program like LinBPQ/
 
 The tests run every check the vectors' README defines against every case in [packet-net/aprs-vectors](https://github.com/packet-net/aprs-vectors), which is a submodule at `vectors/`: the lenient decode, the strict decode, the decode with each single tolerance switched off, the re-encode (identical; `canonical_info` byte for byte, for equivalent and rounded; or refused) and the encode cases.
 
-- **Vectors:** 6,046 of 6,076 checks pass over 1,893 cases: 1,831 lenient decodes, 1,831 strict decodes, 693 decodes with a single tolerance switched off, 1,659 re-encodes and 62 encode cases. The 30 that fail are cases whose `canonical_info` still puts the `/A=` altitude before the voice frequency, which ruling E3 of the exact-bytes round reverses; the vectors will be updated. `pdn_aprs_vectors vectors -v` lists every check by case id.
+- **Vectors:** all 6,137 checks pass over 1,945 cases: 1,835 lenient decodes, 1,835 strict decodes, 694 decodes with a single tolerance switched off, 1,663 re-encodes and 110 encode cases. `pdn_aprs_vectors vectors -v` lists every check by case id.
 - **A real capture:** at 0.1.0, on 6,879,893 packets from APRS-IS, the decodings (lenient and strict) and re-encodings agreed with the Rust library's on every packet, by the vectors' `tools/compare.py`. The only differences were encoder choices the comparison does not count: for 114 objects this library wrote the original bytes back where Rust wrote different but equivalent ones.
 - **Differential fuzzing:** the five implementations were also compared over 2,000,000 mutated packets (2026-09-27). Every disagreement was settled by a ruling, and the rulings are in the vectors as cases.
 
@@ -251,7 +251,7 @@ zcat data.jsonl.gz | build/pdn_aprs_diffdump --encode | gzip > c-encode.jsonl.gz
 zcat recipes.jsonl.gz | build/pdn_aprs_diffdump --build | gzip > c-build.jsonl.gz # build: builder recipes
 ```
 
-A decode record holds the bytes the encoder writes and the API view (the source, destination, path, q-construct, device and symbol description, and `inner` for a third-party packet). In build mode a recipe key the builder has no way to take, such as an empty telemetry channel, a status locator or beam heading, a message's reply-ack, or text holding a NUL, is reported as `unsupported`, naming the key.
+A decode record holds the bytes the encoder writes and the API view (the source, destination, path, q-construct, device and symbol description, and `inner` for a third-party packet). In build mode a recipe key the builder has no way to take, such as an empty telemetry channel, a status locator or beam heading, a message's reply-ack, text holding a NUL, or text longer than the C data holds (1024 bytes), is reported as `unsupported`, naming the key.
 
 The decoder is also fuzzed with libFuzzer, AddressSanitizer and UndefinedBehaviorSanitizer (`fuzz/fuzz_decode.c`): every input is decoded as a TNC2 line, an AX.25 frame and an information field, leniently and strictly, and whatever decodes is re-encoded and decoded again to check it reads back the same. Inputs that once failed are kept in `fuzz/regressions/`, and the tests replay them on every platform.
 

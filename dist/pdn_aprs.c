@@ -72,6 +72,10 @@ PDN_APRS__PRIVATE long pdn_aprs__digits(const uint8_t *s, size_t n);
 PDN_APRS__PRIVATE int pdn_aprs__parse_number(const uint8_t *s, size_t n, int allow_exp, double *out);
 /* 10 to an integer power, exactly for small powers. */
 PDN_APRS__PRIVATE double pdn_aprs__pow10i(int e);
+/* v rounded to the nearest whole number, halves away from zero, where a
+   value within 1e-6 of a half is the half (ruling F2). v is in the field's
+   steps. */
+PDN_APRS__PRIVATE double pdn_aprs__round(double v);
 
 /* ---- text ---- */
 
@@ -180,9 +184,14 @@ PDN_APRS__PRIVATE int pdn_aprs__lift_altitude(pdn_aprs__cbuf *cb, double *feet);
 PDN_APRS__PRIVATE size_t pdn_aprs__ext_len(const uint8_t *s, size_t n);
 /* Parses a 7-byte data extension (PHG/PHGR, RNG, DFS) at s; returns bytes used or 0. */
 PDN_APRS__PRIVATE size_t pdn_aprs__parse_phg_rng_dfs(const uint8_t *s, size_t n, pdn_aprs_report *r);
+/* The first of a positioned comment: lifts telemetry and a !DAO!, and
+   applies the DAO. Returns 0 if the packet is rejected. */
+PDN_APRS__PRIVATE int pdn_aprs__lift_comment_start(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r);
+/* finish_comment's had_extension bit: lift_comment_start has been called. */
+#define PDN_APRS__LIFTED 2
 /* The rest of a positioned comment: telemetry, DAO, altitude, braces, late
    extension, frequency, delimiter. had_extension: an extension that counts
-   came straight after the symbol. */
+   came straight after the symbol (bit 1), PDN_APRS__LIFTED. */
 PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r,
                                                int had_extension);
 /* Voice frequency at the start of cb; returns 1 and lifts it if found. */
@@ -225,8 +234,17 @@ typedef struct pdn_aprs__ectx {
     pdn_aprs__buf *b;
     const char *reason;
     char dest[PDN_APRS_ADDR_SIZE];
-    int variant; /* bit 0: put a delimiter before any comment */
+    int variant; /* 1: put a / before any comment, 2: a space */
+    int flags;   /* PDN_APRS__ENC_ */
 } pdn_aprs__ectx;
+
+/* Encoder flags the builder sets: a Mic-E altitude goes in a /A=, never in
+   the Mic-E altitude bytes (the program gave it in feet, ruling B2). */
+#define PDN_APRS__ENC_MIC_E_FEET 1
+/* pdn_aprs_encode_tnc2 or pdn_aprs_encode_ax25 (ax25 nonzero) with flags. */
+PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *data,
+                                              const pdn_aprs_encode_options *options, void *buf, size_t cap,
+                                              pdn_aprs_encoded *encoded, int ax25, int flags);
 
 PDN_APRS__PRIVATE int pdn_aprs__refuse(pdn_aprs__ectx *e, const char *why);
 PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_data *d);
@@ -296,6 +314,14 @@ PDN_APRS__PRIVATE double pdn_aprs__pow10i(int e)
     if (e >= 0 && e <= 22)
         return exact[e];
     return pow(10.0, (double)e);
+}
+
+PDN_APRS__PRIVATE double pdn_aprs__round(double v)
+{
+    double mag = fabs(v), whole = floor(mag);
+    if (mag - whole >= 0.5 - 1e-6)
+        whole += 1.0;
+    return v < 0 ? -whole : whole;
 }
 
 /* Writes the integer r (< 1e18) as a decimal with d digits after the point. */
@@ -1878,7 +1904,8 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_positioned(pdn_aprs__dctx *c, size_t at, 
         size_t e = 0;
         int dir = 0, spd = 0;
         if (r->symbol.table == '\\' && r->symbol.code == 'l' && (e = parse_area(s, n, r)) > 0) {
-            had_extension = 1;
+            /* an area describes the object, not the station's radio: like a
+               course/speed it is not the data extension (ruling F7a) */
         } else if (course_speed(s, n, &dir, &spd)) {
             e = 7;
             if (dir > 360) {
@@ -2387,11 +2414,8 @@ static int find_braces(const pdn_aprs__cbuf *cb, int digits, size_t *at, size_t 
 
 /* ---- the whole comment ---- */
 
-PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r,
-                                               int had_extension)
+PDN_APRS__PRIVATE int pdn_aprs__lift_comment_start(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r)
 {
-    double feet;
-    size_t at, len;
     uint8_t dao[5];
     pdn_aprs__lift_telemetry_dao(cb, r, dao);
     if (r->has_dao) {
@@ -2402,6 +2426,17 @@ PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf
             pdn_aprs__apply_dao(c, r, dao, !r->compressed);
         }
     }
+    return 1;
+}
+
+PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r,
+                                               int had_extension)
+{
+    double feet;
+    size_t at, len;
+    if (!(had_extension & PDN_APRS__LIFTED) && !pdn_aprs__lift_comment_start(c, cb, r))
+        return 0;
+    had_extension &= 1;
     if (pdn_aprs__lift_altitude(cb, &feet)) {
         r->has_altitude = 1;
         r->altitude_feet = feet;
@@ -3070,6 +3105,13 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
         t += 4;
         tl -= 4;
     }
+    /* telemetry and a !DAO! come out of the status text before the locator
+       is read, so a locator followed straight by either has no missing
+       space (ruling F16) */
+    if (!pdn_aprs__cbuf_set(c, &cb, t, tl) || !pdn_aprs__lift_comment_start(c, &cb, r))
+        return;
+    t = cb.b;
+    tl = cb.n;
     {
         size_t ll = pdn_aprs__mic_e_locator_len(t, tl);
         if (ll) {
@@ -3112,7 +3154,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
             pdn_aprs__cbuf_cut(&cb, k, 4);
         }
     }
-    pdn_aprs__finish_comment(c, &cb, r, had_ext);
+    pdn_aprs__finish_comment(c, &cb, r, had_ext | PDN_APRS__LIFTED);
 }
 
 /* ==== src/message.c ==== */
@@ -4339,7 +4381,10 @@ static int weather_eq(const pdn_aprs_weather *a, const pdn_aprs_weather *b, int 
            compressed wind reads back as 0 */
         if (loose && i == PDN_APRS_WX_WIND_DIRECTION && fabs(va - vb) > 180)
             va += va < vb ? 360 : -360;
-        if (a->has[i] && !near(va, vb, tol[i], i == PDN_APRS_WX_WIND_SPEED ? 0.045 : 0, loose))
+        /* snowfall is written in hundredths under 1 inch, tenths under 10,
+           and whole inches from there (ruling F3) */
+        if (a->has[i] && !near(va, vb, tol[i],
+                               i == PDN_APRS_WX_WIND_SPEED ? 0.045 : i == PDN_APRS_WX_SNOW_24H ? 0.051 : 0, loose))
             return 0;
     }
     if (a->software != b->software || !str_eq(a->unit, b->unit) || a->extra_count != b->extra_count)
@@ -4570,7 +4615,7 @@ PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_apr
                (!a->as.query.has_footprint ||
                 (num_eq(a->as.query.latitude, b->as.query.latitude) &&
                  num_eq(a->as.query.longitude, b->as.query.longitude) &&
-                 a->as.query.radius_miles == b->as.query.radius_miles));
+                 near(a->as.query.radius_miles, b->as.query.radius_miles, 0.51, 0, loose)));
     case PDN_APRS_TYPE_CAPABILITIES: {
         const pdn_aprs_capabilities *s = &a->as.capabilities, *t = &b->as.capabilities;
         if (s->count != t->count)
@@ -4664,26 +4709,50 @@ static int timestamp_ok(const char *t, int allow)
 
 /* ---- coordinates ---- */
 
-/* Whole degrees and hundredths of minutes of |v|. With truncate, the rest
-   beyond the hundredths is returned in *extra (0 to 1 of a hundredth). */
-static void split_coord(double v, int truncate, int *deg, long *hund, double *extra)
+/* How a coordinate's minutes are taken: rounded to hundredths, cut to them
+   (an ambiguous position's box, ruling B3), or rounded to a !DAO!'s steps
+   (thousandths, or ninety-firsts of a hundredth) and split into the main
+   digits and the DAO digit (ruling B4). */
+enum { COORD_HUNDREDTHS, COORD_CUT, COORD_THOUSANDTHS, COORD_BASE91 };
+
+/* Whole degrees and hundredths of minutes of |v|, and in *digit the DAO
+   digit's value (0 unless a DAO mode). The minutes are computed once from
+   the degrees given and rounded once (ruling F2). */
+static void split_coord(double v, int mode, int *deg, long *hund, long *digit)
 {
     double mag = fabs(v), d = floor(mag), h = (mag - d) * 6000.0;
-    if (truncate) {
-        double fh = floor(h + 1e-6);
-        *extra = h - fh;
-        if (*extra < 0)
-            *extra = 0;
-        *hund = (long)fh;
+    long units;
+    *digit = 0;
+    if (mode == COORD_CUT) {
+        units = (long)floor(h + 1e-6);
+    } else if (mode == COORD_THOUSANDTHS) {
+        units = (long)pdn_aprs__round(h * 10.0);
+        *digit = units % 10;
+        units /= 10;
+    } else if (mode == COORD_BASE91) {
+        units = (long)pdn_aprs__round(h * 91.0);
+        *digit = units % 91;
+        units /= 91;
     } else {
-        *hund = (long)floor(h + 0.5);
-        *extra = 0;
+        units = (long)pdn_aprs__round(h);
     }
-    if (*hund >= 6000) {
+    if (units >= 6000) {
         d += 1;
-        *hund -= 6000;
+        units -= 6000;
     }
+    *hund = units;
     *deg = (int)d;
+}
+
+static int coord_mode(int dao_precision, int ambiguity)
+{
+    if (ambiguity)
+        return COORD_CUT;
+    if (dao_precision == PDN_APRS_DAO_THOUSANDTHS)
+        return COORD_THOUSANDTHS;
+    if (dao_precision == PDN_APRS_DAO_BASE91)
+        return COORD_BASE91;
+    return COORD_HUNDREDTHS;
 }
 
 static void put_coord(pdn_aprs__buf *b, int deg, long hund, int deg_digits, int amb)
@@ -4704,36 +4773,15 @@ static void put_coord(pdn_aprs__buf *b, int deg, long hund, int deg_digits, int 
     pdn_aprs__putc(b, digits[3]);
 }
 
-/* DAO digits for the rest beyond the hundredths. */
-static void dao_digits(int precision, double lat_extra, double lon_extra, char *a, char *o, long *lat_carry,
-                       long *lon_carry)
+/* A !DAO!'s A and O for the digit values split_coord gave. */
+static void dao_digits(int precision, long lat_digit, long lon_digit, char *a, char *o)
 {
-    *lat_carry = 0;
-    *lon_carry = 0;
     if (precision == PDN_APRS_DAO_THOUSANDTHS) {
-        long da = (long)floor(lat_extra * 10 + 0.5), dox = (long)floor(lon_extra * 10 + 0.5);
-        if (da >= 10) {
-            da = 0;
-            *lat_carry = 1;
-        }
-        if (dox >= 10) {
-            dox = 0;
-            *lon_carry = 1;
-        }
-        *a = (char)('0' + da);
-        *o = (char)('0' + dox);
+        *a = (char)('0' + lat_digit);
+        *o = (char)('0' + lon_digit);
     } else if (precision == PDN_APRS_DAO_BASE91) {
-        long va = (long)floor(lat_extra * 91 + 0.5), vo = (long)floor(lon_extra * 91 + 0.5);
-        if (va >= 91) {
-            va = 0;
-            *lat_carry = 1;
-        }
-        if (vo >= 91) {
-            vo = 0;
-            *lon_carry = 1;
-        }
-        *a = (char)(33 + va);
-        *o = (char)(33 + vo);
+        *a = (char)(33 + lat_digit);
+        *o = (char)(33 + lon_digit);
     } else {
         *a = ' ';
         *o = ' ';
@@ -4752,8 +4800,7 @@ static int dao_datum_ok(const pdn_aprs_dao *d)
 static int put_uncompressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, char dao[5])
 {
     int ldeg, gdeg, dao_prec = r->has_dao ? r->dao.precision : -1;
-    long lh, gh, lc, gc;
-    double lx, gx;
+    long lh, gh, lx, gx;
     char a, o;
     if (r->latitude < -90 || r->latitude > 90 || r->longitude < -180 || r->longitude > 180)
         return pdn_aprs__refuse(e, "position out of range");
@@ -4767,19 +4814,9 @@ static int put_uncompressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, char da
         return pdn_aprs__refuse(e, "a !DAO! cannot add precision to an ambiguous position");
     /* with ambiguity the digits kept are those of the box the position is
        in (truncated); with a !DAO! the rest goes in its digits */
-    split_coord(r->latitude, dao_prec > 0 || r->ambiguity, &ldeg, &lh, &lx);
-    split_coord(r->longitude, dao_prec > 0 || r->ambiguity, &gdeg, &gh, &gx);
-    dao_digits(dao_prec, lx, gx, &a, &o, &lc, &gc);
-    lh += lc;
-    gh += gc;
-    if (lh >= 6000) {
-        ldeg++;
-        lh -= 6000;
-    }
-    if (gh >= 6000) {
-        gdeg++;
-        gh -= 6000;
-    }
+    split_coord(r->latitude, coord_mode(dao_prec, r->ambiguity), &ldeg, &lh, &lx);
+    split_coord(r->longitude, coord_mode(dao_prec, r->ambiguity), &gdeg, &gh, &gx);
+    dao_digits(dao_prec, lx, gx, &a, &o);
     if (ldeg > 90 || gdeg > 180)
         return pdn_aprs__refuse(e, "position out of range");
     put_coord(e->b, ldeg, lh, 2, r->ambiguity);
@@ -4828,11 +4865,35 @@ static void put_gga_altitude(pdn_aprs__buf *b, double feet, int *exact)
 {
     long cs = 0;
     if (feet >= 1)
-        cs = (long)floor(log(feet) / log(1.002) + 0.5);
+        cs = (long)pdn_aprs__round(log(feet) / log(1.002));
     if (cs > 8280)
         cs = 8280;
     put_b91(b, cs, 2);
     *exact = feet >= 1 && fabs(pow(1.002, (double)cs) - feet) <= 1e-9 * feet;
+}
+
+/* The cs step of a speed in knots, 1.08^s - 1, rounded once (ruling F2);
+   a speed that rounds to 0 knots is s = 0. -1 if none holds it. */
+static long cs_speed_step(double knots)
+{
+    double s;
+    if (!finite_number(knots) || pdn_aprs__round(knots) < 0)
+        return -1;
+    if (knots <= 0)
+        return 0;
+    s = pdn_aprs__round(log(knots + 1.0) / log(1.08));
+    return s > 90 ? -1 : (long)s;
+}
+
+/* The cs step of a range, 2 x 1.08^s miles, rounded once; -1 if none
+   holds it. */
+static long cs_range_step(double miles)
+{
+    double s;
+    if (!finite_number(miles) || miles <= 0)
+        return -1;
+    s = pdn_aprs__round(log(miles / 2.0) / log(1.08));
+    return s < 0 || s > 90 ? -1 : (long)s;
 }
 
 /* A compressed position. *alt_in_cs is set when the cs bytes hold the
@@ -4856,8 +4917,8 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         return pdn_aprs__refuse(e, "a compressed position has no room for this data extension");
     if (A_DIGIT(table))
         table = (char)(table - '0' + 'a');
-    y = floor(380926.0 * (90.0 - r->latitude) + 0.5);
-    x = floor(190463.0 * (180.0 + r->longitude) + 0.5);
+    y = pdn_aprs__round(380926.0 * (90.0 - r->latitude));
+    x = pdn_aprs__round(190463.0 * (180.0 + r->longitude));
     if (y > 68574960.0)
         y = 68574960.0;
     if (x > 68574960.0)
@@ -4871,12 +4932,13 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         if (w->has[PDN_APRS_WX_WIND_DIRECTION] && w->has[PDN_APRS_WX_WIND_SPEED] &&
             !(r->has_compression && r->compression.source == PDN_APRS_NMEA_GGA)) {
             double dir = w->value[PDN_APRS_WX_WIND_DIRECTION], mph = w->value[PDN_APRS_WX_WIND_SPEED];
-            long c = (long)floor(dir / 4.0 + 0.5) % 90, s;
+            long c, s;
             /* rounded to the nearest 4 degrees; 360 is north, c = 0 */
-            if (dir < 0 || dir > 360 || mph < 0)
+            if (!finite_number(dir) || pdn_aprs__round(dir) < 0 || pdn_aprs__round(dir) > 360)
                 return pdn_aprs__refuse(e, "wind out of range for a compressed position");
-            s = (long)floor(log(mph / PDN_APRS__KNOTS_TO_MPH + 1.0) / log(1.08) + 0.5);
-            if (s > 90)
+            c = (long)pdn_aprs__round(dir / 4.0) % 90;
+            s = cs_speed_step(mph / PDN_APRS__KNOTS_TO_MPH);
+            if (s < 0)
                 return pdn_aprs__refuse(e, "wind out of range for a compressed position");
             pdn_aprs__putc(e->b, (int)(33 + c));
             pdn_aprs__putc(e->b, (int)(33 + s));
@@ -4884,10 +4946,8 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         } else if (r->has_compression && r->compression.source == PDN_APRS_NMEA_GGA && r->has_altitude) {
             put_gga_altitude(e->b, r->altitude_feet, alt_in_cs);
             pdn_aprs__putc(e->b, t_byte(r));
-        } else if (r->has_range && r->range_miles >= 2) {
-            long s = (long)floor(log(r->range_miles / 2.0) / log(1.08) + 0.5);
-            if (s > 90)
-                return pdn_aprs__refuse(e, "range out of range for a compressed position");
+        } else if (r->has_range && cs_range_step(r->range_miles) >= 0) {
+            long s = cs_range_step(r->range_miles);
             pdn_aprs__putc(e->b, '{');
             pdn_aprs__putc(e->b, (int)(33 + s));
             pdn_aprs__putc(e->b, t_byte(r));
@@ -4904,26 +4964,27 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         pdn_aprs__putc(e->b, t_byte(r));
     } else if (r->has_course || r->has_speed) {
         long c, s;
-        double spd = r->has_speed ? r->speed_knots : 0;
-        if (!r->has_course)
-            return pdn_aprs__refuse(e, "a compressed course/speed needs a course");
+        double cr;
+        /* the cs bytes hold a course and a speed together (ruling F5) */
+        if (!r->has_course || !r->has_speed)
+            return pdn_aprs__refuse(e, "a compressed course/speed needs both a course and a speed");
         if (r->has_range)
             return pdn_aprs__refuse(e, "a compressed position has room for a course/speed or a range, not both");
-        if (r->course_degrees > 360 || r->course_degrees == 0 || spd < 0)
-            return pdn_aprs__refuse(e, "course or speed out of range for a compressed position");
-        c = (long)floor(r->course_degrees / 4.0 + 0.5) % 90;
-        s = (long)floor(log(spd + 1.0) / log(1.08) + 0.5);
-        if (s > 90)
+        cr = pdn_aprs__round(r->course_degrees);
+        /* a c of 0 reads back as 360, so a course that rounds to 0 has no
+           form (rulings F1 and F2) */
+        if (!finite_number(r->course_degrees) || cr <= 0 || cr > 360)
+            return pdn_aprs__refuse(e, "course out of range for a compressed position");
+        c = (long)pdn_aprs__round(r->course_degrees / 4.0) % 90;
+        s = cs_speed_step(r->speed_knots);
+        if (s < 0)
             return pdn_aprs__refuse(e, "speed out of range for a compressed position");
         pdn_aprs__putc(e->b, (int)(33 + c));
         pdn_aprs__putc(e->b, (int)(33 + s));
         pdn_aprs__putc(e->b, t_byte(r));
     } else if (r->has_range) {
-        long s;
-        if (r->range_miles < 2)
-            return pdn_aprs__refuse(e, "range out of range for a compressed position");
-        s = (long)floor(log(r->range_miles / 2.0) / log(1.08) + 0.5);
-        if (s > 90)
+        long s = cs_range_step(r->range_miles);
+        if (s < 0)
             return pdn_aprs__refuse(e, "range out of range for a compressed position");
         pdn_aprs__putc(e->b, '{');
         pdn_aprs__putc(e->b, (int)(33 + s));
@@ -4938,19 +4999,15 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         /* kept for its datum; a decoder does not apply its digits to a
            compressed position, so they are the position's own */
         int deg;
-        long hund, lc, gc;
-        double lx, gx;
+        long hund, lx, gx;
         char a, o, dc = A_TOUPPER(r->dao.datum);
+        int mode = coord_mode(r->dao.precision, 0);
         if (!dao_datum_ok(&r->dao))
             return pdn_aprs__refuse(e, DAO_DATUM_REFUSAL);
         /* the position reported: what the compressed bytes decode to */
-        split_coord(90.0 - y / 380926.0, 1, &deg, &hund, &lx);
-        split_coord(x / 190463.0 - 180.0, 1, &deg, &hund, &gx);
-        dao_digits(r->dao.precision, lx, gx, &a, &o, &lc, &gc);
-        if (lc)
-            a = r->dao.precision == PDN_APRS_DAO_BASE91 ? '!' : '0';
-        if (gc)
-            o = r->dao.precision == PDN_APRS_DAO_BASE91 ? '!' : '0';
+        split_coord(90.0 - y / 380926.0, mode, &deg, &hund, &lx);
+        split_coord(x / 190463.0 - 180.0, mode, &deg, &hund, &gx);
+        dao_digits(r->dao.precision, lx, gx, &a, &o);
         dao[0] = '!';
         dao[1] = r->dao.precision == PDN_APRS_DAO_BASE91 ? (char)(dc + 32) : dc;
         dao[2] = a;
@@ -5011,11 +5068,11 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_frequency(pdn_aprs__ectx *e, const pdn_ap
     if (!finite_number(mhz) || mhz < 0)
         return pdn_aprs__refuse(e, "frequency out of range");
     if (f->ten_khz_resolution) {
-        long v = (long)floor(mhz * 100 + 0.5);
+        long v = (long)pdn_aprs__round(mhz * 100);
         whole = v / 100;
         frac = v % 100;
     } else {
-        long v = (long)floor(mhz * 1000 + 0.5);
+        long v = (long)pdn_aprs__round(mhz * 1000);
         whole = v / 1000;
         frac = v % 1000;
     }
@@ -5084,9 +5141,15 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_frequency(pdn_aprs__ectx *e, const pdn_ap
     return 1;
 }
 
-static void put_altitude(pdn_aprs__buf *b, double feet)
+/* A /A= altitude in whole feet, rounded once (ruling F2); 0 if the rounded
+   value has no form. */
+static int put_altitude(pdn_aprs__ectx *e, double feet)
 {
-    long v = (long)floor(feet + 0.5);
+    pdn_aprs__buf *b = e->b;
+    long v;
+    if (!finite_number(feet) || pdn_aprs__round(feet) < -99999 || pdn_aprs__round(feet) > 999999)
+        return pdn_aprs__refuse(e, "altitude out of range");
+    v = (long)pdn_aprs__round(feet);
     pdn_aprs__puts(b, "/A=");
     if (v < 0) {
         pdn_aprs__putc(b, '-');
@@ -5094,6 +5157,7 @@ static void put_altitude(pdn_aprs__buf *b, double feet)
     } else {
         pdn_aprs__putu(b, (unsigned long)v, 6);
     }
+    return 1;
 }
 
 static void put_telemetry(pdn_aprs__buf *b, const pdn_aprs_comment_telemetry *t)
@@ -5122,13 +5186,17 @@ static int put_comment_part(pdn_aprs__ectx *e, const pdn_aprs_report *r, int at_
 {
     const char *c = r->comment;
     size_t n = r->comment_len;
-    int slash = 0;
+    int slash = 0, space = 0;
     if (n >= PDN_APRS_TEXT_SIZE)
         return pdn_aprs__refuse(e, "comment too long");
     if (!valid_text(c, n))
         return pdn_aprs__refuse(e, "the comment has a line break or is not UTF-8");
     if (n > 0 && (c[0] == ' ' || c[0] == '/' || (e->variant & 1)))
         slash = 1;
+    /* the last resort: a space, which unlike / cannot join base-91 bytes
+       before it into a Mic-E altitude (README Encoding rule) */
+    if (n > 0 && !slash && !r->has_frequency && (e->variant & 2))
+        space = 1;
     /* a delimiter only where the comment would otherwise read as something
        else (interpretations.md) */
     if (!slash && n > 0 && !r->has_frequency) {
@@ -5176,6 +5244,8 @@ static int put_comment_part(pdn_aprs__ectx *e, const pdn_aprs_report *r, int at_
     }
     if (slash)
         pdn_aprs__putc(e->b, '/');
+    else if (space)
+        pdn_aprs__putc(e->b, ' ');
     pdn_aprs__put(e->b, c, n);
     if (r->has_telemetry) {
         if (r->telemetry.analog_count < 1 || r->telemetry.analog_count > 5 ||
@@ -5222,9 +5292,9 @@ static int put_wx_field(pdn_aprs__ectx *e, char letter, const pdn_aprs_weather *
         break;
     case 'h':
         /* h00 is 100%, so a humidity that rounds to 0 has no form */
-        if (floor(v + 0.5) == 100.0)
+        if (pdn_aprs__round(v) == 100.0)
             v = 0;
-        else if (floor(v + 0.5) < 1.0)
+        else if (pdn_aprs__round(v) < 1.0)
             return pdn_aprs__refuse(e, "humidity out of range");
         break;
     case 'l':
@@ -5233,7 +5303,9 @@ static int put_wx_field(pdn_aprs__ectx *e, char letter, const pdn_aprs_weather *
     default:
         break;
     }
-    iv = (long)floor(v + 0.5);
+    if (fabs(v) > 1e9)
+        return pdn_aprs__refuse(e, "weather value out of range");
+    iv = (long)pdn_aprs__round(v);
     if (letter == 't') {
         if (iv < -99 || iv > 999)
             return pdn_aprs__refuse(e, "temperature out of range");
@@ -5251,26 +5323,43 @@ static int put_wx_field(pdn_aprs__ectx *e, char letter, const pdn_aprs_weather *
            value needs one: a whole number as three digits (002), under 1 as
            . and two digits (.50, .32), and otherwise a digit, . and a digit
            (2.5) */
-        double sv = w->value[idx];
+        double sv = w->value[idx], h, t;
         char s[4];
-        long h = (long)floor(sv * 100 + 0.5), t = (long)floor(sv * 10 + 0.5);
-        if (sv < 0 || sv > 999)
+        long whole = -1;
+        if (fabs(sv) > 1e6)
             return pdn_aprs__refuse(e, "snowfall out of range");
-        if (sv == floor(sv)) {
-            long whole = (long)sv;
+        /* rounded (ruling F3): to hundredths if that leaves it under 1, else
+           to tenths if under 10, else whole; a whole result is three digits */
+        h = pdn_aprs__round(sv * 100);
+        t = pdn_aprs__round(sv * 10);
+        if (h < 0)
+            return pdn_aprs__refuse(e, "snowfall out of range");
+        if (h < 100) {
+            if (h == 0) {
+                whole = 0;
+            } else {
+                s[0] = '.';
+                s[1] = (char)('0' + (long)h / 10);
+                s[2] = (char)('0' + (long)h % 10);
+            }
+        } else if (t < 100) {
+            if ((long)t % 10 == 0) {
+                whole = (long)t / 10;
+            } else {
+                s[0] = (char)('0' + (long)t / 10);
+                s[1] = '.';
+                s[2] = (char)('0' + (long)t % 10);
+            }
+        } else {
+            double wv = pdn_aprs__round(sv);
+            if (wv > 999)
+                return pdn_aprs__refuse(e, "snowfall out of range");
+            whole = (long)wv;
+        }
+        if (whole >= 0) {
             s[0] = (char)('0' + whole / 100);
             s[1] = (char)('0' + whole / 10 % 10);
             s[2] = (char)('0' + whole % 10);
-        } else if (sv < 1 && h < 100 && fabs((double)h - sv * 100) <= 1e-9 * 100) {
-            s[0] = '.';
-            s[1] = (char)('0' + h / 10);
-            s[2] = (char)('0' + h % 10);
-        } else if (sv < 10 && t < 100 && fabs((double)t - sv * 10) <= 1e-9 * 10) {
-            s[0] = (char)('0' + t / 10);
-            s[1] = '.';
-            s[2] = (char)('0' + t % 10);
-        } else {
-            return pdn_aprs__refuse(e, "snowfall has no exact three-character form");
         }
         pdn_aprs__putc(e->b, 's');
         pdn_aprs__put(e->b, s, 3);
@@ -5300,7 +5389,7 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const p
         !put_wx_field(e, 'b', w, PDN_APRS_WX_PRESSURE, 0))
         return 0;
     if (w->has[PDN_APRS_WX_LUMINOSITY]) {
-        if (floor(w->value[PDN_APRS_WX_LUMINOSITY] + 0.5) >= 1000) {
+        if (pdn_aprs__round(w->value[PDN_APRS_WX_LUMINOSITY]) >= 1000) {
             if (!put_wx_field(e, 'l', w, PDN_APRS_WX_LUMINOSITY, 0))
                 return 0;
         } else if (!put_wx_field(e, 'L', w, PDN_APRS_WX_LUMINOSITY, 0)) {
@@ -5389,26 +5478,30 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
 
     if (weather) {
         const pdn_aprs_weather *w = &r->weather;
+        /* a GGA altitude the cs bytes do not hold exactly has no /A= here,
+           which has no comment: the nearest cs value alone (ruling F14) */
+        int gga_in_cs = r->compressed && r->has_compression && r->compression.source == PDN_APRS_NMEA_GGA;
         if (r->comment_len)
             return pdn_aprs__refuse(e, "a weather report has no comment");
         if (r->has_telemetry)
             return pdn_aprs__refuse(e, "a weather report cannot carry base-91 telemetry");
         if ((!r->compressed && (r->has_course || r->has_speed)) || r->has_phg || r->has_dfs || r->has_area ||
             r->has_df_bearing || r->has_storm || (r->has_range && !range_in_cs) ||
-            (r->has_altitude && !alt_in_cs) || r->has_frequency || r->signpost[0])
+            (r->has_altitude && !alt_in_cs && !gga_in_cs) || r->has_frequency || r->signpost[0])
             return pdn_aprs__refuse(e, "a weather report has no room for this data");
         if (!r->compressed) {
             int dh = w->has[PDN_APRS_WX_WIND_DIRECTION], sh = w->has[PDN_APRS_WX_WIND_SPEED];
             double dv = w->value[PDN_APRS_WX_WIND_DIRECTION], sv = w->value[PDN_APRS_WX_WIND_SPEED];
-            if ((dh && (dv < 0 || floor(dv + 0.5) > 360)) || (sh && (sv < 0 || floor(sv + 0.5) > 999)))
+            if ((dh && (!finite_number(dv) || pdn_aprs__round(dv) < 0 || pdn_aprs__round(dv) > 360)) ||
+                (sh && (!finite_number(sv) || pdn_aprs__round(sv) < 0 || pdn_aprs__round(sv) > 999)))
                 return pdn_aprs__refuse(e, "wind out of range");
             if (dh)
-                pdn_aprs__putu(e->b, (unsigned long)floor(dv + 0.5), 3);
+                pdn_aprs__putu(e->b, (unsigned long)pdn_aprs__round(dv), 3);
             else
                 pdn_aprs__puts(e->b, "...");
             pdn_aprs__putc(e->b, '/');
             if (sh)
-                pdn_aprs__putu(e->b, (unsigned long)floor(sv + 0.5), 3);
+                pdn_aprs__putu(e->b, (unsigned long)pdn_aprs__round(sv), 3);
             else
                 pdn_aprs__puts(e->b, "...");
         } else if (!(w->has[PDN_APRS_WX_WIND_DIRECTION] && w->has[PDN_APRS_WX_WIND_SPEED]) &&
@@ -5435,17 +5528,21 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
             return pdn_aprs__refuse(e, "storm data needs a hurricane symbol");
         if (r->has_course || r->has_speed || r->has_df_bearing || r->has_storm) {
             if (r->has_course) {
-                if (r->course_degrees > 360)
+                /* rounded, then checked; 0 is 000, which reads back as 0
+                   (rulings F1 and F2) */
+                double cr = pdn_aprs__round(r->course_degrees);
+                if (!finite_number(r->course_degrees) || cr < 0 || cr > 360)
                     return pdn_aprs__refuse(e, "course out of range");
-                pdn_aprs__putu(e->b, r->course_degrees, 3);
+                pdn_aprs__putu(e->b, (unsigned long)cr, 3);
             } else {
                 pdn_aprs__puts(e->b, "...");
             }
             pdn_aprs__putc(e->b, '/');
             if (r->has_speed) {
-                if (r->speed_knots < 0 || floor(r->speed_knots + 0.5) > 999)
+                double sr = pdn_aprs__round(r->speed_knots);
+                if (!finite_number(r->speed_knots) || sr < 0 || sr > 999)
                     return pdn_aprs__refuse(e, "speed out of range");
-                pdn_aprs__putu(e->b, (unsigned long)floor(r->speed_knots + 0.5), 3);
+                pdn_aprs__putu(e->b, (unsigned long)sr, 3);
             } else {
                 pdn_aprs__puts(e->b, "...");
             }
@@ -5484,7 +5581,9 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
                     pdn_aprs__putu(e->b, s->whole_gale_radius_nm, 3);
                 }
             }
-            at_ext = !r->has_df_bearing && !r->has_storm;
+            /* a frequency after DF or storm data follows a / too, as they
+               extend the course/speed (ruling F9) */
+            at_ext = 1;
         } else if (r->has_phg) {
             const pdn_aprs_phg *p = &r->phg;
             if (p->power > 9 || p->height > 78 || p->gain > 9 || p->directivity > 9 || p->beacons_per_hour > 35)
@@ -5502,10 +5601,11 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
             }
             ext_counts = 1;
         } else if (r->has_range) {
-            if (r->range_miles < 0 || r->range_miles > 9999)
+            if (!finite_number(r->range_miles) || pdn_aprs__round(r->range_miles) < 0 ||
+                pdn_aprs__round(r->range_miles) > 9999)
                 return pdn_aprs__refuse(e, "range out of range");
             pdn_aprs__puts(e->b, "RNG");
-            pdn_aprs__putu(e->b, (unsigned long)floor(r->range_miles + 0.5), 4);
+            pdn_aprs__putu(e->b, (unsigned long)pdn_aprs__round(r->range_miles), 4);
             at_ext = 1;
             ext_counts = 1;
         } else if (r->has_dfs) {
@@ -5569,9 +5669,8 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         at_ext = 0;
     }
     if (r->has_altitude && !alt_in_cs) {
-        if (r->altitude_feet < -99999 || r->altitude_feet > 999999)
-            return pdn_aprs__refuse(e, "altitude out of range");
-        put_altitude(e->b, r->altitude_feet);
+        if (!put_altitude(e, r->altitude_feet))
+            return 0;
         at_ext = 0;
     }
     if (!put_comment_part(e, r, at_ext, e->b->len != symbol_end, ext_counts, 0))
@@ -5586,8 +5685,7 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
 PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_report *r)
 {
     int ldeg, gdeg, i, bits, std, lon100, amb = r->ambiguity, dao_prec = r->has_dao ? r->dao.precision : -1;
-    long lh, gh, lc, gc;
-    double lx, gx;
+    long lh, gh, lx, gx;
     char dest[7], a = ' ', o = ' ';
     uint8_t info[9];
     long speed, course;
@@ -5604,18 +5702,14 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
         return pdn_aprs__refuse(e, "a Mic-E message type mixing standard and custom bits has no meaning");
     if (r->destination_ssid > 15)
         return pdn_aprs__refuse(e, "destination SSID out of range");
-    split_coord(r->latitude, dao_prec > 0 || amb, &ldeg, &lh, &lx);
-    split_coord(r->longitude, dao_prec > 0 || amb, &gdeg, &gh, &gx);
-    dao_digits(dao_prec, lx, gx, &a, &o, &lc, &gc);
-    lh += lc;
-    gh += gc;
-    if (lh >= 6000) {
-        ldeg++;
-        lh -= 6000;
-    }
-    if (gh >= 6000) {
-        gdeg++;
-        gh -= 6000;
+    split_coord(r->latitude, coord_mode(dao_prec, amb), &ldeg, &lh, &lx);
+    split_coord(r->longitude, coord_mode(dao_prec, amb), &gdeg, &gh, &gx);
+    dao_digits(dao_prec, lx, gx, &a, &o);
+    if (amb) {
+        /* the longitude digits a decoder ignores hold the centre it reports
+           (README Mic-E rule): the box's start plus half the box */
+        static const long box[5] = {1, 10, 100, 1000, 6000};
+        gh = gh / box[amb] * box[amb] + box[amb] / 2;
     }
     if (ldeg > 90 || gdeg > 179)
         return pdn_aprs__refuse(e, "position out of range for Mic-E");
@@ -5682,10 +5776,14 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
         info[2] = (uint8_t)(m < 10 ? m + 88 : m + 28);
         info[3] = (uint8_t)(h + 28);
     }
-    speed = r->has_speed ? (long)floor(r->speed_knots + 0.5) : 0;
-    course = r->has_course ? r->course_degrees : 0;
+    if ((r->has_speed && !finite_number(r->speed_knots)) || (r->has_course && !finite_number(r->course_degrees)))
+        return pdn_aprs__refuse(e, "course or speed out of range for Mic-E");
+    speed = r->has_speed ? (long)pdn_aprs__round(r->speed_knots) : 0;
+    course = r->has_course ? (long)pdn_aprs__round(r->course_degrees) : 0;
     if (speed < 0 || speed > 799 || course < 0 || course > 360)
         return pdn_aprs__refuse(e, "course or speed out of range for Mic-E");
+    /* checked once rounded (ruling F2): a course that rounds to 0 reads back
+       as no course (ruling F1) */
     if (r->has_course && course == 0)
         return pdn_aprs__refuse(e, "a Mic-E course of 0 means unknown");
     /* speed tens + 80 below 190 knots; 190-199 is /, the printable one of
@@ -5715,9 +5813,10 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     {
         int alt_b91 = 0, at_ext = 0, ext_counts = 0;
         long v = 0;
-        if (r->has_altitude) {
+        if (r->has_altitude && !(e->flags & PDN_APRS__ENC_MIC_E_FEET) && finite_number(r->altitude_feet) &&
+            fabs(r->altitude_feet) < 1e9) {
             double back;
-            v = (long)floor(r->altitude_feet * 0.3048 + 10000.0 + 0.5);
+            v = (long)pdn_aprs__round(r->altitude_feet * 0.3048 + 10000.0);
             back = (double)(v - 10000) / 0.3048;
             alt_b91 = v >= 0 && v < 91L * 91 * 91 &&
                       fabs(back - r->altitude_feet) <= 1e-9 * (fabs(r->altitude_feet) > 1 ? fabs(r->altitude_feet) : 1);
@@ -5758,10 +5857,11 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
             }
             ext_counts = 1;
         } else if (r->has_range) {
-            if (r->range_miles < 0 || r->range_miles > 9999)
+            if (!finite_number(r->range_miles) || pdn_aprs__round(r->range_miles) < 0 ||
+                pdn_aprs__round(r->range_miles) > 9999)
                 return pdn_aprs__refuse(e, "range out of range");
             pdn_aprs__puts(e->b, "RNG");
-            pdn_aprs__putu(e->b, (unsigned long)floor(r->range_miles + 0.5), 4);
+            pdn_aprs__putu(e->b, (unsigned long)pdn_aprs__round(r->range_miles), 4);
             at_ext = 1;
             ext_counts = 1;
         } else if (r->has_dfs) {
@@ -5777,9 +5877,8 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
             ext_counts = 1;
         }
         if (r->has_altitude && !alt_b91) {
-            if (r->altitude_feet < -99999 || r->altitude_feet > 999999)
-                return pdn_aprs__refuse(e, "altitude out of range");
-            put_altitude(e->b, r->altitude_feet);
+            if (!put_altitude(e, r->altitude_feet))
+                return 0;
             at_ext = 0;
         }
         {
@@ -6060,7 +6159,13 @@ static int encode_telemetry(pdn_aprs__ectx *e, const pdn_aprs_telemetry *t)
             continue;
         if (!finite_number(v->value))
             return pdn_aprs__refuse(e, "a telemetry value is a number");
-        if (!put_number_as_sent(e->b, v->text, v->value, 0))
+        if (put_number_as_sent(e->b, v->text, v->value, 0))
+            continue;
+        /* a whole number 0-999 given as data is APRS12c ch. 13's three
+           digits, aaa (ruling F11); any other the shortest decimal */
+        if (v->value >= 0 && v->value <= 999 && v->value == floor(v->value))
+            pdn_aprs__putu(e->b, (unsigned long)v->value, 3);
+        else
             pdn_aprs__putd(e->b, v->value);
     }
     pdn_aprs__putc(e->b, ',');
@@ -6277,22 +6382,27 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_da
         pdn_aprs__puts(e->b, q->query_type);
         pdn_aprs__putc(e->b, '?');
         if (q->has_footprint) {
+            double radius = pdn_aprs__round(q->radius_miles);
             if (!finite_number(q->latitude) || !finite_number(q->longitude) || q->latitude < -90 || q->latitude > 90 ||
-                q->longitude < -180 || q->longitude > 180 || q->radius_miles > 9999)
+                q->longitude < -180 || q->longitude > 180 || !finite_number(q->radius_miles) || radius < 0 ||
+                radius > 9999)
                 return pdn_aprs__refuse(e, "footprint out of range");
-            /* the numbers as sent, like telemetry values; otherwise the
-               leading space marks a positive latitude, and is never before
-               a minus sign (APRS12c ch. 15) */
+            /* the numbers as sent, like telemetry values; otherwise a value
+               that is not negative takes a leading space, 0 included (APRS12c
+               ch. 15, rulings F11 and F15), and a minus sign none */
             if (!put_number_as_sent(e->b, q->latitude_text, q->latitude, 1)) {
-                if (!(q->latitude < 0))
+                if (!negative(q->latitude) || q->latitude == 0)
                     pdn_aprs__putc(e->b, ' ');
                 pdn_aprs__putd(e->b, q->latitude);
             }
             pdn_aprs__putc(e->b, ',');
-            if (!put_number_as_sent(e->b, q->longitude_text, q->longitude, 1))
+            if (!put_number_as_sent(e->b, q->longitude_text, q->longitude, 1)) {
+                if (!negative(q->longitude) || q->longitude == 0)
+                    pdn_aprs__putc(e->b, ' ');
                 pdn_aprs__putd(e->b, q->longitude);
+            }
             pdn_aprs__putc(e->b, ',');
-            pdn_aprs__putu(e->b, q->radius_miles, 4);
+            pdn_aprs__putu(e->b, (unsigned long)radius, 4);
         }
         return 1;
     }
@@ -6376,8 +6486,8 @@ static int reads_back(const pdn_aprs_data *d, const uint8_t *info, size_t n, con
     return pdn_aprs__data_equal(&p.data, d, 1);
 }
 
-int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf, size_t cap,
-                         pdn_aprs_encoded *encoded)
+static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf, size_t cap,
+                       pdn_aprs_encoded *encoded, int flags)
 {
     pdn_aprs__buf b;
     pdn_aprs__ectx e;
@@ -6390,13 +6500,14 @@ int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_option
     if (!data || (!buf && cap))
         return PDN_APRS_ERR_ARGUMENT;
     /* written straight into buf, whatever its length: the canonical form
-       first; if that would not read back, the same with a delimiter before
-       the comment */
-    for (variant = 0; variant < 2; variant++) {
+       first; if that would not read back, the same with a / before the
+       comment, then with a space */
+    for (variant = 0; variant < 3; variant++) {
         memset(&e, 0, sizeof e);
         pdn_aprs__buf_init(&b, buf, cap);
         e.b = &b;
         e.variant = variant;
+        e.flags = flags;
         ok = pdn_aprs__encode_data(&e, data);
         if (!ok)
             break;
@@ -6423,13 +6534,19 @@ int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_option
     return (int)b.len;
 }
 
+int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf, size_t cap,
+                         pdn_aprs_encoded *encoded)
+{
+    return encode_info(data, options, buf, cap, encoded, 0);
+}
+
 /* Room for any header: every address and a separator or two, or seven
    bytes each in AX.25, and the control and PID bytes. */
 #define HEADER_ROOM ((PDN_APRS_MAX_PATH + 2) * (PDN_APRS_ADDR_SIZE + 2) + 2)
 
-static int encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *data,
-                         const pdn_aprs_encode_options *options, void *buf, size_t cap, pdn_aprs_encoded *encoded,
-                         int ax25)
+PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *data,
+                                              const pdn_aprs_encode_options *options, void *buf, size_t cap,
+                                              pdn_aprs_encoded *encoded, int ax25, int flags)
 {
     uint8_t head[HEADER_ROOM];
     uint8_t *out = (uint8_t *)buf;
@@ -6444,7 +6561,7 @@ static int encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *dat
     /* the information field first, at the start of buf, then moved along
        to make room for the header, which for Mic-E carries what the encoder
        computed */
-    n = pdn_aprs_encode_info(data, options, buf, cap, encoded);
+    n = encode_info(data, options, buf, cap, encoded, flags);
     if (n < 0)
         return n;
     dest = data->type == PDN_APRS_TYPE_MIC_E ? encoded->destination : header->destination;
@@ -6465,13 +6582,13 @@ static int encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *dat
 int pdn_aprs_encode_tnc2(const pdn_aprs_header *header, const pdn_aprs_data *data,
                          const pdn_aprs_encode_options *options, char *buf, size_t cap, pdn_aprs_encoded *encoded)
 {
-    return encode_packet(header, data, options, buf, cap, encoded, 0);
+    return pdn_aprs__encode_packet(header, data, options, buf, cap, encoded, 0, 0);
 }
 
 int pdn_aprs_encode_ax25(const pdn_aprs_header *header, const pdn_aprs_data *data,
                          const pdn_aprs_encode_options *options, void *buf, size_t cap, pdn_aprs_encoded *encoded)
 {
-    return encode_packet(header, data, options, buf, cap, encoded, 1);
+    return pdn_aprs__encode_packet(header, data, options, buf, cap, encoded, 1, 0);
 }
 
 /* ==== src/build.c ==== */
@@ -6512,16 +6629,19 @@ static int station_header(const pdn_aprs_station *st, pdn_aprs_header *h)
     return 1;
 }
 
-int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_data *data, void *buf, size_t cap)
+static int build_with(const pdn_aprs_station *station, const pdn_aprs_data *data, void *buf, size_t cap, int flags)
 {
     pdn_aprs_header h;
     pdn_aprs_encode_options o;
     if (!data || !station_header(station, &h))
         return PDN_APRS_ERR_ARGUMENT;
     o.devices = station->devices;
-    if (station->ax25)
-        return pdn_aprs_encode_ax25(&h, data, &o, buf, cap, NULL);
-    return pdn_aprs_encode_tnc2(&h, data, &o, (char *)buf, cap, NULL);
+    return pdn_aprs__encode_packet(&h, data, &o, buf, cap, NULL, station->ax25 != 0, flags);
+}
+
+int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_data *data, void *buf, size_t cap)
+{
+    return build_with(station, data, buf, cap, 0);
 }
 
 static size_t set_text(char *dst, size_t cap, const char *src)
@@ -6634,12 +6754,18 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e *
     r->symbol = m->symbol;
     r->mic_e_message = m->message;
     r->ambiguity = m->ambiguity;
-    r->has_course = m->has_course;
+    /* a course of 0 is the spec's unknown, which Mic-E writes as 0, and so is
+       one that rounds to 0 (ruling B1) */
+    r->has_course = (uint8_t)(m->has_course && pdn_aprs__round(m->course_degrees) != 0);
     r->course_degrees = m->course_degrees;
     r->has_speed = 1;
     r->speed_knots = m->has_speed ? m->speed_knots : 0;
-    r->has_altitude = m->has_altitude;
-    r->altitude_feet = m->altitude_feet;
+    /* feet go in a /A=; metres in the Mic-E altitude bytes, whose unit is
+       the metre, rounded to it (ruling B2) */
+    if (m->has_altitude && m->has_altitude_m)
+        return PDN_APRS_ERR_ARGUMENT;
+    r->has_altitude = (uint8_t)(m->has_altitude || m->has_altitude_m);
+    r->altitude_feet = m->has_altitude_m ? pdn_aprs__round(m->altitude_m) / 0.3048 : m->altitude_feet;
     r->type_code = m->type_code;
     if (set_text(r->device_suffix, sizeof r->device_suffix, m->device_suffix) == (size_t)-1 ||
         set_text(r->locator, sizeof r->locator, m->locator) == (size_t)-1)
@@ -6660,7 +6786,7 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e *
     if (n == (size_t)-1)
         return PDN_APRS_ERR_ARGUMENT;
     r->comment_len = (uint16_t)n;
-    return pdn_aprs_build(station, &d, buf, cap);
+    return build_with(station, &d, buf, cap, m->has_altitude ? PDN_APRS__ENC_MIC_E_FEET : 0);
 }
 
 void pdn_aprs_weather_init(pdn_aprs_weather *weather)
@@ -6694,6 +6820,10 @@ static int build_message(const pdn_aprs_station *station, int type, const char *
 {
     pdn_aprs_data d;
     size_t n;
+    /* a message ID is 1-5 letters or digits: an empty one is refused, not
+       taken as none (ruling B8) */
+    if (message_id && !message_id[0])
+        return PDN_APRS_ERR_REFUSED;
     memset(&d, 0, sizeof d);
     d.type = (uint8_t)type;
     n = set_text(d.as.message.text, sizeof d.as.message.text, text);
@@ -7100,6 +7230,8 @@ int pdn_aprs_symbol_overlay(pdn_aprs_symbol symbol, char overlay, pdn_aprs_symbo
 #undef A_HEX
 #undef A_B91
 #undef A_TOUPPER
+#undef PDN_APRS__LIFTED
+#undef PDN_APRS__ENC_MIC_E_FEET
 #undef FEET_PER_METRE
 #undef DAO_DATUM_REFUSAL
 #undef HEADER_ROOM
