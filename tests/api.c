@@ -522,6 +522,12 @@ static void test_batch2(void)
     mic.comment = "/{}";
     CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line) > 0 && strstr(line, "/A=000101 /{}") != NULL);
 
+    /* text after an area symbol that is not an area takes no delimiter (E7):
+       81019310 would be colour 19 */
+    CHECK(decode("N0CALL>APZ001:;SEARCH   *092345z4903.50N\\07201.75Wl81019310") == PDN_APRS_OK &&
+          pdn_aprs_encode_info(&pkt.data, NULL, buf, sizeof buf - 1, NULL) == 45 &&
+          memcmp(buf, ";SEARCH   *092345z4903.50N\\07201.75Wl81019310", 45) == 0);
+
     /* a later Mic-E altitude is looked for before the !DAO! is lifted */
     CHECK(decode("K4NNW-13>SWQR1T:`lX\x1fn\"C>/]\"13.7V!w*@!7e}=") == PDN_APRS_OK &&
           pkt.data.as.report.has_altitude && !pkt.data.as.report.has_dao &&

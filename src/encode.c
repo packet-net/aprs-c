@@ -392,8 +392,9 @@ static int starts_extension(const char *s, size_t n, int area)
         return 1;
     if (pdn_aprs__ext_len((const uint8_t *)s, n))
         return 1;
-    if (area && n >= 7 && A_DIGIT(s[0]) && A_DIGIT(s[1]) && A_DIGIT(s[2]) && (s[3] == '/' || s[3] == '1') &&
-        A_DIGIT(s[4]) && A_DIGIT(s[5]) && A_DIGIT(s[6]))
+    /* as a decoder reads an area: Tyy/Cxx, or Tyy1Cxx for colours 10-15 */
+    if (area && n >= 7 && A_DIGIT(s[0]) && A_DIGIT(s[1]) && A_DIGIT(s[2]) &&
+        (s[3] == '/' || (s[3] == '1' && s[4] <= '5')) && A_DIGIT(s[4]) && A_DIGIT(s[5]) && A_DIGIT(s[6]))
         return 1;
     return 0;
 }
