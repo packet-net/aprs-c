@@ -632,6 +632,17 @@ static void test_batch2(void)
               !pkt.data.as.report.altitude_in_comment && reencodes_as("`(_fn\"Oj/>\"3a}"));
     }
 
+    /* a /A= wins over Mic-E altitude bytes, and is written back as a /A= */
+    CHECK(decode("DL7VAF-9>UR4P64,WIDE1-1,qAO,DB0BBB:`)?rm B>/`\"4P}18.99Wi/A=00000070c45.500MHz Dieter Y14 _%") ==
+              PDN_APRS_OK &&
+          pkt.data.as.report.altitude_in_comment);
+    {
+        char out[300];
+        int n = pdn_aprs_encode_info(&pkt.data, NULL, out, sizeof out - 1, NULL);
+        out[n > 0 ? n : 0] = 0;
+        CHECK(n > 0 && strstr(out, "/A=000000") != NULL);
+    }
+
     /* an empty message ID is refused, not taken as none (B8) */
     msg.addressee = "G4XYZ";
     msg.text = "hi";

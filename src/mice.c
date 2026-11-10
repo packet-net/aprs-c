@@ -187,7 +187,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
     pdn_aprs_report *r = &c->data->as.report;
     size_t n = 0, i, tl;
     const uint8_t *s, *t;
-    int msg = 0, amb = 0, west = 0, lon100 = 0, had_ext = 0, altitude_in_bytes = 0;
+    int msg = 0, amb = 0, west = 0, lon100 = 0, had_ext = 0;
     double lat = 0;
     pdn_aprs__cbuf cb;
     uint8_t dti = c->info[0];
@@ -358,7 +358,6 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
         }
     }
     pdn_aprs__cbuf_set(c, &cb, t, tl);
-    altitude_in_bytes = r->has_altitude;
     if (!r->has_altitude) {
         /* an altitude later in the text: the first xxx} */
         size_t k;
@@ -374,7 +373,6 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
             r->altitude_feet = (double)(pdn_aprs__b91(cb.b + k, 3) - 10000) * FEET_PER_METRE;
             pdn_aprs__cbuf_cut(&cb, k, 4);
             cb.cut = k + 1;
-            altitude_in_bytes = 1;
         } else if (k + 4 <= cb.n && joins_altitude(c, &cb)) {
             /* a later altitude declined: left as text, lifting the !DAO!
                would make one that is not in the bytes. With no later
@@ -385,6 +383,4 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
         }
     }
     pdn_aprs__finish_comment(c, &cb, r, had_ext);
-    /* an altitude that finish_comment lifted from the text was a /A= */
-    r->altitude_in_comment = (uint8_t)(r->has_altitude && !altitude_in_bytes);
 }
