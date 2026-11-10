@@ -60,7 +60,7 @@ int main(void)
         const pdn_aprs_report *r = &p.data.as.report;
         printf("at %.4f, %.4f: %s\n", r->latitude, r->longitude, pdn_aprs_symbol_description(r->symbol));
         if (r->has_course && r->has_speed)
-            printf("heading %u degrees at %.0f knots\n", (unsigned)r->course_degrees, r->speed_knots);
+            printf("heading %.0f degrees at %.0f knots\n", r->course_degrees, r->speed_knots);
         printf("comment: %s\n", r->comment);
     }
     for (i = 0; i < p.diagnostic_count; i++)
@@ -81,7 +81,7 @@ comment: Mobile
 
 The shape of the API:
 
-- `pdn_aprs_decode_tnc2()`, `pdn_aprs_decode_ax25()` and `pdn_aprs_decode_info()` fill a `pdn_aprs_packet`. They return `PDN_APRS_OK`, or `PDN_APRS_ERR_HEADER` when the header is unusable (the packet's diagnostics still say why), or `PDN_APRS_ERR_TOO_LONG` for an information field over 512 bytes, which nothing valid has.
+- `pdn_aprs_decode_tnc2()`, `pdn_aprs_decode_ax25()` and `pdn_aprs_decode_info()` fill a `pdn_aprs_packet`. They return `PDN_APRS_OK`, or `PDN_APRS_ERR_HEADER` when the header is unusable (the packet's diagnostics still say why), or `PDN_APRS_ERR_TOO_LONG` for an information field over 512 bytes, which nothing on the air or on APRS-IS has. `pdn_aprs_decode_written()` reads back a field the encoder wrote, which can be longer (below).
 - `packet.header` has the source, destination, path (each entry with its used flag) and the index of any APRS-IS q-construct.
 - `packet.data.type` says which member of the `packet.data.as` union to read. Positions, Mic-E, objects and items share `as.report`; messages, bulletins and NWS bulletins `as.message`; the telemetry metadata types `as.meta`; and so on, one struct per kind.
 - Optional fields have a `has_` flag, or are an empty string. Numbers are in the units APRS sends (`speed_knots`, `altitude_feet`, `temperature_f`), as the vectors' neutral form names them.
@@ -100,7 +100,7 @@ pdn_aprs_decode_options strict = {.strict = 1};
 pdn_aprs_decode_options fussy = {.reject = {[PDN_APRS_CODE_TRAILING_LINE_BREAK] = 1}};
 ```
 
-`reject` switches off one tolerance at a time, indexed by the code; `pdn_aprs_code_tolerable()` says which codes can be tolerated. A few tolerances change how a packet is read rather than rejecting it: with `position-not-at-start` switched off, text before a `!` position makes the packet a non-APRS beacon, and with `data-extension-in-comment` or `mic-e-altitude-not-first` switched off the element stays in the comment.
+`reject` switches off one tolerance at a time, indexed by the code; `pdn_aprs_code_tolerable()` says which codes can be tolerated. A few tolerances change how a packet is read rather than rejecting it: with `position-not-at-start` switched off, text before a `!` position makes the packet a non-APRS beacon, and with `data-extension-in-comment` or `mic-e-altitude-not-first` switched off the element stays in the comment (a Mic-E report with a later altitude is rejected when lifting its telemetry and `!DAO!` would join bytes across their place into another).
 
 The options also carry the device table, which a decoder needs to recognise Mic-E device suffixes:
 
@@ -165,7 +165,7 @@ M0LTE-9>APZ001,WIDE1-1,WIDE2-1:T#005,199,0,255,73,123,01101001
 long message: the encoder refuses this data
 ```
 
-The encoder writes only what APRS allows. It refuses, with `PDN_APRS_ERR_REFUSED`, data it cannot write faithfully: message text over 67 characters, a comment that would read back as an altitude or a `!DAO!`, two data extensions, an object without a timestamp, a weather report with a comment, and so on. When it refuses, `pdn_aprs_encoded.reason` says why in plain words. As a last check it decodes what it has written and refuses if that does not read back as the same data, so what it writes always decodes cleanly. Numbers are rounded to what the format carries: a compressed position to its base-91 step, an uncompressed one to a hundredth of a minute unless a `!DAO!` asks for more.
+The encoder writes only what APRS allows. It refuses, with `PDN_APRS_ERR_REFUSED`, data it cannot write faithfully: message text over 67 characters, a comment that would read back as an altitude or a `!DAO!`, two data extensions, an object without a timestamp, a weather report with a comment, and so on. When it refuses, `pdn_aprs_encoded.reason` says why in plain words. As a last check it decodes what it has written and refuses if that does not read back as the same data, so what it writes always decodes cleanly. Numbers are rounded once to the step of the field they go in, to the nearest, halves away from zero, and checked after rounding: a compressed position to its base-91 step, an uncompressed one to a hundredth of a minute unless a `!DAO!` asks for more, a course to a whole degree (4 degrees in compressed bytes), an altitude to a foot, a temperature to a degree. A course of 0 is the spec's unknown: `000` uncompressed, and refused in Mic-E and compressed reports, where 0 has no form. A Mic-E altitude given to the builder in feet goes in a `/A=`, and one in metres (`altitude_m`) in the Mic-E altitude bytes.
 
 For full control, fill a `pdn_aprs_data` yourself (or take one from the decoder) and call `pdn_aprs_encode_info()`, `pdn_aprs_encode_tnc2()` or `pdn_aprs_encode_ax25()`. A Mic-E report's destination address is computed from its latitude and message type; the encoder returns it in `pdn_aprs_encoded.destination`. Pass the device table in `pdn_aprs_encode_options` (or a station's `devices`) when you have it: the encoder then also refuses a Mic-E comment that happens to end in a known device suffix, which would read back as the suffix.
 
@@ -225,7 +225,7 @@ The library was written to be added to the source tree of a program like LinBPQ/
 
 **Names.** Every public function, type and macro starts `pdn_aprs_` or `PDN_APRS_`, so nothing collides with a program's own APRS code. Internal functions are `static`, and the internal macros are undefined at the end of `pdn_aprs.c`, so it can even be `#include`d into another file.
 
-**Memory.** Nothing is allocated. You own every struct and buffer. A `pdn_aprs_packet` is about 3.4 KB and a `pdn_aprs_data` about 2.6 KB; keep them static, in your own structures, or on a stack with room. Measured over the vectors and a fuzzing corpus on x86-64, decoding uses up to about 13 KB of stack, and encoding or building up to about 20 KB, most of it the decode the encoder does to check its own output. Outputs never go past the capacity you pass; an information field over 512 bytes is refused before anything is copied.
+**Memory.** Nothing is allocated. You own every struct and buffer. A `pdn_aprs_packet` is about 3.4 KB and a `pdn_aprs_data` about 2.6 KB; keep them static, in your own structures, or on a stack with room. Measured over the vectors and a fuzzing corpus on x86-64, decoding uses up to about 13 KB of stack, and encoding or building up to about 20 KB, most of it the decode the encoder does to check its own output. Outputs never go past the capacity you pass. The decoder refuses an information field over 512 bytes before anything is copied; the encoder sets no limit but the buffer you give it, since text received as Latin-1 is written back as UTF-8, up to twice as long.
 
 **Threads.** There is no global mutable state. Every function is reentrant and can run on any number of threads at once, as long as each call has its own packet and buffers. The device table is read-only.
 
@@ -237,13 +237,21 @@ The library was written to be added to the source tree of a program like LinBPQ/
 
 ## Conformance
 
-The tests run every check the vectors' README defines against every case in [packet-net/aprs-vectors](https://github.com/packet-net/aprs-vectors), which is a submodule at `vectors/`: the lenient decode, the strict decode, the decode with each single tolerance switched off, the re-encode (identical, equivalent or refused) and the encode cases.
+The tests run every check the vectors' README defines against every case in [packet-net/aprs-vectors](https://github.com/packet-net/aprs-vectors), which is a submodule at `vectors/`: the lenient decode, the strict decode, the decode with each single tolerance switched off, the re-encode (identical; `canonical_info` byte for byte, for equivalent and rounded; or refused) and the encode cases.
 
-- **Vectors:** 6,015 of 6,015 checks pass over 1,874 cases: 1,812 lenient decodes, 1,812 strict decodes, 690 decodes with a single tolerance switched off, 1,639 re-encodes and 62 encode cases. Nothing is skipped ([`tests/known-differences.txt`](tests/known-differences.txt) is empty). `pdn_aprs_vectors vectors -v` lists every check by case id.
+- **Vectors:** all 6,176 checks pass over 1,961 cases: 1,844 lenient decodes, 1,844 strict decodes, 699 decodes with a single tolerance switched off, 1,672 re-encodes and 117 encode cases. `pdn_aprs_vectors vectors -v` lists every check by case id.
 - **A real capture:** at 0.1.0, on 6,879,893 packets from APRS-IS, the decodings (lenient and strict) and re-encodings agreed with the Rust library's on every packet, by the vectors' `tools/compare.py`. The only differences were encoder choices the comparison does not count: for 114 objects this library wrote the original bytes back where Rust wrote different but equivalent ones.
 - **Differential fuzzing:** the five implementations were also compared over 2,000,000 mutated packets (2026-09-27). Every disagreement was settled by a ruling, and the rulings are in the vectors as cases.
 
-`tools/diffdump.c` writes the comparison dump: `zcat lines.hex.gz | pdn_aprs_diffdump | gzip > c.jsonl.gz`.
+`tools/diffdump.c` (`pdn_aprs_diffdump`) writes the comparison dumps the vectors' README describes, reading JSON lines on stdin and writing them on stdout:
+
+```sh
+zcat lines.hex.gz | build/pdn_aprs_diffdump | gzip > c.jsonl.gz                   # decode: packets as hex TNC2 lines
+zcat data.jsonl.gz | build/pdn_aprs_diffdump --encode | gzip > c-encode.jsonl.gz  # encode: neutral data
+zcat recipes.jsonl.gz | build/pdn_aprs_diffdump --build | gzip > c-build.jsonl.gz # build: builder recipes
+```
+
+A decode record holds the bytes the encoder writes and the API view (the source, destination, path, q-construct, device and symbol description, and `inner` for a third-party packet). In build mode a recipe key the builder has no way to take, such as an empty telemetry channel, a status locator or beam heading, a message's reply-ack, text holding a NUL, or text longer than the C data holds (1024 bytes), is reported as `unsupported`, naming the key. The vectors accept that last one: the rules set no size limit (ruling E11), and the C data model holds text of up to 1,024 bytes, twice the longest information field the decoder takes, so a longer text is something the builder has no way to say rather than data the Encoding rule declines.
 
 The decoder is also fuzzed with libFuzzer, AddressSanitizer and UndefinedBehaviorSanitizer (`fuzz/fuzz_decode.c`): every input is decoded as a TNC2 line, an AX.25 frame and an information field, leniently and strictly, and whatever decodes is re-encoded and decoded again to check it reads back the same. Inputs that once failed are kept in `fuzz/regressions/`, and the tests replay them on every platform.
 

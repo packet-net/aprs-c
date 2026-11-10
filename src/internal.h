@@ -65,6 +65,10 @@ PDN_APRS__PRIVATE long pdn_aprs__digits(const uint8_t *s, size_t n);
 PDN_APRS__PRIVATE int pdn_aprs__parse_number(const uint8_t *s, size_t n, int allow_exp, double *out);
 /* 10 to an integer power, exactly for small powers. */
 PDN_APRS__PRIVATE double pdn_aprs__pow10i(int e);
+/* v rounded to the nearest whole number, halves away from zero, where a
+   value within 1e-6 of a half is the half (ruling F2). v is in the field's
+   steps. */
+PDN_APRS__PRIVATE double pdn_aprs__round(double v);
 
 /* ---- text ---- */
 
@@ -96,6 +100,7 @@ typedef struct pdn_aprs__dctx {
     size_t len;
     int latin1;          /* the text being taken is not UTF-8 and is read as Latin-1 */
     int failed;          /* an error stopped decoding */
+    int too_long;        /* a part of the field is longer than the packet holds */
     const char *dest;    /* the destination address, for Mic-E */
 } pdn_aprs__dctx;
 
@@ -112,6 +117,14 @@ PDN_APRS__PRIVATE int pdn_aprs__tolerate(pdn_aprs__dctx *c, int code);
 PDN_APRS__PRIVATE int pdn_aprs__check_text(pdn_aprs__dctx *c, const uint8_t *s, size_t n);
 /* Copies text from the field into dst, honouring the field's encoding. */
 PDN_APRS__PRIVATE size_t pdn_aprs__take_text(pdn_aprs__dctx *c, char *dst, size_t cap, const uint8_t *s, size_t n);
+/* The same with the encoding given; both mark the field too long (see
+   pdn_aprs__overflow) rather than cut the text short. */
+PDN_APRS__PRIVATE size_t pdn_aprs__take(pdn_aprs__dctx *c, char *dst, size_t cap, const uint8_t *s, size_t n,
+                                        int latin1);
+/* A part of the field is longer than the packet can hold, which only a field
+   longer than PDN_APRS_MAX_INFO can be (pdn_aprs_decode_written): decoding
+   stops, and the result is PDN_APRS_ERR_TOO_LONG. Returns 0. */
+PDN_APRS__PRIVATE int pdn_aprs__overflow(pdn_aprs__dctx *c);
 
 /* Diagnostic-count checkpoints, for trial decodes. */
 PDN_APRS__PRIVATE int pdn_aprs__mark(pdn_aprs__dctx *c);
@@ -144,13 +157,22 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_test(pdn_aprs__dctx *c);
 PDN_APRS__PRIVATE void pdn_aprs__decode_agrelo(pdn_aprs__dctx *c);
 PDN_APRS__PRIVATE void pdn_aprs__decode_maidenhead(pdn_aprs__dctx *c);
 
-/* Comment processing (comment.c). A working copy of a comment, as bytes. */
+/* Comment processing (comment.c). A working copy of a comment, as bytes:
+   room for the longest the encoder writes, a comment of PDN_APRS_TEXT_SIZE
+   bytes and the elements around it. */
 typedef struct pdn_aprs__cbuf {
-    uint8_t b[PDN_APRS_MAX_INFO];
+    uint8_t b[PDN_APRS_TEXT_SIZE + 256];
     size_t n;
+    /* 1 + where a Mic-E altitude was taken out, or 0: no !DAO! spans it */
+    size_t cut;
+    /* where pdn_aprs__lift_telemetry_dao took telemetry or a !DAO! out, in
+       the text left: the bytes either side were not next to each other */
+    size_t gap[2];
+    int gaps;
 } pdn_aprs__cbuf;
 
-PDN_APRS__PRIVATE void pdn_aprs__cbuf_set(pdn_aprs__cbuf *cb, const uint8_t *s, size_t n);
+/* Returns 1, or 0 (after pdn_aprs__overflow) if [s, s+n) does not fit. */
+PDN_APRS__PRIVATE int pdn_aprs__cbuf_set(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, const uint8_t *s, size_t n);
 PDN_APRS__PRIVATE void pdn_aprs__cbuf_cut(pdn_aprs__cbuf *cb, size_t at, size_t n);
 /* Lifts base-91 telemetry (between the last two |) and the last !DAO!
    outside it. */
@@ -161,9 +183,14 @@ PDN_APRS__PRIVATE int pdn_aprs__lift_altitude(pdn_aprs__cbuf *cb, double *feet);
 PDN_APRS__PRIVATE size_t pdn_aprs__ext_len(const uint8_t *s, size_t n);
 /* Parses a 7-byte data extension (PHG/PHGR, RNG, DFS) at s; returns bytes used or 0. */
 PDN_APRS__PRIVATE size_t pdn_aprs__parse_phg_rng_dfs(const uint8_t *s, size_t n, pdn_aprs_report *r);
+/* The first of a positioned comment: lifts telemetry and a !DAO!, and
+   applies the DAO. Returns 0 if the packet is rejected. */
+PDN_APRS__PRIVATE int pdn_aprs__lift_comment_start(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r);
+/* finish_comment's had_extension bit: lift_comment_start has been called. */
+#define PDN_APRS__LIFTED 2
 /* The rest of a positioned comment: telemetry, DAO, altitude, braces, late
    extension, frequency, delimiter. had_extension: an extension that counts
-   came straight after the symbol. */
+   came straight after the symbol (bit 1), PDN_APRS__LIFTED. */
 PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r,
                                                int had_extension);
 /* Voice frequency at the start of cb; returns 1 and lifts it if found. */
@@ -181,6 +208,10 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
 /* Mic-E destination (mice.c): latitude, message, ambiguity, flags. */
 PDN_APRS__PRIVATE int pdn_aprs__mic_e_dest(const char *dest, double *lat, int *msg, int *amb, int *west,
                                            int *lon100);
+
+/* The length of a Mic-E locator and its /G at s (AA00/G or AA00aa/G, the
+   letters in either case), or 0. */
+PDN_APRS__PRIVATE size_t pdn_aprs__mic_e_locator_len(const uint8_t *s, size_t n);
 
 /* Devices (device.c). */
 PDN_APRS__PRIVATE int pdn_aprs__mic_e_suffix_known(const pdn_aprs_device_table *t, char type_code,
@@ -202,8 +233,17 @@ typedef struct pdn_aprs__ectx {
     pdn_aprs__buf *b;
     const char *reason;
     char dest[PDN_APRS_ADDR_SIZE];
-    int variant; /* bit 0: put a delimiter before any comment */
+    int variant; /* 1: put a / before any comment, 2: a space */
+    int flags;   /* PDN_APRS__ENC_ */
 } pdn_aprs__ectx;
+
+/* Encoder flags the builder sets: a Mic-E altitude goes in a /A=, never in
+   the Mic-E altitude bytes (the program gave it in feet, ruling B2). */
+#define PDN_APRS__ENC_MIC_E_FEET 1
+/* pdn_aprs_encode_tnc2 or pdn_aprs_encode_ax25 (ax25 nonzero) with flags. */
+PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *data,
+                                              const pdn_aprs_encode_options *options, void *buf, size_t cap,
+                                              pdn_aprs_encoded *encoded, int ax25, int flags);
 
 PDN_APRS__PRIVATE int pdn_aprs__refuse(pdn_aprs__ectx *e, const char *why);
 PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_data *d);

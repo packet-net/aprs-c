@@ -6,13 +6,17 @@
  */
 #include "internal.h"
 
-PDN_APRS__PRIVATE void pdn_aprs__cbuf_set(pdn_aprs__cbuf *cb, const uint8_t *s, size_t n)
+PDN_APRS__PRIVATE int pdn_aprs__cbuf_set(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, const uint8_t *s, size_t n)
 {
-    if (n > sizeof cb->b)
-        n = sizeof cb->b;
+    if (n > sizeof cb->b) {
+        cb->n = 0;
+        return pdn_aprs__overflow(c);
+    }
     if (n)
         memmove(cb->b, s, n);
     cb->n = n;
+    cb->cut = 0;
+    return 1;
 }
 
 PDN_APRS__PRIVATE void pdn_aprs__cbuf_cut(pdn_aprs__cbuf *cb, size_t at, size_t n)
@@ -89,6 +93,9 @@ PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs
             size_t k = i - 1;
             if (have_tlm && k + 5 > tstart && k < tend)
                 continue;
+            /* bytes either side of what was taken out never join into one */
+            if (cb->cut && k + 1 < cb->cut && cb->cut - 1 < k + 5)
+                continue;
             if (dao_at(cb->b + k)) {
                 memcpy(dao, cb->b + k, 5);
                 dao_pos = k;
@@ -97,14 +104,21 @@ PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs
             }
         }
     }
+    cb->gaps = 0;
     if (have_dao && have_tlm && dao_pos > tstart) {
         pdn_aprs__cbuf_cut(cb, dao_pos, 5);
         pdn_aprs__cbuf_cut(cb, tstart, tend - tstart);
+        cb->gap[cb->gaps++] = tstart;
+        cb->gap[cb->gaps++] = dao_pos - (tend - tstart);
     } else {
         if (have_tlm)
             pdn_aprs__cbuf_cut(cb, tstart, tend - tstart);
         if (have_dao)
             pdn_aprs__cbuf_cut(cb, dao_pos, 5);
+        if (have_tlm)
+            cb->gap[cb->gaps++] = have_dao ? tstart - 5 : tstart;
+        if (have_dao)
+            cb->gap[cb->gaps++] = dao_pos;
     }
     if (have_dao) {
         r->has_dao = 1;
@@ -306,11 +320,8 @@ static int find_braces(const pdn_aprs__cbuf *cb, int digits, size_t *at, size_t 
 
 /* ---- the whole comment ---- */
 
-PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r,
-                                               int had_extension)
+PDN_APRS__PRIVATE int pdn_aprs__lift_comment_start(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r)
 {
-    double feet;
-    size_t at, len;
     uint8_t dao[5];
     pdn_aprs__lift_telemetry_dao(cb, r, dao);
     if (r->has_dao) {
@@ -321,6 +332,17 @@ PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf
             pdn_aprs__apply_dao(c, r, dao, !r->compressed);
         }
     }
+    return 1;
+}
+
+PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r,
+                                               int had_extension)
+{
+    double feet;
+    size_t at, len;
+    if (!(had_extension & PDN_APRS__LIFTED) && !pdn_aprs__lift_comment_start(c, cb, r))
+        return 0;
+    had_extension &= 1;
     if (pdn_aprs__lift_altitude(cb, &feet)) {
         r->has_altitude = 1;
         r->altitude_feet = feet;

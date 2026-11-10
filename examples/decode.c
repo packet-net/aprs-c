@@ -19,7 +19,7 @@ int main(void)
         const pdn_aprs_report *r = &p.data.as.report;
         printf("at %.4f, %.4f: %s\n", r->latitude, r->longitude, pdn_aprs_symbol_description(r->symbol));
         if (r->has_course && r->has_speed)
-            printf("heading %u degrees at %.0f knots\n", (unsigned)r->course_degrees, r->speed_knots);
+            printf("heading %.0f degrees at %.0f knots\n", r->course_degrees, r->speed_knots);
         printf("comment: %s\n", r->comment);
     }
     for (i = 0; i < p.diagnostic_count; i++)

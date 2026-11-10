@@ -29,8 +29,8 @@ static void require(int cond)
 static void check_encoding(const pdn_aprs_packet *p, const pdn_aprs_decode_options *o)
 {
     static pdn_aprs_packet again;
-    static uint8_t buf[2 * PDN_APRS_MAX_INFO];
-    static char line[4 * PDN_APRS_MAX_INFO];
+    static uint8_t buf[4 * PDN_APRS_MAX_INFO];
+    static char line[4 * PDN_APRS_MAX_INFO + 256];
     pdn_aprs_encoded enc;
     pdn_aprs_encode_options eo;
     pdn_aprs_header h;
@@ -42,11 +42,12 @@ static void check_encoding(const pdn_aprs_packet *p, const pdn_aprs_decode_optio
         require(enc.reason != NULL);
         return;
     }
-    require((size_t)n <= PDN_APRS_MAX_INFO);
     h = p->header;
     if (p->data.type == PDN_APRS_TYPE_MIC_E)
         memcpy(h.destination, enc.destination, sizeof h.destination);
-    rc = pdn_aprs_decode_info(&h, buf, (size_t)n, o, &again);
+    /* text received as Latin-1 is written back as UTF-8, so what was
+       written may be longer than the decoder takes off the air */
+    rc = pdn_aprs_decode_written(&h, buf, (size_t)n, o, &again);
     require(rc == PDN_APRS_OK);
     require(again.data.type == p->data.type);
     for (i = 0; i < again.diagnostic_count; i++)
@@ -56,8 +57,9 @@ static void check_encoding(const pdn_aprs_packet *p, const pdn_aprs_decode_optio
     n = pdn_aprs_encode_tnc2(&p->header, &p->data, &eo, line, sizeof line, &enc);
     if (n > 0) {
         require((size_t)n < sizeof line && line[n] == 0);
-        require(pdn_aprs_decode_tnc2(line, (size_t)n, o, &again) == PDN_APRS_OK);
-        require(again.data.type == p->data.type);
+        rc = pdn_aprs_decode_tnc2(line, (size_t)n, o, &again);
+        require(rc == PDN_APRS_OK || rc == PDN_APRS_ERR_TOO_LONG);
+        require(rc != PDN_APRS_OK || again.data.type == p->data.type);
     }
 }
 

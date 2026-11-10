@@ -61,6 +61,14 @@ PDN_APRS__PRIVATE double pdn_aprs__pow10i(int e)
     return pow(10.0, (double)e);
 }
 
+PDN_APRS__PRIVATE double pdn_aprs__round(double v)
+{
+    double mag = fabs(v), whole = floor(mag);
+    if (mag - whole >= 0.5 - 1e-6)
+        whole += 1.0;
+    return v < 0 ? -whole : whole;
+}
+
 /* Writes the integer r (< 1e18) as a decimal with d digits after the point. */
 static void put_scaled(pdn_aprs__buf *b, uint64_t r, int d)
 {

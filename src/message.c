@@ -84,8 +84,8 @@ static int decode_names(pdn_aprs__dctx *c, const uint8_t *s, size_t n, pdn_aprs_
             continue;
         {
             size_t len = out < sizeof m->text
-                             ? pdn_aprs__text(m->text + out, sizeof m->text - out, s + start, i - start, c->latin1)
-                             : 0;
+                             ? pdn_aprs__take_text(c, m->text + out, sizeof m->text - out, s + start, i - start)
+                             : (size_t)pdn_aprs__overflow(c);
             m->offset[m->count] = (uint16_t)(out < sizeof m->text ? out : sizeof m->text - 1);
             m->length[m->count] = (uint16_t)len;
             m->count++;
@@ -143,7 +143,7 @@ static int decode_bits(pdn_aprs__dctx *c, const uint8_t *s, size_t n, pdn_aprs_t
         return 1;
     if (s[8] != ',')
         return 0;
-    m->project_len = (uint16_t)pdn_aprs__text(m->text, sizeof m->text, s + 9, n - 9, c->latin1);
+    m->project_len = (uint16_t)pdn_aprs__take_text(c, m->text, sizeof m->text, s + 9, n - 9);
     return 1;
 }
 

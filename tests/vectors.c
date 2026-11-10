@@ -1,6 +1,7 @@
 /*
  * vectors.c - runs every check the aprs-vectors README defines, for every
- * case: lenient, strict, single-tolerance, re-encode, and the encode cases.
+ * case: lenient, strict, single-tolerance, re-encode (identical, or
+ * canonical_info byte for byte), and the encode cases.
  * One test per check per case, named "<case id> [<check>]".
  *
  *   vectors <vectors dir> [known-differences file] [-v] [-k substring]
@@ -356,7 +357,7 @@ static void check_decode_case(const jval *c, const char *id)
 
     /* re-encode, from the lenient data */
     if (reenc && pkt.header_ok) {
-        uint8_t buf[2048];
+        uint8_t buf[4 * PDN_APRS_MAX_INFO];
         pdn_aprs_encoded enc;
         pdn_aprs_encode_options eo;
         int n;
@@ -389,24 +390,37 @@ static void check_decode_case(const jval *c, const char *id)
                 snprintf(why, sizeof why, "wrote %s (dest %s)", ascii(buf, n), enc.destination);
                 report(id, check, identical, why, NULL, NULL);
             } else {
-                /* equivalent: decodes, leniently, to the same data with no warnings or errors */
+                /* equivalent: canonical_info byte for byte, which decodes,
+                   leniently, to the same data with no warnings or errors;
+                   rounded: canonical_info byte for byte, which decodes
+                   cleanly to the data with a value rounded, so the data is
+                   not compared */
                 pdn_aprs_header h;
-                jval *again, *d2;
-                int rc2, eq, clean = 1, i;
+                jval *again, *d2, *canon = json_get(c, "canonical_info");
+                int rc2, eq, clean = 1, exact, k, rounded = strcmp(reenc, "rounded") == 0;
                 memset(&h, 0, sizeof h);
                 h = pkt.header;
                 if (pkt.data.type == PDN_APRS_TYPE_MIC_E)
                     snprintf(h.destination, sizeof h.destination, "%s", enc.destination);
-                rc2 = pdn_aprs_decode_info(&h, buf, (size_t)n, &lenient, &pkt2);
+                /* what the encoder writes may be longer than the decoder
+                   takes off the air */
+                rc2 = pdn_aprs_decode_written(&h, buf, (size_t)n, &lenient, &pkt2);
                 again = neutral_result(&pkt2, rc2, &lenient);
                 d2 = json_get(again, "data");
-                eq = json_equal(d2, json_get(got, "data"));
-                for (i = 0; i < pkt2.diagnostic_count; i++)
-                    if (pkt2.diagnostics[i].severity != PDN_APRS_SEVERITY_INFO)
+                eq = rounded || json_equal(d2, json_get(got, "data"));
+                for (k = 0; k < pkt2.diagnostic_count; k++)
+                    if (pkt2.diagnostics[k].severity != PDN_APRS_SEVERITY_INFO)
                         clean = 0;
-                snprintf(why, sizeof why, "wrote %s: %s", ascii(buf, n),
-                         !eq ? "decodes to different data" : "decodes with warnings");
-                report(id, check, eq && clean, why, eq && clean ? NULL : again, NULL);
+                if (rc2 != PDN_APRS_OK)
+                    clean = 0;
+                exact = canon && canon->t == J_STR && (size_t)n == canon->len && memcmp(buf, canon->str, canon->len) == 0;
+                if (!exact)
+                    snprintf(why, sizeof why, "wrote %s, canonical_info %s", ascii(buf, n),
+                             canon && canon->t == J_STR ? ascii(canon->str, (int)canon->len) : "missing");
+                else
+                    snprintf(why, sizeof why, "wrote %s: %s", ascii(buf, n),
+                             !eq ? "decodes to different data" : "decodes with warnings");
+                report(id, check, exact && eq && clean, why, exact && eq && clean ? NULL : again, NULL);
                 json_free(again);
             }
         }

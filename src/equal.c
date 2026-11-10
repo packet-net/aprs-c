@@ -36,9 +36,17 @@ static int weather_eq(const pdn_aprs_weather *a, const pdn_aprs_weather *b, int 
     static const double tol[PDN_APRS_WX_COUNT] = {2.01, 0.51, 0.51, 0.51, 0.0051, 0.0051,
                                                    0.0051, 0.51, 0.051, 0.51, 0.051, 0.51};
     for (i = 0; i < PDN_APRS_WX_COUNT; i++) {
+        double va = a->value[i], vb = b->value[i];
         if (!a->has[i] != !b->has[i])
             return 0;
-        if (a->has[i] && !near(a->value[i], b->value[i], tol[i], i == PDN_APRS_WX_WIND_SPEED ? 0.045 : 0, loose))
+        /* a direction that rounds to 360 is written as north, which a
+           compressed wind reads back as 0 */
+        if (loose && i == PDN_APRS_WX_WIND_DIRECTION && fabs(va - vb) > 180)
+            va += va < vb ? 360 : -360;
+        /* snowfall is written in hundredths under 1 inch, tenths under 10,
+           and whole inches from there (ruling F3) */
+        if (a->has[i] && !near(va, vb, tol[i],
+                               i == PDN_APRS_WX_WIND_SPEED ? 0.045 : i == PDN_APRS_WX_SNOW_24H ? 0.051 : 0, loose))
             return 0;
     }
     if (a->software != b->software || !str_eq(a->unit, b->unit) || a->extra_count != b->extra_count)
@@ -66,9 +74,17 @@ static int report_eq(const pdn_aprs_report *a, const pdn_aprs_report *b, int typ
                                 a->compression.source != b->compression.source ||
                                 a->compression.origin != b->compression.origin)))
         return 0;
-    if (!a->has_course != !b->has_course ||
-        (a->has_course && !near(a->course_degrees, b->course_degrees, 2.01, 0, loose)))
+    if (!a->has_course != !b->has_course)
         return 0;
+    if (a->has_course) {
+        double ca = a->course_degrees, cb = b->course_degrees;
+        /* loose: a course that rounds to 360 is written as north (ruling
+           E9), so 1 degree may read back as 360 */
+        if (loose && fabs(ca - cb) > 180)
+            ca += ca < cb ? 360 : -360;
+        if (!near(ca, cb, 2.01, 0, loose))
+            return 0;
+    }
     if (!a->has_speed != !b->has_speed || (a->has_speed && !near(a->speed_knots, b->speed_knots, 0.51, 0.041, loose)))
         return 0;
     if (!a->has_altitude != !b->has_altitude ||
@@ -240,7 +256,16 @@ PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_apr
         const pdn_aprs_nmea *s = &a->as.nmea, *t = &b->as.nmea;
         return s->sentence_len == t->sentence_len && memcmp(s->sentence, t->sentence, s->sentence_len) == 0 &&
                !s->has_checksum == !t->has_checksum && s->comment_len == t->comment_len &&
-               memcmp(s->comment, t->comment, s->comment_len) == 0;
+               memcmp(s->comment, t->comment, s->comment_len) == 0 &&
+               /* the fields read from the sentence, those t gives: data whose
+                  fields disagree with its sentence does not read back */
+               (!t->has_position || (s->has_position && num_eq(s->latitude, t->latitude) &&
+                                     num_eq(s->longitude, t->longitude))) &&
+               (!t->has_fix || (s->has_fix && !s->fix_valid == !t->fix_valid)) &&
+               (!t->has_course || (s->has_course && num_eq(s->course_degrees, t->course_degrees))) &&
+               (!t->has_speed || (s->has_speed && num_eq(s->speed_knots, t->speed_knots))) &&
+               (!t->has_altitude || (s->has_altitude && num_eq(s->altitude_m, t->altitude_m))) &&
+               (!t->time[0] || str_eq(s->time, t->time)) && (!t->waypoint[0] || str_eq(s->waypoint, t->waypoint));
     }
     case PDN_APRS_TYPE_MAIDENHEAD_BEACON:
         return str_eq(a->as.maidenhead.locator, b->as.maidenhead.locator) &&
@@ -252,7 +277,7 @@ PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_apr
                (!a->as.query.has_footprint ||
                 (num_eq(a->as.query.latitude, b->as.query.latitude) &&
                  num_eq(a->as.query.longitude, b->as.query.longitude) &&
-                 a->as.query.radius_miles == b->as.query.radius_miles));
+                 near(a->as.query.radius_miles, b->as.query.radius_miles, 0.51, 0, loose)));
     case PDN_APRS_TYPE_CAPABILITIES: {
         const pdn_aprs_capabilities *s = &a->as.capabilities, *t = &b->as.capabilities;
         if (s->count != t->count)

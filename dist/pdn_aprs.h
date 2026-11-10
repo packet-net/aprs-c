@@ -658,7 +658,7 @@ typedef struct pdn_aprs_report {
     uint8_t has_compression;
     pdn_aprs_compression compression;
     uint8_t has_course;
-    uint16_t course_degrees;
+    double course_degrees; /* whole degrees when decoded; rounded when encoded */
     uint8_t has_speed;
     double speed_knots;
     uint8_t has_altitude;
@@ -826,7 +826,12 @@ typedef struct pdn_aprs_query {
     char query_type[PDN_APRS_MAX_INFO]; /* upper-case letters */
     uint8_t has_footprint;
     double latitude, longitude;
-    uint16_t radius_miles;
+    double radius_miles; /* whole miles when decoded; rounded when encoded */
+    /* The footprint's latitude and longitude as sent (" 34.0", "-.1715"),
+       any leading space included, for identical re-encoding; "" to format
+       the value, and "" too when the text sent is longer than fits here. */
+    char latitude_text[24];
+    char longitude_text[24];
 } pdn_aprs_query;
 
 /* Station capabilities: count items, each a token and an optional value,
@@ -978,6 +983,17 @@ int pdn_aprs_decode_info(const pdn_aprs_header *header, const void *info, size_t
                          const pdn_aprs_decode_options *options, pdn_aprs_packet *packet);
 
 /*
+ * Decodes an information field as pdn_aprs_decode_info does, but keeps no
+ * copy of it in the packet (info_len is 0), so it may be longer than
+ * PDN_APRS_MAX_INFO. The encoder writes a field of any length (text received
+ * as Latin-1 is written back as UTF-8, up to twice as long), and this reads
+ * one back. Returns PDN_APRS_ERR_TOO_LONG, the data unrecognized, if a part
+ * of the field is longer than the packet's data holds.
+ */
+int pdn_aprs_decode_written(const pdn_aprs_header *header, const void *info, size_t len,
+                            const pdn_aprs_decode_options *options, pdn_aprs_packet *packet);
+
+/*
  * Decodes the packet inside a third-party packet (data.type
  * PDN_APRS_TYPE_THIRD_PARTY) into inner, which has its own header, data and
  * diagnostics.
@@ -1037,9 +1053,14 @@ typedef struct pdn_aprs_encoded {
 
 /*
  * Encodes data as an information field. Writes at most cap bytes and no NUL.
- * Returns the length, or PDN_APRS_ERR_REFUSED (encoded->reason says why),
- * PDN_APRS_ERR_BUFFER or PDN_APRS_ERR_ARGUMENT. options and encoded may be
- * NULL, though a Mic-E report needs encoded for its destination address.
+ * There is no limit on the length but cap: a field may be longer than
+ * PDN_APRS_MAX_INFO (text received as Latin-1 is written back as UTF-8, up
+ * to twice as long), and pdn_aprs_decode_written reads one back. Returns the
+ * length, or PDN_APRS_ERR_REFUSED (encoded->reason says why),
+ * PDN_APRS_ERR_BUFFER (buf is too small to write and check the field) or
+ * PDN_APRS_ERR_ARGUMENT; on failure buf holds nothing of use. options and
+ * encoded may be NULL, though a Mic-E report needs encoded for its
+ * destination address.
  */
 int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf,
                          size_t cap, pdn_aprs_encoded *encoded);
@@ -1092,7 +1113,7 @@ typedef struct pdn_aprs_position {
     uint8_t ambiguity;   /* 0-4 */
     uint8_t compressed;  /* write the compressed format */
     uint8_t has_course;
-    uint16_t course_degrees; /* 1-360; 0 means unknown in some formats */
+    double course_degrees; /* 360 is north; 0 is unknown (APRS12c ch. 7 and 10) */
     uint8_t has_speed;
     double speed_knots;
     uint8_t has_altitude;
@@ -1128,11 +1149,13 @@ typedef struct pdn_aprs_mic_e {
     uint8_t message;      /* pdn_aprs_mic_e_message */
     uint8_t ambiguity;    /* 0-4 */
     uint8_t has_course;
-    uint16_t course_degrees;
+    double course_degrees; /* 360 is north; 0 is unknown */
     uint8_t has_speed;
     double speed_knots;
     uint8_t has_altitude;
-    double altitude_feet;
+    double altitude_feet; /* written as a /A= */
+    uint8_t has_altitude_m;
+    double altitude_m;    /* in the Mic-E altitude bytes, rounded to the metre; not with altitude_feet */
     char type_code;       /* '`' messaging capable, '\'' not, or 0 */
     const char *device_suffix; /* "_%" etc., or NULL */
     const char *locator;  /* Maidenhead locator, or NULL */
@@ -1154,7 +1177,8 @@ int pdn_aprs_build_weather(const pdn_aprs_station *station, const char *timestam
 void pdn_aprs_weather_init(pdn_aprs_weather *weather);
 void pdn_aprs_weather_set(pdn_aprs_weather *weather, int index, double value);
 
-/* A message (message_id NULL for none; with one, the addressee should ack). */
+/* A message (message_id NULL for none, as "" is refused; with one, the
+   addressee should ack). */
 int pdn_aprs_build_message(const pdn_aprs_station *station, const char *addressee, const char *text,
                            const char *message_id, void *buf, size_t cap);
 int pdn_aprs_build_ack(const pdn_aprs_station *station, const char *addressee, const char *message_id,
