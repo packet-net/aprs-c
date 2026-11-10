@@ -33,6 +33,8 @@ Each [release](https://github.com/packet-net/aprs-c/releases) has a `.tar.gz` an
 
 Add them to your build; there is nothing to configure. CMake users can also build and install the library and use `find_package(pdn_aprs)` or `pkg-config pdn_aprs` ([Building from source](#building-from-source)).
 
+**What 1.x promises.** Source compatibility only. Struct sizes follow the capacities (`PDN_APRS_MAX_INFO` and `PDN_APRS_MAX_PATH` can be overridden with `-D`), and a 1.x release may add a field to any struct, so rebuild everything that includes `pdn_aprs.h` when you upgrade, and compile in the single file or link the static library (the CMake target is always static). Zero-initialise every input struct (`= {0}` or a designated initializer): a field added later means "absent" when it is zero.
+
 ## Decoding
 
 Decode a line into a `pdn_aprs_packet`. The packet holds the header, the raw information field, the decoded data and a list of diagnostics.
@@ -81,7 +83,7 @@ comment: Mobile
 
 The shape of the API:
 
-- `pdn_aprs_decode_tnc2()`, `pdn_aprs_decode_ax25()` and `pdn_aprs_decode_info()` fill a `pdn_aprs_packet`. They return `PDN_APRS_OK`, or `PDN_APRS_ERR_HEADER` when the header is unusable (the packet's diagnostics still say why), or `PDN_APRS_ERR_TOO_LONG` for an information field over 512 bytes, which nothing on the air or on APRS-IS has. `pdn_aprs_decode_written()` reads back a field the encoder wrote, which can be longer (below).
+- `pdn_aprs_decode_tnc2()`, `pdn_aprs_decode_ax25()` and `pdn_aprs_decode_info()` fill a `pdn_aprs_packet`. They return `PDN_APRS_OK`, or `PDN_APRS_ERR_HEADER` when the header is unusable (the packet's diagnostics still say why), or `PDN_APRS_ERR_TOO_LONG` for an information field over 512 bytes, which nothing on the air or on APRS-IS has. `pdn_aprs_decode_info_unbounded()` reads back a field the encoder wrote, which can be longer (below).
 - `packet.header` has the source, destination, path (each entry with its used flag) and the index of any APRS-IS q-construct.
 - `packet.data.type` says which member of the `packet.data.as` union to read. Positions, Mic-E, objects and items share `as.report`; messages, bulletins and NWS bulletins `as.message`; the telemetry metadata types `as.meta`; and so on, one struct per kind.
 - Optional fields have a `has_` flag, or are an empty string. Numbers are in the units APRS sends (`speed_knots`, `altitude_feet`, `temperature_f`), as the vectors' neutral form names them.
@@ -89,6 +91,7 @@ The shape of the API:
 - `packet.diagnostics` lists each diagnostic as a severity (info, warning, error) and a code. `pdn_aprs_code_name()` gives the vectors' name for a code, such as `trailing-line-break`.
 - A third-party packet (`}`) keeps the encapsulated packet as received; `pdn_aprs_decode_third_party()` decodes it into a packet of its own.
 - `pdn_aprs_identify_device()` names the sending radio or program, from a Mic-E report's type code and suffix or from the destination address.
+- `pdn_aprs_has_diagnostic(&p, -1, PDN_APRS_SEVERITY_ERROR)` says whether the packet has errors (code `-1` is any code; severity `-1` any severity). `pdn_aprs_write_tnc2()` and `pdn_aprs_write_ax25()` write a decoded packet back as it was received, for forwarding it, and `pdn_aprs_phg_values()` turns a PHG's codes into watts, feet, dB and degrees.
 
 ## Strict and lenient parsing
 
@@ -110,7 +113,9 @@ pdn_aprs_decode_options options = {.devices = pdn_aprs_devices()}; /* from pdn_a
 
 ## Building a packet
 
-A `pdn_aprs_station` names the sender (the destination defaults to `APZ001`, the experimental-software tocall) and each `pdn_aprs_build_*` call writes one kind of packet as a TNC2 line, NUL-terminated, or as an AX.25 frame. There is a call for positions, objects, items, Mic-E, weather, messages, acks and rejects, bulletins, status, telemetry, and the telemetry names, units, coefficients and bit sense. Beyond the simple calls, `pdn_aprs_build_telemetry_channels` takes a per-channel presence flag for empty analog channels, `pdn_aprs_build_status_options` a locator with its symbol and a meteor scatter beam heading and power, and `pdn_aprs_build_message_reply_ack` a reply-ack. Each returns the number of bytes written, or a negative result.
+A `pdn_aprs_station` names the sender (the destination defaults to `APZ001`, the experimental-software tocall) and each `pdn_aprs_build_*` call writes one kind of packet as a TNC2 line, NUL-terminated, or as an AX.25 frame. There is a call for positions, objects, items, Mic-E, weather, messages, acks and rejects, bulletins, status, telemetry, and the telemetry names, units, coefficients and bit sense.
+
+Every build call that has optional inputs takes one `_args` struct (`pdn_aprs_position_args`, `pdn_aprs_mic_e_args`, `pdn_aprs_message_args`, `pdn_aprs_status_args`, `pdn_aprs_telemetry_args`); zero-initialise it and set what you want, so a field added later never changes your code. Every call ends `buf, cap, result`, and returns the number of bytes written or a negative result. `result` may be `NULL`; if you pass a `pdn_aprs_encoded` it gets the reason for a refusal and, for Mic-E, the destination address. Refusals: `PDN_APRS_ERR_REFUSED` for anything APRS cannot carry, `PDN_APRS_ERR_ARGUMENT` for a `NULL` required pointer or other misuse, and `PDN_APRS_ERR_UNSUPPORTED` for text APRS allows but that does not fit this library's fixed buffers. `pdn_aprs_format_timestamp()` writes a UTC time in the form the builders take.
 
 <!-- example: examples/build.c -->
 ```c
@@ -124,34 +129,37 @@ int main(void)
     char line[600];
     int n;
     pdn_aprs_station me = {.source = "M0LTE-9", .path = "WIDE1-1,WIDE2-1"}; /* destination: APZ001 */
-    pdn_aprs_position pos = {.latitude = 51.5,
-                             .longitude = -0.1167,
-                             .symbol = PDN_APRS_SYMBOL_CAR,
-                             .has_course = 1,
-                             .course_degrees = 88,
-                             .has_speed = 1,
-                             .speed_knots = 36,
-                             .comment = "Mobile"};
-    double analog[5] = {199, 0, 255, 73, 123};
+    pdn_aprs_encoded result; /* the reason for a refusal; pass NULL if you do not want it */
+    pdn_aprs_position_args pos = {.messaging = 1,
+                                  .latitude = 51.5,
+                                  .longitude = -0.1167,
+                                  .symbol = PDN_APRS_SYMBOL_CAR,
+                                  .has_course = 1,
+                                  .course_degrees = 88,
+                                  .has_speed = 1,
+                                  .speed_knots = 36,
+                                  .comment = "Mobile"};
+    pdn_aprs_message_args msg = {.addressee = "G4XYZ", .text = "Meet at the club at 8?", .message_id = "42"};
+    pdn_aprs_telemetry_args tlm = {.sequence = 5, .analog = {199, 0, 255, 73, 123}, .bits = "01101001"};
 
-    n = pdn_aprs_build_position(&me, &pos, NULL, 1, line, sizeof line);
+    n = pdn_aprs_build_position(&me, &pos, line, sizeof line, &result);
     if (n < 0) {
-        printf("refused: %s\n", pdn_aprs_strerror(n));
+        printf("refused: %s\n", result.reason ? result.reason : pdn_aprs_strerror(n));
         return 1;
     }
     printf("%s\n", line);
 
-    n = pdn_aprs_build_message(&me, "G4XYZ", "Meet at the club at 8?", "42", line, sizeof line);
+    n = pdn_aprs_build_message(&me, &msg, line, sizeof line, NULL);
     printf("%s\n", n >= 0 ? line : pdn_aprs_strerror(n));
 
-    n = pdn_aprs_build_telemetry(&me, "005", analog, "01101001", NULL, line, sizeof line);
+    n = pdn_aprs_build_telemetry(&me, &tlm, line, sizeof line, NULL);
     printf("%s\n", n >= 0 ? line : pdn_aprs_strerror(n));
 
     /* A message over 67 characters is refused, not truncated. */
-    n = pdn_aprs_build_message(&me, "G4XYZ",
-                               "This text is far too long for an APRS message, which carries 67 characters.",
-                               NULL, line, sizeof line);
-    printf("long message: %s\n", pdn_aprs_strerror(n));
+    msg.text = "This text is far too long for an APRS message, which carries 67 characters.";
+    msg.message_id = NULL;
+    n = pdn_aprs_build_message(&me, &msg, line, sizeof line, &result);
+    printf("long message: %s\n", result.reason ? result.reason : pdn_aprs_strerror(n));
     return 0;
 }
 ```
@@ -161,11 +169,11 @@ It prints:
 ```
 M0LTE-9>APZ001,WIDE1-1,WIDE2-1:=5130.00N/00007.00W>088/036Mobile
 M0LTE-9>APZ001,WIDE1-1,WIDE2-1::G4XYZ    :Meet at the club at 8?{42
-M0LTE-9>APZ001,WIDE1-1,WIDE2-1:T#005,199,0,255,73,123,01101001
-long message: the encoder refuses this data
+M0LTE-9>APZ001,WIDE1-1,WIDE2-1:T#005,199,000,255,073,123,01101001
+long message: message text is at most 67 characters
 ```
 
-The encoder writes only what APRS allows. It refuses, with `PDN_APRS_ERR_REFUSED`, data it cannot write faithfully: message text over 67 characters, a comment that would read back as an altitude or a `!DAO!`, two data extensions, an object without a timestamp, a weather report with a comment, and so on. When it refuses, `pdn_aprs_encoded.reason` says why in plain words. As a last check it decodes what it has written and refuses if that does not read back as the same data, so what it writes always decodes cleanly. Numbers are rounded once to the step of the field they go in, to the nearest, halves away from zero, and checked after rounding: a compressed position to its base-91 step, an uncompressed one to a hundredth of a minute unless a `!DAO!` asks for more, a course to a whole degree (4 degrees in compressed bytes), an altitude to a foot, a temperature to a degree. A course of 0 is the spec's unknown: `000` uncompressed, and refused in Mic-E and compressed reports, where 0 has no form. A Mic-E altitude given to the builder in feet goes in a `/A=`, and one in metres (`altitude_m`) in the Mic-E altitude bytes.
+The encoder writes only what APRS allows. It refuses, with `PDN_APRS_ERR_REFUSED`, data it cannot write faithfully: message text over 67 characters, a comment that would read back as an altitude or a `!DAO!`, two data extensions, an object without a timestamp, a weather report with a comment, and so on. When it refuses, the `result` you pass (or `pdn_aprs_encoded.reason` from the encode calls) says why in plain words; the text is for people and is not part of the stable API, so do not match on it. As a last check it decodes what it has written and refuses if that does not read back as the same data, so what it writes always decodes cleanly. Numbers are rounded once to the step of the field they go in, to the nearest, halves away from zero, and checked after rounding: a compressed position to its base-91 step, an uncompressed one to a hundredth of a minute unless a `!DAO!` asks for more, a course to a whole degree (4 degrees in compressed bytes), an altitude to a foot, a temperature to a degree. A course of 0 is the spec's unknown: `000` uncompressed, and refused in Mic-E and compressed reports, where 0 has no form. A Mic-E altitude given to the builder in feet goes in a `/A=`, and one in metres (`altitude_m`) in the Mic-E altitude bytes; the decoder records which it was in `altitude_in_comment`, and the encoder honours it, so data read from a packet writes the same bytes.
 
 For full control, fill a `pdn_aprs_data` yourself (or take one from the decoder) and call `pdn_aprs_encode_info()`, `pdn_aprs_encode_tnc2()` or `pdn_aprs_encode_ax25()`. A Mic-E report's destination address is computed from its latitude and message type; the encoder returns it in `pdn_aprs_encoded.destination`. Pass the device table in `pdn_aprs_encode_options` (or a station's `devices`) when you have it: the encoder then also refuses a Mic-E comment that happens to end in a known device suffix, which would read back as the suffix.
 
@@ -195,6 +203,7 @@ int main(void)
     pdn_aprs_decode_options fussy = {.reject = {[PDN_APRS_CODE_NUL_PADDED_ADDRESS] = 1}};
     unsigned char out[330];
     pdn_aprs_station me = {.source = "M0LTE-7", .path = "WIDE2-1", .ax25 = 1};
+    pdn_aprs_status_args status = {.text = "On the air"};
     int n, i;
 
     pdn_aprs_decode_ax25(frame, sizeof frame, NULL, &p);
@@ -208,7 +217,7 @@ int main(void)
     n = pdn_aprs_decode_ax25(frame, sizeof frame, &fussy, &p);
     printf("rejecting only NUL padding: %s\n", n == PDN_APRS_ERR_HEADER ? "header rejected" : "accepted");
 
-    n = pdn_aprs_build_status(&me, "On the air", NULL, out, sizeof out);
+    n = pdn_aprs_build_status(&me, &status, out, sizeof out, NULL);
     printf("built a %d-byte frame:", n);
     for (i = 0; i < n; i++)
         printf(" %02X", out[i]);
@@ -223,7 +232,7 @@ The library was written to be added to the source tree of a program like LinBPQ/
 
 **What to compile.** Add `pdn_aprs.c` and, if you want device identification, `pdn_aprs_deviceid.c`. They need a C99 compiler, or MSVC 2015 or later; they build without warnings under `-Wall -Wextra -Wpedantic -Wconversion` and MSVC `/W4`, on 32- and 64-bit targets. Link the maths library (`-lm`) on Unix. There are no configuration macros to set. `pdn_aprs.h` also compiles as C++.
 
-**Names.** Every public function, type and macro starts `pdn_aprs_` or `PDN_APRS_`, so nothing collides with a program's own APRS code. Internal functions are `static`, and the internal macros are undefined at the end of `pdn_aprs.c`, so it can even be `#include`d into another file.
+**Names.** Every public function, type and macro starts `pdn_aprs_` or `PDN_APRS_`, so nothing collides with a program's own APRS code. Internal functions are `static`, and the internal macros are undefined at the end of `pdn_aprs.c`, so it can even be `#include`d into another file. (Built from `src/` with CMake, the internal `pdn_aprs__*` functions have hidden visibility; in a static archive they are still linkable, so link the amalgamation if you want none of them visible.)
 
 **Memory.** Nothing is allocated. You own every struct and buffer. A `pdn_aprs_packet` is about 3.4 KB and a `pdn_aprs_data` about 2.6 KB; keep them static, in your own structures, or on a stack with room. Measured over the vectors and a fuzzing corpus on x86-64, decoding uses up to about 13 KB of stack, and encoding or building up to about 20 KB, most of it the decode the encoder does to check its own output. Outputs never go past the capacity you pass. The decoder refuses an information field over 512 bytes before anything is copied; the encoder sets no limit but the buffer you give it, since text received as Latin-1 is written back as UTF-8, up to twice as long.
 
@@ -251,7 +260,7 @@ zcat data.jsonl.gz | build/pdn_aprs_diffdump --encode | gzip > c-encode.jsonl.gz
 zcat recipes.jsonl.gz | build/pdn_aprs_diffdump --build | gzip > c-build.jsonl.gz # build: builder recipes
 ```
 
-A decode record holds the bytes the encoder writes and the API view (the source, destination, path, q-construct, device and symbol description, and `inner` for a third-party packet). In build mode a recipe the builder has no way to say is reported as `unsupported`, naming the key. There are two such limits, both deliberate: text longer than the C data holds (1,024 bytes), and text holding a NUL. The library allocates nothing, so every text field is a fixed array, sized at twice the longest information field the decoder takes; and the builder takes C strings, which end at the first NUL (the decoded data and the encoder keep an explicit length, so a decoded NUL round-trips). Nothing on air comes close to either: an AX.25 information field is at most 256 bytes and an APRS-IS line 512. The vectors accept both: the rules set no size limit (ruling E11), so these are things the builder has no way to say rather than data the Encoding rule declines. Every other recipe key is built, including empty telemetry channels, a status locator and beam heading, and a message's reply-ack.
+A decode record holds the bytes the encoder writes and the API view (the source, destination, path, q-construct, has_errors, has_warnings, the packet as a TNC2 line and an AX.25 frame, device, symbol description and PHG values, and `inner` for a third-party packet). In build mode a recipe the builder has no way to say is reported as `unsupported`, naming the key. There are two such limits, both deliberate: text longer than the C data holds (1,024 bytes, `PDN_APRS_ERR_UNSUPPORTED`), and text holding a NUL. The library allocates nothing, so every text field is a fixed array, sized at twice the longest information field the decoder takes; and the builder takes C strings, which end at the first NUL (the decoded data and the encoder keep an explicit length, so a decoded NUL round-trips). Nothing on air comes close to either: an AX.25 information field is at most 256 bytes and an APRS-IS line 512. The vectors accept both: the rules set no size limit (ruling E11), so these are things the builder has no way to say rather than data the Encoding rule declines. Every other recipe key is built, including empty telemetry channels, a status locator and beam heading, and a message's reply-ack.
 
 The decoder is also fuzzed with libFuzzer, AddressSanitizer and UndefinedBehaviorSanitizer (`fuzz/fuzz_decode.c`): every input is decoded as a TNC2 line, an AX.25 frame and an information field, leniently and strictly, and whatever decodes is re-encoded and decoded again to check it reads back the same. Inputs that once failed are kept in `fuzz/regressions/`, and the tests replay them on every platform.
 
@@ -268,7 +277,7 @@ ctest --test-dir build
 cmake --install build --prefix /usr/local
 ```
 
-Options: `PDN_APRS_DEVICEID` (on) includes the device table; `PDN_APRS_AMALGAMATION` builds from `dist/` instead of `src/`; `PDN_APRS_WERROR` treats warnings as errors; `PDN_APRS_CXX_CHECK` also compiles the header as C++; `PDN_APRS_BUILD_FUZZ` builds the libFuzzer target with clang. The install gives a CMake package (`find_package(pdn_aprs)`, target `pdn_aprs::pdn_aprs`) and a pkg-config file (`pdn_aprs.pc`).
+Options: `PDN_APRS_DEVICEID` (on) includes the device table; `PDN_APRS_AMALGAMATION` builds from `dist/` instead of `src/` (the library target is always a static library); `PDN_APRS_WERROR` treats warnings as errors; `PDN_APRS_CXX_CHECK` also compiles the header as C++; `PDN_APRS_BUILD_FUZZ` builds the libFuzzer target with clang. The install gives a CMake package (`find_package(pdn_aprs)`, target `pdn_aprs::pdn_aprs`) and a pkg-config file (`pdn_aprs.pc`).
 
 To fuzz:
 

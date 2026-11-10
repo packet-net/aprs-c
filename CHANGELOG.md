@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+The 1.0 API cleanup: one consistent shape for every build call, one way to report a refusal, and a written compatibility promise. Breaking changes are listed first, with what to do about each.
+
+### Breaking changes
+
+What 1.x promises, which is new: source compatibility only. Struct sizes follow the capacities and a 1.x release may add a field to any struct, so rebuild everything that includes `pdn_aprs.h` on upgrade, link the static library or compile in the single file, and zero-initialise every input struct (a field added later means "absent" when zero).
+
+- The CMake library target is always STATIC (`BUILD_SHARED_LIBS` is ignored) and no longer has a SOVERSION. It is built with hidden visibility, and the public functions are marked `PDN_APRS_API`.
+- `pdn_aprs_decode_options.reject` is now a fixed `reject[PDN_APRS_MAX_CODES]` (128) instead of `reject[PDN_APRS_CODE_COUNT]`, so a new code never changes the struct. Designated initializers (`.reject = {[PDN_APRS_CODE_X] = 1}`) are unaffected.
+- Every `pdn_aprs_build_*` call, and `pdn_aprs_build()`, gains a trailing `pdn_aprs_encoded *result` (may be NULL): it gets `len`, the Mic-E `destination` and, on failure, `reason` (plain text, not part of the stable API). Add `, NULL` to keep today's behaviour.
+- One input struct for every build call with optional inputs, with `name`, `timestamp`, `killed`, `messaging` inside the struct that uses them:
+  - `pdn_aprs_position` is now `pdn_aprs_position_args` and gains `name`, `killed`, `timestamp` and `messaging`. `pdn_aprs_build_position(station, &args, buf, cap, result)`, `pdn_aprs_build_object(station, &args, buf, cap, result)` and `pdn_aprs_build_item(station, &args, buf, cap, result)` lose their `timestamp`, `messaging`, `name` and `killed` parameters.
+  - `pdn_aprs_mic_e` is now `pdn_aprs_mic_e_args`; its `message` is now `mic_e_message`.
+  - `pdn_aprs_status_options` is now `pdn_aprs_status_args`, and `pdn_aprs_build_status_options()` is now `pdn_aprs_build_status(station, &args, buf, cap, result)`. The old text-and-timestamp `pdn_aprs_build_status()` is gone (set `.text` and `.timestamp`).
+  - New `pdn_aprs_message_args { addressee, text, message_id, reply_ack }`: `pdn_aprs_build_message_reply_ack()` is now `pdn_aprs_build_message(station, &args, buf, cap, result)`. The old four-string `pdn_aprs_build_message()` is gone (leave `reply_ack` NULL).
+  - New `pdn_aprs_telemetry_args { sequence, analog[5], empty[5], bits, comment }`: `pdn_aprs_build_telemetry_channels()` is now `pdn_aprs_build_telemetry(station, &args, buf, cap, result)`. `empty[i]` set leaves channel i empty (zero means present, so a zeroed struct has all five); the old five-value `pdn_aprs_build_telemetry()` is gone. `bits` NULL still gives `00000000`.
+- Builder inputs now match the recipe: the telemetry `sequence` is an `unsigned` number 0-999 (refused above, written with three digits), where it was text; the bulletin takes `char id` and `const char *group` (NULL for none) where it took one string like `"4WX"`; Mic-E takes a `messaging` flag, and `type_code` is only for a device type (`'>'`, `']'` or `' '`), so `type_code = '`'` or `'\''` is now refused and a Mic-E report is always written with a type code; telemetry metadata calls (`_names`, `_units`, `_coefficients`, `_bits`) accept a NULL addressee, meaning the station itself.
+- Builder error codes now depend on the input, not on the C buffer: `PDN_APRS_ERR_REFUSED` for anything APRS cannot carry (a name that is too long, a bad station address), `PDN_APRS_ERR_ARGUMENT` only for a NULL required pointer or other misuse (altitude in feet and metres both), and the new `PDN_APRS_ERR_UNSUPPORTED` (-6) for text APRS allows that does not fit the fixed buffers (over 1,024 bytes). A switch over the result codes needs a case for -6.
+- Weather indexes carry their units, and the enum has a type name, `pdn_aprs_weather_field`: `PDN_APRS_WX_WIND_DIRECTION` is `PDN_APRS_WX_WIND_DIRECTION_DEGREES`, `_WIND_SPEED` `_WIND_SPEED_MPH`, `_WIND_GUST` `_WIND_GUST_MPH`, `_TEMPERATURE` `_TEMPERATURE_F`, `_RAIN_1H` `_RAIN_1H_IN`, `_RAIN_24H` `_RAIN_24H_IN`, `_RAIN_MIDNIGHT` `_RAIN_MIDNIGHT_IN`, `_HUMIDITY` `_HUMIDITY_PERCENT`, `_PRESSURE` `_PRESSURE_MBAR`, `_LUMINOSITY` `_LUMINOSITY_W_M2`, `_SNOW_24H` `_SNOW_24H_IN`. `PDN_APRS_WX_RAIN_RAW` is unchanged.
+- The `#define` groups are now named enums (the fields stay `uint8_t`): `pdn_aprs_fix`, `pdn_aprs_source`, `pdn_aprs_origin`, `pdn_aprs_area_shape`, `pdn_aprs_storm_type`, `pdn_aprs_dao_precision`, `pdn_aprs_tone`, `pdn_aprs_raw_weather_format`. `PDN_APRS_NMEA_OTHER`, `_GLL`, `_GGA` and `_RMC` (the compression source) are now `PDN_APRS_SOURCE_*`.
+- Renames: `pdn_aprs_status.beam_heading` and `beam_power` are `beam_heading_code` and `beam_power_code` (and the same in `pdn_aprs_status_args`); `pdn_aprs_reason` is `pdn_aprs_unrecognized_reason` and `PDN_APRS_REASON_*` is `PDN_APRS_UNRECOGNIZED_*`; `pdn_aprs_meta_item()` is `pdn_aprs_telemetry_meta_item()`; `pdn_aprs_decode_written()` is `pdn_aprs_decode_info_unbounded()`.
+- `pdn_aprs_options_strict()` is removed: write `pdn_aprs_decode_options o = {.strict = 1};` or set `o.strict = 1`.
+- `pdn_aprs_capabilities.item` is an array of the named struct `pdn_aprs_capability` (it was an anonymous struct); same fields.
+- `pdn_aprs_ack.id` keeps its name (the neutral form calls it `acked_id` or `rejected_id`, and `message_id` would mean the ack's own ID elsewhere in the family).
+- `pdn_aprs_report` gains `altitude_in_comment` (see Mic-E below), so struct layouts change.
+
+### Added
+
+- `pdn_aprs_format_timestamp(year, month, day, hour, minute, second, format, out)` writes a UTC time as `DDHHMMz`, `HHMMSSh` or `MMDDHHMM` for the builders, cutting to the format's step.
+- `pdn_aprs_write_tnc2()` and `pdn_aprs_write_ax25()` write a decoded packet back as received (header and information field), for an IGate or digipeater. They return `PDN_APRS_ERR_HEADER` for an unusable header and `PDN_APRS_ERR_REFUSED` for an address AX.25 cannot carry as sent.
+- `pdn_aprs_phg_values()` gives a PHG's watts, height in feet, gain in dB and directivity in degrees (-1 for omnidirectional).
+- `pdn_aprs_has_diagnostic()` takes `-1` for any code, so `pdn_aprs_has_diagnostic(&p, -1, PDN_APRS_SEVERITY_ERROR)` is has-errors and `..._WARNING` has-warnings.
+- `PDN_APRS_COLOR_*` constants (the area colours, which were documented but missing), a `pdn_aprs_color` enum, and `pdn_aprs_capability_token()` and `pdn_aprs_capability_value()`.
+- Mic-E: the decoder sets `altitude_in_comment` on a report whose altitude was sent as a `/A=`, and the encoder writes it that way, so data read from a packet writes the bytes it was read from. The builder sets it for an altitude in feet. It is outside the vectors' neutral form.
+- The diff dump tool's API view gains `has_errors`, `has_warnings`, `tnc2`, `ax25` and `phg`.
+
 ## 0.3.0 (2026-11-10)
 
 API changes:
