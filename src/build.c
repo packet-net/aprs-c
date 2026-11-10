@@ -162,7 +162,9 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e *
     r->symbol = m->symbol;
     r->mic_e_message = m->message;
     r->ambiguity = m->ambiguity;
-    r->has_course = m->has_course;
+    /* a course of 0 is the spec's unknown, which Mic-E writes as 0, and so is
+       one that rounds to 0 (ruling B1) */
+    r->has_course = (uint8_t)(m->has_course && pdn_aprs__round(m->course_degrees) != 0);
     r->course_degrees = m->course_degrees;
     r->has_speed = 1;
     r->speed_knots = m->has_speed ? m->speed_knots : 0;
@@ -222,6 +224,10 @@ static int build_message(const pdn_aprs_station *station, int type, const char *
 {
     pdn_aprs_data d;
     size_t n;
+    /* a message ID is 1-5 letters or digits: an empty one is refused, not
+       taken as none (ruling B8) */
+    if (message_id && !message_id[0])
+        return PDN_APRS_ERR_REFUSED;
     memset(&d, 0, sizeof d);
     d.type = (uint8_t)type;
     n = set_text(d.as.message.text, sizeof d.as.message.text, text);

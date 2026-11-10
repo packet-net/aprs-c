@@ -364,7 +364,23 @@ static const char *text_item(const char *key, const jval *v)
         cannot(key, "the builder takes text without NUL");
         return NULL;
     }
+    /* the builder writes through the data the decoder fills, whose text
+       holds twice the longest information field it takes */
+    if (v->len >= PDN_APRS_TEXT_SIZE) {
+        cannot(key, "longer than the C data's text holds (1024 bytes)");
+        return NULL;
+    }
     return v->str;
+}
+
+/* v rounded to the nearest whole number, halves away from zero, a value
+   within 1e-6 of a half being the half (vectors ruling F2) */
+static double round_half_away(double v)
+{
+    double mag = fabs(v), w = floor(mag);
+    if (mag - w >= 0.5 - 1e-6)
+        w += 1;
+    return v < 0 ? -w : w;
 }
 
 static const char *text_arg(const jval *o, const char *key)
@@ -478,9 +494,11 @@ static void options(const jval *a, positioned *p)
     num(a, "latitude", &p->pos.latitude);
     num(a, "longitude", &p->pos.longitude);
     symbol(a, &p->pos.symbol);
-    if (whole(a, "course_degrees", 0, 65535, &n)) {
+    /* the course as given: the encoder rounds it once, to the step of the
+       field it goes in */
+    if (num(a, "course_degrees", &x)) {
         p->pos.has_course = 1;
-        p->pos.course_degrees = (uint16_t)n;
+        p->pos.course_degrees = x;
     }
     /* the builder takes knots and feet, the units APRS sends, so a program
        with km/h or metres converts them */
@@ -631,6 +649,14 @@ static int build_positioned(const char *report, const jval *a, const pdn_aprs_st
         m.speed_knots = p.pos.speed_knots;
         m.has_altitude = p.pos.has_altitude;
         m.altitude_feet = p.pos.altitude_feet;
+        {
+            /* metres go in the Mic-E altitude bytes, whose unit is the metre,
+               rounded to the metre (ruling B2): the builder writes them there
+               when the feet it is given are a whole number of metres */
+            double metres;
+            if (num(a, "altitude_m", &metres))
+                m.altitude_feet = round_half_away(metres) / 0.3048;
+        }
         /* the type code says whether the station takes messages */
         m.type_code = flag(a, "messaging") ? '`' : '\'';
         m.frequency = p.pos.frequency;
@@ -756,6 +782,10 @@ static int build_other(const char *report, const jval *a, const pdn_aprs_station
             cannot("sequence", "missing");
         if (why[0])
             return 0;
+        /* the builder takes the sequence as text; a program's number over 999
+           has no three-digit form, and is refused, not wrapped (ruling B6) */
+        if (sq > 999)
+            return PDN_APRS_ERR_REFUSED;
         /* the builder takes the sequence as text, which APRS12c ch. 13 gives
            as three digits */
         snprintf(seq, sizeof seq, "%03ld", sq);
