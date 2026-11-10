@@ -342,8 +342,9 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         char a, o, dc = A_TOUPPER(r->dao.datum);
         if (!dao_datum_ok(&r->dao))
             return pdn_aprs__refuse(e, DAO_DATUM_REFUSAL);
-        split_coord(r->latitude, 1, &deg, &hund, &lx);
-        split_coord(r->longitude, 1, &deg, &hund, &gx);
+        /* the position reported: what the compressed bytes decode to */
+        split_coord(90.0 - y / 380926.0, 1, &deg, &hund, &lx);
+        split_coord(x / 190463.0 - 180.0, 1, &deg, &hund, &gx);
         dao_digits(r->dao.precision, lx, gx, &a, &o, &lc, &gc);
         if (lc)
             a = r->dao.precision == PDN_APRS_DAO_BASE91 ? '!' : '0';
@@ -619,9 +620,10 @@ static int put_wx_field(pdn_aprs__ectx *e, char letter, const pdn_aprs_weather *
         v *= 10.0;
         break;
     case 'h':
-        if (v == 100.0)
+        /* h00 is 100%, so a humidity that rounds to 0 has no form */
+        if (floor(v + 0.5) == 100.0)
             v = 0;
-        else if (v < 1.0)
+        else if (floor(v + 0.5) < 1.0)
             return pdn_aprs__refuse(e, "humidity out of range");
         break;
     case 'l':
@@ -697,7 +699,7 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const p
         !put_wx_field(e, 'b', w, PDN_APRS_WX_PRESSURE, 0))
         return 0;
     if (w->has[PDN_APRS_WX_LUMINOSITY]) {
-        if (w->value[PDN_APRS_WX_LUMINOSITY] >= 1000) {
+        if (floor(w->value[PDN_APRS_WX_LUMINOSITY] + 0.5) >= 1000) {
             if (!put_wx_field(e, 'l', w, PDN_APRS_WX_LUMINOSITY, 0))
                 return 0;
         } else if (!put_wx_field(e, 'L', w, PDN_APRS_WX_LUMINOSITY, 0)) {
@@ -797,7 +799,7 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         if (!r->compressed) {
             int dh = w->has[PDN_APRS_WX_WIND_DIRECTION], sh = w->has[PDN_APRS_WX_WIND_SPEED];
             double dv = w->value[PDN_APRS_WX_WIND_DIRECTION], sv = w->value[PDN_APRS_WX_WIND_SPEED];
-            if ((dh && (dv < 0 || dv > 360)) || (sh && (sv < 0 || sv > 999)))
+            if ((dh && (dv < 0 || floor(dv + 0.5) > 360)) || (sh && (sv < 0 || floor(sv + 0.5) > 999)))
                 return pdn_aprs__refuse(e, "wind out of range");
             if (dh)
                 pdn_aprs__putu(e->b, (unsigned long)floor(dv + 0.5), 3);
@@ -840,7 +842,7 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
             }
             pdn_aprs__putc(e->b, '/');
             if (r->has_speed) {
-                if (r->speed_knots < 0 || r->speed_knots > 999)
+                if (r->speed_knots < 0 || floor(r->speed_knots + 0.5) > 999)
                     return pdn_aprs__refuse(e, "speed out of range");
                 pdn_aprs__putu(e->b, (unsigned long)floor(r->speed_knots + 0.5), 3);
             } else {

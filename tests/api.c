@@ -182,6 +182,62 @@ static void test_encoding(void)
     }
 }
 
+/* Encodes the data of the line just decoded with one change applied, and
+   compares the information field written with want (NULL: refused). */
+static int reencodes_as(const char *want)
+{
+    char out[300];
+    pdn_aprs_encoded enc;
+    int n = pdn_aprs_encode_info(&pkt.data, NULL, out, sizeof out - 1, &enc);
+    if (!want)
+        return n == PDN_APRS_ERR_REFUSED;
+    if (n < 0)
+        return 0;
+    out[n] = 0;
+    return strcmp(out, want) == 0;
+}
+
+static void test_exact_bytes(void)
+{
+    pdn_aprs_position p;
+    pdn_aprs_station st;
+    char line[200];
+    /* a !DAO! on a compressed position carries the digits of the position
+       the compressed bytes report, not of the position given (ruling E2) */
+    CHECK(decode("N0CALL>APZ001:@204216h/Mt*NG#tS-{]CMobilink!wIi!") == PDN_APRS_OK);
+    pkt.data.as.report.longitude = -29.52529966450177;
+    CHECK(reencodes_as("@204216h/Mt*NG#tS-{]CMobilink!wIi!"));
+    /* NMEA data whose fields disagree with its sentence does not read back */
+    CHECK(decode("N0CALL>APZ001:$GPGLL,2554.459,N,08020.187,W,254027.281,A") == PDN_APRS_OK);
+    CHECK(reencodes_as("$GPGLL,2554.459,N,08020.187,W,254027.281,A"));
+    pkt.data.as.nmea.latitude += 1e-4;
+    CHECK(reencodes_as(NULL));
+    /* a value is range-checked once rounded: 99.7% humidity is h00 (100%),
+       999.4 knots is 999 */
+    CHECK(decode("N0CALL>APZ001:_10090556c...s...g...t...h50") == PDN_APRS_OK);
+    pkt.data.as.weather.weather.value[PDN_APRS_WX_HUMIDITY] = 99.7;
+    CHECK(reencodes_as("_10090556c...s...g...t...h00"));
+    pkt.data.as.weather.weather.value[PDN_APRS_WX_HUMIDITY] = 0.4;
+    CHECK(reencodes_as(NULL));
+    CHECK(decode("N0CALL>APZ001:!5130.00N/00007.00W>090/998") == PDN_APRS_OK);
+    pkt.data.as.report.speed_knots = 999.4;
+    CHECK(reencodes_as("!5130.00N/00007.00W>090/999"));
+    /* a compressed course of 1 degree rounds to north (ruling E9) */
+    memset(&st, 0, sizeof st);
+    st.source = "N0CALL";
+    memset(&p, 0, sizeof p);
+    p.latitude = 51.5;
+    p.longitude = -0.1;
+    p.symbol = pdn_aprs_symbol_make('/', '>');
+    p.compressed = 1;
+    p.has_course = 1;
+    p.course_degrees = 1;
+    p.has_speed = 1;
+    p.speed_knots = 10;
+    CHECK(pdn_aprs_build_position(&st, &p, NULL, 0, line, sizeof line) > 0 && decode(line) == PDN_APRS_OK &&
+          pkt.data.as.report.course_degrees == 360);
+}
+
 static void test_builders(void)
 {
     char line[600];
@@ -315,6 +371,7 @@ int main(void)
     test_decoding();
     test_devices();
     test_encoding();
+    test_exact_bytes();
     test_builders();
     test_legacy_mic_e();
     test_locale();
