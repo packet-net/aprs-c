@@ -1968,6 +1968,8 @@ static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int a
         return PDN_APRS_ERR_ARGUMENT;
     if (!p->header_ok)
         return PDN_APRS_ERR_HEADER;
+    if (p->info_len > sizeof p->info)
+        return PDN_APRS_ERR_ARGUMENT;
     pdn_aprs__buf_init(&hb, head, sizeof head);
     if (ax25) {
         rc = pdn_aprs__write_header_ax25(&hb, &p->header, p->header.destination);
@@ -1982,7 +1984,19 @@ static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int a
         }
         if (last)
             h.path[last - 1].marked = 1;
-        rc = pdn_aprs__write_header_tnc2(&hb, &h, h.destination);
+        /* as received: the decoded strings, with no address check (the
+           lenient decoder accepts an empty destination, say) */
+        pdn_aprs__puts(&hb, h.source);
+        pdn_aprs__putc(&hb, '>');
+        pdn_aprs__puts(&hb, h.destination);
+        for (i = 0; i < h.path_count && i < PDN_APRS_MAX_PATH; i++) {
+            pdn_aprs__putc(&hb, ',');
+            pdn_aprs__puts(&hb, h.path[i].call);
+            if (h.path[i].marked)
+                pdn_aprs__putc(&hb, '*');
+        }
+        pdn_aprs__putc(&hb, ':');
+        rc = PDN_APRS_OK;
     }
     if (rc != PDN_APRS_OK)
         return PDN_APRS_ERR_REFUSED;

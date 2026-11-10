@@ -1321,8 +1321,8 @@ PDN_APRS_API int pdn_aprs_build_reject(const pdn_aprs_station *station, const ch
                                        const char *message_id, void *buf, size_t cap, pdn_aprs_encoded *result);
 
 /* A bulletin: id '0'-'9' for a general bulletin or 'A'-'Z' for an
-   announcement, and for a digit a group of up to 5 letters or digits (NULL or
-   "" for none). */
+   announcement, and for a digit a group of up to 5 characters (the encoder
+   refuses one that does not read back; NULL or "" for none). */
 PDN_APRS_API int pdn_aprs_build_bulletin(const pdn_aprs_station *station, char id, const char *group,
                                          const char *text, void *buf, size_t cap, pdn_aprs_encoded *result);
 

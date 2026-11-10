@@ -6700,6 +6700,8 @@ static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int a
         return PDN_APRS_ERR_ARGUMENT;
     if (!p->header_ok)
         return PDN_APRS_ERR_HEADER;
+    if (p->info_len > sizeof p->info)
+        return PDN_APRS_ERR_ARGUMENT;
     pdn_aprs__buf_init(&hb, head, sizeof head);
     if (ax25) {
         rc = pdn_aprs__write_header_ax25(&hb, &p->header, p->header.destination);
@@ -6714,7 +6716,19 @@ static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int a
         }
         if (last)
             h.path[last - 1].marked = 1;
-        rc = pdn_aprs__write_header_tnc2(&hb, &h, h.destination);
+        /* as received: the decoded strings, with no address check (the
+           lenient decoder accepts an empty destination, say) */
+        pdn_aprs__puts(&hb, h.source);
+        pdn_aprs__putc(&hb, '>');
+        pdn_aprs__puts(&hb, h.destination);
+        for (i = 0; i < h.path_count && i < PDN_APRS_MAX_PATH; i++) {
+            pdn_aprs__putc(&hb, ',');
+            pdn_aprs__puts(&hb, h.path[i].call);
+            if (h.path[i].marked)
+                pdn_aprs__putc(&hb, '*');
+        }
+        pdn_aprs__putc(&hb, ':');
+        rc = PDN_APRS_OK;
     }
     if (rc != PDN_APRS_OK)
         return PDN_APRS_ERR_REFUSED;
@@ -6822,6 +6836,7 @@ int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_data *data, v
     pdn_aprs_header h;
     pdn_aprs_encode_options o;
     int rc;
+    memset(&o, 0, sizeof o);
     begin(result);
     if (!data)
         return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
@@ -6839,6 +6854,16 @@ int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_data *data, v
    Returns 0, or the error: a value too long for a field APRS limits is
    refused (what says which), one too long for a text field that APRS lets
    run on is a limit of this library's. */
+/* Text APRS limits to a few characters (a message's 67, a project title's
+   23) is refused, not unsupported, when it is far past the limit: no UTF-8
+   text of that many characters takes more than four bytes each. */
+static int too_long_for_aprs(pdn_aprs_encoded *result, const char *text, size_t max_chars, const char *what)
+{
+    if (text && strlen(text) > 4 * max_chars)
+        return fail(result, PDN_APRS_ERR_REFUSED, what);
+    return PDN_APRS_OK;
+}
+
 static int put(pdn_aprs_encoded *result, char *dst, size_t cap, const char *src, size_t *len, const char *what)
 {
     size_t n = src ? strlen(src) : 0;
@@ -7110,6 +7135,9 @@ static int build_message(const pdn_aprs_station *station, int type, const char *
         return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
     memset(&d, 0, sizeof d);
     d.type = (uint8_t)type;
+    rc = too_long_for_aprs(result, text, 67, "message text is at most 67 characters");
+    if (rc != PDN_APRS_OK)
+        return rc;
     rc = put(result, d.as.message.text, sizeof d.as.message.text, text, &n, "the text is too long");
     if (rc == PDN_APRS_OK)
         rc = put(result, d.as.message.addressee, sizeof d.as.message.addressee, addressee, NULL,
@@ -7350,6 +7378,9 @@ int pdn_aprs_build_telemetry_bits(const pdn_aprs_station *station, const char *a
         return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
     memset(&d, 0, sizeof d);
     d.type = PDN_APRS_TYPE_TELEMETRY_BITS;
+    rc = too_long_for_aprs(result, project, 23, "a project title is at most 23 characters");
+    if (rc != PDN_APRS_OK)
+        return rc;
     rc = put(result, d.as.meta.addressee, sizeof d.as.meta.addressee, addressee, NULL,
              "the addressee is longer than an addressee can be");
     if (rc == PDN_APRS_OK)

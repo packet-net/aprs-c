@@ -389,14 +389,20 @@ static void test_builders(void)
         msg.message_id = NULL;
         msg.reply_ack = "AB";
         CHECK(pdn_aprs_build_message(&me, &msg, line, sizeof line, NULL) == PDN_APRS_ERR_REFUSED);
-        /* text over the library's buffer is unsupported, not refused */
+        /* message, bulletin and project text far over what APRS holds is refused;
+           a comment over the library's buffer is unsupported */
         {
             static char big[PDN_APRS_TEXT_SIZE + 10];
             memset(big, 'x', sizeof big - 1);
             msg.reply_ack = NULL;
             msg.text = big;
-            CHECK(pdn_aprs_build_message(&me, &msg, line, sizeof line, &enc) == PDN_APRS_ERR_UNSUPPORTED &&
+            CHECK(pdn_aprs_build_message(&me, &msg, line, sizeof line, &enc) == PDN_APRS_ERR_REFUSED &&
                   enc.reason != NULL);
+            CHECK(pdn_aprs_build_bulletin(&me, '3', NULL, big, line, sizeof line, NULL) == PDN_APRS_ERR_REFUSED);
+            CHECK(pdn_aprs_build_telemetry_bits(&me, NULL, "11110000", big, line, sizeof line, NULL) ==
+                  PDN_APRS_ERR_REFUSED);
+            tlm.comment = big;
+            CHECK(pdn_aprs_build_telemetry(&me, &tlm, line, sizeof line, &enc) == PDN_APRS_ERR_UNSUPPORTED);
         }
     }
     status.text = "x";
@@ -445,6 +451,14 @@ static void test_reading(void)
     CHECK(decode("WB4APR-00>APRS:>x") == PDN_APRS_OK &&
           pdn_aprs_write_ax25(&pkt, frame, sizeof frame) == PDN_APRS_ERR_REFUSED &&
           pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) > 0);
+    /* an empty destination, which the lenient decoder takes, is written back as received */
+    {
+        const char *e = "KB1EZZ-9>,W1IMD:>x";
+        CHECK(decode(e) == PDN_APRS_OK && pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) == (int)strlen(e) &&
+              strcmp(tnc2, e) == 0);
+        pkt.info_len = (uint16_t)(sizeof pkt.info + 1);
+        CHECK(pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) == PDN_APRS_ERR_ARGUMENT);
+    }
     CHECK(pdn_aprs_decode_tnc2("bad", 3, NULL, &pkt) == PDN_APRS_ERR_HEADER &&
           pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) == PDN_APRS_ERR_HEADER);
     /* any code, any severity */
