@@ -56,7 +56,11 @@ if(PDN_APRS_DEVICEID)
   endif()
 endif()
 
-add_library(pdn_aprs ${PDN_APRS_SOURCES})
+# Always static: 1.x promises source compatibility only (struct sizes follow
+# the capacities and may grow), so a program is rebuilt against the header it
+# links with. Hidden visibility keeps the internal pdn_aprs__* functions out
+# of any shared object the sources are compiled into.
+add_library(pdn_aprs STATIC ${PDN_APRS_SOURCES})
 add_library(pdn_aprs::pdn_aprs ALIAS pdn_aprs)
 target_include_directories(pdn_aprs PUBLIC $<BUILD_INTERFACE:${PDN_APRS_INCLUDE}> $<INSTALL_INTERFACE:include>)
 if(NOT PDN_APRS_AMALGAMATION)
@@ -66,8 +70,7 @@ target_compile_options(pdn_aprs PRIVATE ${PDN_APRS_WARNINGS})
 if(NOT MSVC)
   target_link_libraries(pdn_aprs PUBLIC m)
 endif()
-set_target_properties(pdn_aprs PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR}
-                                          PUBLIC_HEADER ${PDN_APRS_INCLUDE}/pdn_aprs.h)
+set_target_properties(pdn_aprs PROPERTIES C_VISIBILITY_PRESET hidden PUBLIC_HEADER ${PDN_APRS_INCLUDE}/pdn_aprs.h)
 
 # ---- install, CMake package, pkg-config
 
