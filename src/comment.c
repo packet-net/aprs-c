@@ -309,11 +309,8 @@ static int find_braces(const pdn_aprs__cbuf *cb, int digits, size_t *at, size_t 
 
 /* ---- the whole comment ---- */
 
-PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r,
-                                               int had_extension)
+PDN_APRS__PRIVATE int pdn_aprs__lift_comment_start(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r)
 {
-    double feet;
-    size_t at, len;
     uint8_t dao[5];
     pdn_aprs__lift_telemetry_dao(cb, r, dao);
     if (r->has_dao) {
@@ -324,6 +321,17 @@ PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf
             pdn_aprs__apply_dao(c, r, dao, !r->compressed);
         }
     }
+    return 1;
+}
+
+PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r,
+                                               int had_extension)
+{
+    double feet;
+    size_t at, len;
+    if (!(had_extension & PDN_APRS__LIFTED) && !pdn_aprs__lift_comment_start(c, cb, r))
+        return 0;
+    had_extension &= 1;
     if (pdn_aprs__lift_altitude(cb, &feet)) {
         r->has_altitude = 1;
         r->altitude_feet = feet;

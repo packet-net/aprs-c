@@ -65,6 +65,10 @@ PDN_APRS__PRIVATE long pdn_aprs__digits(const uint8_t *s, size_t n);
 PDN_APRS__PRIVATE int pdn_aprs__parse_number(const uint8_t *s, size_t n, int allow_exp, double *out);
 /* 10 to an integer power, exactly for small powers. */
 PDN_APRS__PRIVATE double pdn_aprs__pow10i(int e);
+/* v rounded to the nearest whole number, halves away from zero, where a
+   value within 1e-6 of a half is the half (ruling F2). v is in the field's
+   steps. */
+PDN_APRS__PRIVATE double pdn_aprs__round(double v);
 
 /* ---- text ---- */
 
@@ -173,9 +177,14 @@ PDN_APRS__PRIVATE int pdn_aprs__lift_altitude(pdn_aprs__cbuf *cb, double *feet);
 PDN_APRS__PRIVATE size_t pdn_aprs__ext_len(const uint8_t *s, size_t n);
 /* Parses a 7-byte data extension (PHG/PHGR, RNG, DFS) at s; returns bytes used or 0. */
 PDN_APRS__PRIVATE size_t pdn_aprs__parse_phg_rng_dfs(const uint8_t *s, size_t n, pdn_aprs_report *r);
+/* The first of a positioned comment: lifts telemetry and a !DAO!, and
+   applies the DAO. Returns 0 if the packet is rejected. */
+PDN_APRS__PRIVATE int pdn_aprs__lift_comment_start(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r);
+/* finish_comment's had_extension bit: lift_comment_start has been called. */
+#define PDN_APRS__LIFTED 2
 /* The rest of a positioned comment: telemetry, DAO, altitude, braces, late
    extension, frequency, delimiter. had_extension: an extension that counts
-   came straight after the symbol. */
+   came straight after the symbol (bit 1), PDN_APRS__LIFTED. */
 PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r,
                                                int had_extension);
 /* Voice frequency at the start of cb; returns 1 and lifts it if found. */

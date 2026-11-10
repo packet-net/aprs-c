@@ -289,6 +289,13 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
         t += 4;
         tl -= 4;
     }
+    /* telemetry and a !DAO! come out of the status text before the locator
+       is read, so a locator followed straight by either has no missing
+       space (ruling F16) */
+    if (!pdn_aprs__cbuf_set(c, &cb, t, tl) || !pdn_aprs__lift_comment_start(c, &cb, r))
+        return;
+    t = cb.b;
+    tl = cb.n;
     {
         size_t ll = pdn_aprs__mic_e_locator_len(t, tl);
         if (ll) {
@@ -331,5 +338,5 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
             pdn_aprs__cbuf_cut(&cb, k, 4);
         }
     }
-    pdn_aprs__finish_comment(c, &cb, r, had_ext);
+    pdn_aprs__finish_comment(c, &cb, r, had_ext | PDN_APRS__LIFTED);
 }

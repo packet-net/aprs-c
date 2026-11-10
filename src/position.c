@@ -480,7 +480,8 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_positioned(pdn_aprs__dctx *c, size_t at, 
         size_t e = 0;
         int dir = 0, spd = 0;
         if (r->symbol.table == '\\' && r->symbol.code == 'l' && (e = parse_area(s, n, r)) > 0) {
-            had_extension = 1;
+            /* an area describes the object, not the station's radio: like a
+               course/speed it is not the data extension (ruling F7a) */
         } else if (course_speed(s, n, &dir, &spd)) {
             e = 7;
             if (dir > 360) {
