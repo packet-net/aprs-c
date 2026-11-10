@@ -109,7 +109,7 @@ static void emit(jval *out)
 
 /* Decodes, leniently, a TNC2 line the library wrote, which may be longer
    than the decoder takes off the air: then the header as a line of its own,
-   and the information field with pdn_aprs_decode_written. */
+   and the information field with pdn_aprs_decode_info_unbounded. */
 static jval *decode_written_line(const uint8_t *line, size_t len)
 {
     size_t at;
@@ -123,7 +123,7 @@ static jval *decode_written_line(const uint8_t *line, size_t len)
     rc = pdn_aprs_decode_tnc2(line, at + 1, &lenient, &header_pkt);
     if (rc != PDN_APRS_OK)
         return neutral_result(&header_pkt, rc, &lenient);
-    rc = pdn_aprs_decode_written(&header_pkt.header, line + at + 1, len - at - 1, &lenient, &again_pkt);
+    rc = pdn_aprs_decode_info_unbounded(&header_pkt.header, line + at + 1, len - at - 1, &lenient, &again_pkt);
     /* the header's own diagnostics first, as a decode of the whole line gives them */
     for (i = header_pkt.diagnostic_count - 1; i >= 0 && again_pkt.diagnostic_count < PDN_APRS_MAX_DIAGNOSTICS; i--) {
         memmove(again_pkt.diagnostics + 1, again_pkt.diagnostics,
@@ -174,7 +174,7 @@ static const char *reencode(const uint8_t *line, size_t len, const jval *lr, int
         int rc, clean = 1, eq;
         if (p->data.type == PDN_APRS_TYPE_MIC_E)
             snprintf(h.destination, sizeof h.destination, "%s", enc.destination);
-        rc = pdn_aprs_decode_written(&h, out_buf, (size_t)*n, &lenient, &again_pkt);
+        rc = pdn_aprs_decode_info_unbounded(&h, out_buf, (size_t)*n, &lenient, &again_pkt);
         again = neutral_result(&again_pkt, rc, &lenient);
         for (i = 0; i < again_pkt.diagnostic_count; i++)
             if (again_pkt.diagnostics[i].severity != PDN_APRS_SEVERITY_INFO)
@@ -203,10 +203,8 @@ static const pdn_aprs_symbol *data_symbol(const pdn_aprs_data *d)
 
 /* The API view: what the library's own API gives a program, read from the
    public structs and calls rather than through the neutral form. The library
-   has no call for whether a packet has errors or warnings (a program reads
-   the diagnostics), writes no packet back as received, marks no packet as
-   carried inside a third-party one and derives nothing from PHG codes, so
-   has_errors, has_warnings, tnc2, ax25, third_party and phg are not written. */
+   marks no packet as carried inside a third-party one (a program that unwrapped
+   an inner packet knows it), so third_party is not written. */
 static jval *api_view(const pdn_aprs_packet *p, int depth)
 {
     static pdn_aprs_packet inner[4];
@@ -217,6 +215,22 @@ static jval *api_view(const pdn_aprs_packet *p, int depth)
     unsigned i;
     json_set(a, "source", json_str(h->source));
     json_set(a, "destination", json_str(h->destination));
+    json_set(a, "has_errors", json_bool(pdn_aprs_has_diagnostic(p, -1, PDN_APRS_SEVERITY_ERROR)));
+    json_set(a, "has_warnings", json_bool(pdn_aprs_has_diagnostic(p, -1, PDN_APRS_SEVERITY_WARNING)));
+    {
+        /* the packet as received, as a TNC2 line (header and information
+           field) and as an AX.25 frame; a header the library cannot write
+           has no TNC2 form, and an address AX.25 cannot carry is refused */
+        static uint8_t wbuf[2 * (PDN_APRS_MAX_PATH + 2) * 16 + PDN_APRS_MAX_INFO];
+        int w = pdn_aprs_write_tnc2(p, (char *)wbuf, sizeof wbuf);
+        if (w >= 0)
+            json_set(a, "tnc2", json_str(hex(wbuf, (size_t)w)));
+        w = pdn_aprs_write_ax25(p, wbuf, sizeof wbuf);
+        if (w >= 0)
+            json_set(a, "ax25", json_str(hex(wbuf, (size_t)w)));
+        else if (w == PDN_APRS_ERR_REFUSED)
+            json_set(a, "ax25", json_str("refused"));
+    }
     for (i = 0; i < h->path_count; i++) {
         char e[PDN_APRS_ADDR_SIZE + 2];
         snprintf(e, sizeof e, "%s%s", h->path[i].call, h->path[i].used ? "*" : "");
@@ -243,6 +257,19 @@ static jval *api_view(const pdn_aprs_packet *p, int depth)
         json_set(a, "device", d);
     } else {
         json_set(a, "device", json_null());
+    }
+    if ((p->data.type == PDN_APRS_TYPE_POSITION || p->data.type == PDN_APRS_TYPE_MIC_E ||
+         p->data.type == PDN_APRS_TYPE_OBJECT || p->data.type == PDN_APRS_TYPE_ITEM) &&
+        p->data.as.report.has_phg) {
+        jval *g = json_obj();
+        double watts, height, gain;
+        int dir;
+        pdn_aprs_phg_values(&p->data.as.report.phg, &watts, &height, &gain, &dir);
+        json_set(g, "watts", json_num(watts));
+        json_set(g, "height_feet", json_num(height));
+        json_set(g, "gain_db", json_num(gain));
+        json_set(g, "directivity_degrees", dir < 0 ? json_null() : json_int(dir));
+        json_set(a, "phg", g);
     }
     sym = data_symbol(&p->data);
     if (sym && pdn_aprs_symbol_description(*sym)) {
@@ -333,7 +360,7 @@ static void encode_line(long fallback_n, const char *text, size_t tl)
         json_set(out, "result", json_str("written"));
         json_set(out, "info", json_str(hex(out_buf, (size_t)rc)));
         json_set(out, "destination", json_str(dest));
-        pdn_aprs_decode_written(&h, out_buf, (size_t)rc, &lenient, &again_pkt);
+        pdn_aprs_decode_info_unbounded(&h, out_buf, (size_t)rc, &lenient, &again_pkt);
         json_set(again, "data", neutral_data(&again_pkt.data, &lenient));
         json_set(again, "diagnostics", neutral_diagnostics(&again_pkt));
         json_set(out, "again", again);
@@ -426,26 +453,30 @@ static int whole(const jval *o, const char *k, double lo, double hi, long *out)
 }
 
 /* The recipe's time in the form the builder takes: "DDHHMMz", "HHMMSSh" or
-   "MMDDHHMM". */
+   "MMDDHHMM", from the library's own formatter. */
 static int timestamp(const jval *o, char *out, size_t cap)
 {
     jval *t = json_get(o, "timestamp");
     const char *utc, *fmt;
-    int y, mo, d, h, mi, s;
+    int y, mo, d, h, mi, s, f;
     if (!t)
         return 0;
     utc = text_arg(t, "utc");
     fmt = text_arg(t, "format");
     if (!utc || !fmt || sscanf(utc, "%4d-%2d-%2dT%2d:%2d:%2d", &y, &mo, &d, &h, &mi, &s) != 6)
         return cannot("timestamp", "not {\"utc\", \"format\"}");
+    if (cap < PDN_APRS_TIMESTAMP_SIZE)
+        return cannot("timestamp", "no room");
     if (strcmp(fmt, "dhm") == 0)
-        snprintf(out, cap, "%02d%02d%02dz", d, h, mi);
+        f = PDN_APRS_TIMESTAMP_DHM;
     else if (strcmp(fmt, "hms") == 0)
-        snprintf(out, cap, "%02d%02d%02dh", h, mi, s);
+        f = PDN_APRS_TIMESTAMP_HMS;
     else if (strcmp(fmt, "mdhm") == 0)
-        snprintf(out, cap, "%02d%02d%02d%02d", mo, d, h, mi);
+        f = PDN_APRS_TIMESTAMP_MDHM;
     else
         return cannot("timestamp", "a format the builder does not take");
+    if (pdn_aprs_format_timestamp(y, mo, d, h, mi, s, f, out) < 0)
+        return cannot("timestamp", "not a time the formatter takes");
     return 1;
 }
 
@@ -462,7 +493,7 @@ static int symbol(const jval *o, pdn_aprs_symbol *s)
 
 /* The positioned options, into the builder's structs. */
 typedef struct positioned {
-    pdn_aprs_position pos;
+    pdn_aprs_position_args pos;
     pdn_aprs_phg phg;
     pdn_aprs_frequency freq;
     pdn_aprs_dao dao;
@@ -573,6 +604,9 @@ static void options(const jval *a, positioned *p)
     }
 }
 
+/* What the library said about the last build: the refusal reason. */
+static pdn_aprs_encoded built;
+
 static int build_positioned(const char *report, const jval *a, const pdn_aprs_station *station, uint8_t *buf,
                             size_t cap)
 {
@@ -586,7 +620,9 @@ static int build_positioned(const char *report, const jval *a, const pdn_aprs_st
         has_ts = timestamp(a, ts, sizeof ts);
         if (why[0])
             return 0;
-        return pdn_aprs_build_position(station, &p.pos, has_ts ? ts : NULL, flag(a, "messaging"), buf, cap);
+        p.pos.timestamp = has_ts ? ts : NULL;
+        p.pos.messaging = (uint8_t)flag(a, "messaging");
+        return pdn_aprs_build_position(station, &p.pos, buf, cap, &built);
     }
     if (strcmp(report, "object") == 0) {
         static const char *const more[] = {"name", "timestamp", "killed", NULL};
@@ -595,8 +631,10 @@ static int build_positioned(const char *report, const jval *a, const pdn_aprs_st
         has_ts = timestamp(a, ts, sizeof ts);
         if (why[0])
             return 0;
-        return pdn_aprs_build_object(station, text_arg(a, "name"), has_ts ? ts : NULL, flag(a, "killed"), &p.pos, buf,
-                                     cap);
+        p.pos.name = text_arg(a, "name");
+        p.pos.timestamp = has_ts ? ts : NULL;
+        p.pos.killed = (uint8_t)flag(a, "killed");
+        return pdn_aprs_build_object(station, &p.pos, buf, cap, &built);
     }
     if (strcmp(report, "item") == 0) {
         static const char *const more[] = {"name", "killed", NULL};
@@ -604,7 +642,9 @@ static int build_positioned(const char *report, const jval *a, const pdn_aprs_st
         options(a, &p);
         if (why[0])
             return 0;
-        return pdn_aprs_build_item(station, text_arg(a, "name"), flag(a, "killed"), &p.pos, buf, cap);
+        p.pos.name = text_arg(a, "name");
+        p.pos.killed = (uint8_t)flag(a, "killed");
+        return pdn_aprs_build_item(station, &p.pos, buf, cap, &built);
     }
     {
         /* Mic-E: the builder takes no PHG or range, and has no compressed form */
@@ -614,7 +654,7 @@ static int build_positioned(const char *report, const jval *a, const pdn_aprs_st
         static const char *const more[] = {"mic_e_message", "messaging", NULL};
         static const char *const none[] = {"phg", "range_miles", "compressed", NULL};
         const char *msg = text_arg(a, "mic_e_message");
-        pdn_aprs_mic_e m;
+        pdn_aprs_mic_e_args m;
         int e;
         for (e = 0; none[e]; e++)
             if (json_get(a, none[e]))
@@ -631,7 +671,7 @@ static int build_positioned(const char *report, const jval *a, const pdn_aprs_st
         m.latitude = p.pos.latitude;
         m.longitude = p.pos.longitude;
         m.symbol = p.pos.symbol;
-        m.message = (uint8_t)e;
+        m.mic_e_message = (uint8_t)e;
         m.ambiguity = p.pos.ambiguity;
         m.has_course = p.pos.has_course;
         m.course_degrees = p.pos.course_degrees;
@@ -645,13 +685,12 @@ static int build_positioned(const char *report, const jval *a, const pdn_aprs_st
             m.has_altitude = 1;
             m.altitude_feet = p.pos.altitude_feet;
         }
-        /* the type code says whether the station takes messages */
-        m.type_code = flag(a, "messaging") ? '`' : '\'';
+        m.messaging = (uint8_t)flag(a, "messaging");
         m.frequency = p.pos.frequency;
         m.dao = p.pos.dao;
         m.telemetry = p.pos.telemetry;
         m.comment = p.pos.comment;
-        return pdn_aprs_build_mic_e(station, &m, buf, cap);
+        return pdn_aprs_build_mic_e(station, &m, buf, cap, &built);
     }
 }
 
@@ -662,11 +701,11 @@ static int build_weather(const jval *a, const pdn_aprs_station *station, uint8_t
                                        "rain_24h_in", "rain_24h_mm", "rain_midnight_in", "rain_midnight_mm",
                                        "humidity_percent", "pressure_mbar", "luminosity_w_m2", "snow_24h_in",
                                        NULL};
-    static const int index[] = {PDN_APRS_WX_WIND_DIRECTION, PDN_APRS_WX_WIND_SPEED, PDN_APRS_WX_WIND_GUST,
-                                PDN_APRS_WX_TEMPERATURE,    PDN_APRS_WX_TEMPERATURE, PDN_APRS_WX_RAIN_1H,
-                                PDN_APRS_WX_RAIN_1H,        PDN_APRS_WX_RAIN_24H,    PDN_APRS_WX_RAIN_24H,
-                                PDN_APRS_WX_RAIN_MIDNIGHT,  PDN_APRS_WX_RAIN_MIDNIGHT, PDN_APRS_WX_HUMIDITY,
-                                PDN_APRS_WX_PRESSURE,       PDN_APRS_WX_LUMINOSITY,  PDN_APRS_WX_SNOW_24H};
+    static const int index[] = {PDN_APRS_WX_WIND_DIRECTION_DEGREES, PDN_APRS_WX_WIND_SPEED_MPH, PDN_APRS_WX_WIND_GUST_MPH,
+                                PDN_APRS_WX_TEMPERATURE_F,    PDN_APRS_WX_TEMPERATURE_F, PDN_APRS_WX_RAIN_1H_IN,
+                                PDN_APRS_WX_RAIN_1H_IN,        PDN_APRS_WX_RAIN_24H_IN,    PDN_APRS_WX_RAIN_24H_IN,
+                                PDN_APRS_WX_RAIN_MIDNIGHT_IN,  PDN_APRS_WX_RAIN_MIDNIGHT_IN, PDN_APRS_WX_HUMIDITY_PERCENT,
+                                PDN_APRS_WX_PRESSURE_MBAR,       PDN_APRS_WX_LUMINOSITY_W_M2,  PDN_APRS_WX_SNOW_24H_IN};
     static const char *const more[] = {"timestamp", "latitude", "longitude", "symbol", NULL};
     positioned p;
     pdn_aprs_weather w;
@@ -695,13 +734,14 @@ static int build_weather(const jval *a, const pdn_aprs_station *station, uint8_t
         num(a, "longitude", &p.pos.longitude);
         symbol(a, &p.pos.symbol);
         p.pos.weather = &w;
+        p.pos.timestamp = has_ts ? ts : NULL;
         if (why[0])
             return 0;
-        return pdn_aprs_build_position(station, &p.pos, has_ts ? ts : NULL, 0, buf, cap);
+        return pdn_aprs_build_position(station, &p.pos, buf, cap, &built);
     }
     if (why[0])
         return 0;
-    return pdn_aprs_build_weather(station, has_ts ? ts : NULL, &w, buf, cap);
+    return pdn_aprs_build_weather(station, has_ts ? ts : NULL, &w, buf, cap, &built);
 }
 
 static int build_other(const char *report, const jval *a, const pdn_aprs_station *station, uint8_t *buf, size_t cap)
@@ -713,8 +753,13 @@ static int build_other(const char *report, const jval *a, const pdn_aprs_station
         keys_only(a, keys, NULL);
         if (why[0])
             return 0;
-        return pdn_aprs_build_message_reply_ack(station, text_arg(a, "addressee"), text_arg(a, "text"),
-                                                text_arg(a, "message_id"), text_arg(a, "reply_ack"), buf, cap);
+        pdn_aprs_message_args m;
+        memset(&m, 0, sizeof m);
+        m.addressee = text_arg(a, "addressee");
+        m.text = text_arg(a, "text");
+        m.message_id = text_arg(a, "message_id");
+        m.reply_ack = text_arg(a, "reply_ack");
+        return pdn_aprs_build_message(station, &m, buf, cap, &built);
     }
     if (strcmp(report, "ack") == 0 || strcmp(report, "reject") == 0) {
         static const char *const keys[] = {"addressee", "message_id", NULL};
@@ -722,23 +767,24 @@ static int build_other(const char *report, const jval *a, const pdn_aprs_station
         if (why[0])
             return 0;
         if (report[0] == 'a')
-            return pdn_aprs_build_ack(station, text_arg(a, "addressee"), text_arg(a, "message_id"), buf, cap);
-        return pdn_aprs_build_reject(station, text_arg(a, "addressee"), text_arg(a, "message_id"), buf, cap);
+            return pdn_aprs_build_ack(station, text_arg(a, "addressee"), text_arg(a, "message_id"), buf, cap, &built);
+        return pdn_aprs_build_reject(station, text_arg(a, "addressee"), text_arg(a, "message_id"), buf, cap, &built);
     }
     if (strcmp(report, "bulletin") == 0) {
         static const char *const keys[] = {"id", "group", "text", NULL};
-        char id[64];
+        const char *id;
         keys_only(a, keys, NULL);
         if (why[0])
             return 0;
-        /* the builder takes the identifier and any group as one: "4WX" */
-        snprintf(id, sizeof id, "%s%s", text_arg(a, "id") ? text_arg(a, "id") : "",
-                 text_arg(a, "group") ? text_arg(a, "group") : "");
-        return pdn_aprs_build_bulletin(station, id, text_arg(a, "text"), buf, cap);
+        /* the identifier is one character; anything else is not an identifier */
+        id = text_arg(a, "id");
+        if (!id || strlen(id) != 1)
+            return PDN_APRS_ERR_REFUSED;
+        return pdn_aprs_build_bulletin(station, id[0], text_arg(a, "group"), text_arg(a, "text"), buf, cap, &built);
     }
     if (strcmp(report, "status") == 0) {
         static const char *const keys[] = {"text", "timestamp", "locator", "symbol", "beam", NULL};
-        pdn_aprs_status_options o;
+        pdn_aprs_status_args o;
         jval *beam = json_get(a, "beam");
         const char *hc = NULL, *pc = NULL;
         int has_ts;
@@ -755,8 +801,8 @@ static int build_other(const char *report, const jval *a, const pdn_aprs_station
                 cannot("beam", "not two one-character codes");
             else {
                 o.has_beam = 1;
-                o.beam_heading = hc[0];
-                o.beam_power = pc[0];
+                o.beam_heading_code = hc[0];
+                o.beam_power_code = pc[0];
             }
         }
         if (why[0])
@@ -764,43 +810,44 @@ static int build_other(const char *report, const jval *a, const pdn_aprs_station
         o.text = text_arg(a, "text");
         o.timestamp = has_ts ? ts : NULL;
         o.locator = text_arg(a, "locator");
-        return pdn_aprs_build_status_options(station, &o, buf, cap);
+        return pdn_aprs_build_status(station, &o, buf, cap, &built);
     }
     if (strcmp(report, "telemetry") == 0) {
         static const char *const keys[] = {"sequence", "analog", "bits", "comment", NULL};
         jval *an = json_get(a, "analog");
-        double analog[5] = {0, 0, 0, 0, 0};
-        uint8_t present[5] = {1, 1, 1, 1, 1};
-        char seq[32];
+        pdn_aprs_telemetry_args t;
         long sq = 0;
+        memset(&t, 0, sizeof t);
         keys_only(a, keys, NULL);
         if (!an || an->t != J_ARR || an->count != 5)
             cannot("analog", "the builder takes five values");
         for (k = 0; an && an->t == J_ARR && k < an->count && k < 5; k++) {
             if (an->items[k]->t == J_NULL)
-                present[k] = 0;
+                t.empty[k] = 1;
             else if (an->items[k]->t != J_NUM)
                 cannot("analog", "not a number or null");
             else
-                analog[k] = an->items[k]->num;
+                t.analog[k] = an->items[k]->num;
         }
         if (!whole(a, "sequence", 0, 2147483647.0, &sq))
             cannot("sequence", "missing");
         if (why[0])
             return 0;
-        /* the builder takes the sequence as text; a program's number over 999
-           has no three-digit form, and is refused, not wrapped (ruling B6) */
-        if (sq > 999)
-            return PDN_APRS_ERR_REFUSED;
-        /* the builder takes the sequence as text, which APRS12c ch. 13 gives
-           as three digits */
-        snprintf(seq, sizeof seq, "%03ld", sq);
-        return pdn_aprs_build_telemetry_channels(station, seq, analog, present, text_arg(a, "bits"), text_arg(a, "comment"), buf, cap);
+        /* a number over 999 is the library's to refuse (ruling B6) */
+        t.sequence = (unsigned)sq;
+        if (sq <= 999) {
+            t.bits = text_arg(a, "bits");
+            t.comment = text_arg(a, "comment");
+            if (why[0])
+                return 0;
+        }
+        return pdn_aprs_build_telemetry(station, &t, buf, cap, &built);
     }
     if (strncmp(report, "telemetry-", 10) == 0) {
         static const char *const keys[] = {"names", "units", "coefficients", "bits", "project", "addressee", NULL};
-        /* metadata is addressed to the station itself unless the recipe says */
-        const char *to = text_arg(a, "addressee") ? text_arg(a, "addressee") : station->source;
+        /* metadata is addressed to the station itself unless the recipe says,
+           which is what a NULL addressee means */
+        const char *to = text_arg(a, "addressee");
         keys_only(a, keys, NULL);
         if (why[0])
             return 0;
@@ -809,18 +856,18 @@ static int build_other(const char *report, const jval *a, const pdn_aprs_station
             const char *items[64];
             for (k = 0; l && l->t == J_ARR && k < l->count && k < 64; k++)
                 items[k] = text_item(report + 10, l->items[k]);
-            return report[10] == 'n' ? pdn_aprs_build_telemetry_names(station, to, items, k, buf, cap)
-                                     : pdn_aprs_build_telemetry_units(station, to, items, k, buf, cap);
+            return report[10] == 'n' ? pdn_aprs_build_telemetry_names(station, to, items, k, buf, cap, &built)
+                                     : pdn_aprs_build_telemetry_units(station, to, items, k, buf, cap, &built);
         }
         if (strcmp(report, "telemetry-coefficients") == 0) {
             jval *l = json_get(a, "coefficients");
             double c[64];
             for (k = 0; l && l->t == J_ARR && k < l->count && k < 64; k++)
                 c[k] = l->items[k]->num;
-            return pdn_aprs_build_telemetry_coefficients(station, to, c, k, buf, cap);
+            return pdn_aprs_build_telemetry_coefficients(station, to, c, k, buf, cap, &built);
         }
         if (strcmp(report, "telemetry-bits") == 0)
-            return pdn_aprs_build_telemetry_bits(station, to, text_arg(a, "bits"), text_arg(a, "project"), buf, cap);
+            return pdn_aprs_build_telemetry_bits(station, to, text_arg(a, "bits"), text_arg(a, "project"), buf, cap, &built);
     }
     return cannot("report", "a kind the builder does not make");
 }
@@ -858,15 +905,20 @@ static void build_line(long fallback_n, const char *text, size_t tl)
     jval *nv = in ? json_get(in, "n") : NULL;
     int rc;
     why[0] = 0;
+    memset(&built, 0, sizeof built);
     json_set(out, "n", json_int(nv && nv->t == J_NUM ? (long)nv->num : fallback_n));
     rc = in ? build(in, out_buf, sizeof out_buf - 1) : cannot("recipe", "not JSON");
     json_free(in);
     if (why[0]) {
         json_set(out, "result", json_str("unsupported"));
         json_set(out, "reason", json_str(why));
+    } else if (rc == PDN_APRS_ERR_UNSUPPORTED) {
+        /* APRS allows it, but the library's fixed buffers cannot hold it */
+        json_set(out, "result", json_str("unsupported"));
+        json_set(out, "reason", json_str(built.reason ? built.reason : pdn_aprs_strerror(rc)));
     } else if (rc < 0) {
         json_set(out, "result", json_str("refused"));
-        json_set(out, "reason", json_str(pdn_aprs_strerror(rc)));
+        json_set(out, "reason", json_str(built.reason ? built.reason : pdn_aprs_strerror(rc)));
     } else {
         json_set(out, "result", json_str("built"));
         json_set(out, "tnc2", json_str(hex(out_buf, (size_t)rc)));
