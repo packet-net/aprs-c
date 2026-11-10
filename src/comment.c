@@ -346,6 +346,9 @@ PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf
     if (pdn_aprs__lift_altitude(cb, &feet)) {
         r->has_altitude = 1;
         r->altitude_feet = feet;
+        /* a /A= in a Mic-E report wins over an altitude in the bytes */
+        if (c->data->type == PDN_APRS_TYPE_MIC_E)
+            r->altitude_in_comment = 1;
     }
     if (r->has_area &&
         (r->area.shape == PDN_APRS_AREA_LINE_DOWN_RIGHT || r->area.shape == PDN_APRS_AREA_LINE_DOWN_LEFT)) {
