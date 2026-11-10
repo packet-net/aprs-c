@@ -163,6 +163,8 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_maidenhead(pdn_aprs__dctx *c);
 typedef struct pdn_aprs__cbuf {
     uint8_t b[PDN_APRS_TEXT_SIZE + 256];
     size_t n;
+    /* 1 + where a Mic-E altitude was taken out, or 0: no !DAO! spans it */
+    size_t cut;
 } pdn_aprs__cbuf;
 
 /* Returns 1, or 0 (after pdn_aprs__overflow) if [s, s+n) does not fit. */

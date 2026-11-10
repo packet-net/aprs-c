@@ -478,6 +478,54 @@ static void test_batch2(void)
     strcpy(d.as.report.comment, "PHG");
     d.as.report.comment_len = 3;
     CHECK(pdn_aprs_encode_info(&d, NULL, buf, sizeof buf, NULL) > 0);
+
+    /* cs values with no compression type get the default type byte, C */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 49.5;
+    d.as.report.longitude = -72.75;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '>');
+    d.as.report.compressed = 1;
+    d.as.report.has_range = 1;
+    d.as.report.range_miles = 2;
+    CHECK(pdn_aprs_encode_info(&d, NULL, buf, sizeof buf, NULL) == 14 && buf[13] == 'C');
+    memset(&pos, 0, sizeof pos);
+    pos.latitude = 49.5;
+    pos.longitude = -72.75;
+    pos.symbol = pdn_aprs_symbol_make('/', '>');
+    pos.compressed = 1;
+    pos.has_range = 1;
+    pos.range_miles = 2;
+    CHECK(pdn_aprs_build_position(&me, &pos, NULL, 0, line, sizeof line) > 0);
+
+    /* luminosity 999.5 rounds to 1000, l000 */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 49.5;
+    d.as.report.longitude = -72.75;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '_');
+    d.as.report.has_weather = 1;
+    d.as.report.weather.has[PDN_APRS_WX_LUMINOSITY] = 1;
+    d.as.report.weather.value[PDN_APRS_WX_LUMINOSITY] = 999.5;
+    CHECK(pdn_aprs_encode_info(&d, NULL, buf, sizeof buf - 1, NULL) > 0 && strstr(buf, "l000") != NULL);
+
+    /* a Mic-E comment starting / that a / would join into an altitude goes
+       after a space (E12) */
+    memset(&mic, 0, sizeof mic);
+    mic.latitude = 33.427333;
+    mic.longitude = -112.129;
+    mic.symbol = pdn_aprs_symbol_make('/', 'j');
+    mic.message = PDN_APRS_MIC_E_RETURNING;
+    mic.type_code = '`';
+    mic.has_altitude = 1;
+    mic.altitude_feet = 101;
+    mic.comment = "/{}";
+    CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line) > 0 && strstr(line, "/A=000101 /{}") != NULL);
+
+    /* a later Mic-E altitude is looked for before the !DAO! is lifted */
+    CHECK(decode("K4NNW-13>SWQR1T:`lX\x1fn\"C>/]\"13.7V!w*@!7e}=") == PDN_APRS_OK &&
+          pkt.data.as.report.has_altitude && !pkt.data.as.report.has_dao &&
+          strcmp(pkt.data.as.report.comment, "\"13.7V!w*@") == 0);
 }
 
 int main(void)

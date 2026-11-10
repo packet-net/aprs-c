@@ -15,6 +15,7 @@ PDN_APRS__PRIVATE int pdn_aprs__cbuf_set(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, 
     if (n)
         memmove(cb->b, s, n);
     cb->n = n;
+    cb->cut = 0;
     return 1;
 }
 
@@ -91,6 +92,9 @@ PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs
         for (i = cb->n - 5 + 1; i > 0; i--) {
             size_t k = i - 1;
             if (have_tlm && k + 5 > tstart && k < tend)
+                continue;
+            /* bytes either side of what was taken out never join into one */
+            if (cb->cut && k + 1 < cb->cut && cb->cut - 1 < k + 5)
                 continue;
             if (dao_at(cb->b + k)) {
                 memcpy(dao, cb->b + k, 5);

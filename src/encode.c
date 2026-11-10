@@ -554,8 +554,12 @@ static int put_comment_part(pdn_aprs__ectx *e, const pdn_aprs_report *r, int at_
         slash = 1;
     /* the last resort: a space, which unlike / cannot join base-91 bytes
        before it into a Mic-E altitude (README Encoding rule) */
-    if (n > 0 && !slash && !r->has_frequency && (e->variant & 2))
+    if (n > 0 && !r->has_frequency && (e->variant & 2)) {
+        /* in place of any /, which a comment starting / or space also gets:
+           one leading space is dropped on the way back in */
         space = 1;
+        slash = 0;
+    }
     /* a delimiter only where the comment would otherwise read as something
        else (interpretations.md) */
     if (!slash && n > 0 && !r->has_frequency) {
@@ -657,7 +661,8 @@ static int put_wx_field(pdn_aprs__ectx *e, char letter, const pdn_aprs_weather *
             return pdn_aprs__refuse(e, "humidity out of range");
         break;
     case 'l':
-        v -= 1000.0;
+        /* rounded first: 999.5 is 1000, l000 */
+        v = pdn_aprs__round(v) - 1000.0;
         break;
     default:
         break;
