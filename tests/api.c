@@ -365,6 +365,110 @@ static void test_locale(void)
     setlocale(LC_ALL, "C");
 }
 
+/* Batch 2 of the exact-bytes rulings, where the vectors do not reach: the
+   builders, and values only a program gives. */
+static void test_batch2(void)
+{
+    char line[600];
+    const char *info;
+    pdn_aprs_station me = {"N0CALL", NULL, NULL, 0, NULL};
+    pdn_aprs_position pos;
+    pdn_aprs_mic_e mic;
+    pdn_aprs_data d;
+    char buf[256];
+
+    /* a compressed course is rounded once, to the 4-degree step: 301.7 is
+       75 steps (l), where whole degrees first (302) would give 76 (m) */
+    memset(&pos, 0, sizeof pos);
+    pos.latitude = 49.5;
+    pos.longitude = -72.75;
+    pos.symbol = pdn_aprs_symbol_make('/', '>');
+    pos.compressed = 1;
+    pos.has_course = 1;
+    pos.course_degrees = 301.7;
+    pos.has_speed = 1;
+    pos.speed_knots = 10;
+    CHECK(pdn_aprs_build_position(&me, &pos, NULL, 0, line, sizeof line) > 0 && (info = strchr(line, ':')) != NULL &&
+          info[12] == 'l');
+    /* a compressed speed of -0.3 rounds to 0 knots and is written (F2) */
+    pos.speed_knots = -0.3;
+    CHECK(pdn_aprs_build_position(&me, &pos, NULL, 0, line, sizeof line) > 0 && decode(line) == PDN_APRS_OK &&
+          pkt.data.as.report.speed_knots == 0);
+    pos.speed_knots = -0.6;
+    CHECK(pdn_aprs_build_position(&me, &pos, NULL, 0, line, sizeof line) == PDN_APRS_ERR_REFUSED);
+    /* a compressed course that rounds to 0 is refused (B1, F1) */
+    pos.speed_knots = 10;
+    pos.course_degrees = 0.3;
+    CHECK(pdn_aprs_build_position(&me, &pos, NULL, 0, line, sizeof line) == PDN_APRS_ERR_REFUSED);
+    /* uncompressed, it is 000 */
+    pos.compressed = 0;
+    CHECK(pdn_aprs_build_position(&me, &pos, NULL, 0, line, sizeof line) > 0 &&
+          strstr(line, ":!4930.00N/07245.00W>000/010") != NULL);
+    /* a half within 1e-6 of a step, in minutes from degrees, goes away from
+       zero (F2): 58.584999999999996 minutes is written 58.59 */
+    pos.latitude = 0.9764166666666666;
+    pos.longitude = -0.9764166666666666;
+    pos.has_course = 0;
+    pos.has_speed = 0;
+    pos.has_altitude = 1;
+    pos.altitude_feet = -0.5;
+    CHECK(pdn_aprs_build_position(&me, &pos, NULL, 0, line, sizeof line) > 0 &&
+          strstr(line, ":!0058.59N/00058.59W>/A=-00001") != NULL);
+
+    /* Mic-E: a course that rounds to 0 is the spec's unknown (B1); feet go
+       in a /A= and metres in the Mic-E altitude bytes (B2) */
+    memset(&mic, 0, sizeof mic);
+    mic.latitude = 33.427333;
+    mic.longitude = -112.129;
+    mic.symbol = pdn_aprs_symbol_make('/', 'j');
+    mic.message = PDN_APRS_MIC_E_RETURNING;
+    mic.has_course = 1;
+    mic.course_degrees = 0.3;
+    mic.has_altitude = 1;
+    mic.altitude_feet = 0;
+    CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line) > 0 && strstr(line, "/A=000000") != NULL &&
+          decode(line) == PDN_APRS_OK && !pkt.data.as.report.has_course);
+    mic.has_altitude = 0;
+    mic.has_altitude_m = 1;
+    mic.altitude_m = 100.4;
+    CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line) > 0 && strstr(line, "/A=") == NULL &&
+          decode(line) == PDN_APRS_OK && fabs(pkt.data.as.report.altitude_feet - 100 / 0.3048) < 1e-6);
+    mic.has_altitude = 1;
+    CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line) == PDN_APRS_ERR_ARGUMENT);
+    /* with ambiguity the longitude digits a decoder ignores hold the centre
+       it reports: 07.74 minutes at two levels is 07.50 */
+    mic.has_altitude = 0;
+    mic.has_altitude_m = 0;
+    mic.has_course = 0;
+    mic.ambiguity = 2;
+    CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line) > 0 && strstr(line, ":`(_N") != NULL);
+
+    /* an empty message ID is refused, not taken as none (B8) */
+    CHECK(pdn_aprs_build_message(&me, "G4XYZ", "hi", "", line, sizeof line) == PDN_APRS_ERR_REFUSED);
+    CHECK(pdn_aprs_build_message(&me, "G4XYZ", "hi", NULL, line, sizeof line) > 0);
+
+    /* text after an area that holds a data extension reads back as one, so
+       it has no clean form (F7a) */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_OBJECT;
+    strcpy(d.as.report.name, "SEARCH");
+    strcpy(d.as.report.timestamp, "092345z");
+    d.as.report.latitude = 49.05833333333333;
+    d.as.report.longitude = -72.02916666666667;
+    d.as.report.symbol = pdn_aprs_symbol_make('\\', 'l');
+    d.as.report.has_area = 1;
+    d.as.report.area.shape = 7;
+    d.as.report.area.lat_offset = 10;
+    d.as.report.area.lon_offset = 10;
+    d.as.report.area.color = 10;
+    strcpy(d.as.report.comment, "PHG5132");
+    d.as.report.comment_len = 7;
+    CHECK(pdn_aprs_encode_info(&d, NULL, buf, sizeof buf, NULL) == PDN_APRS_ERR_REFUSED);
+    strcpy(d.as.report.comment, "PHG");
+    d.as.report.comment_len = 3;
+    CHECK(pdn_aprs_encode_info(&d, NULL, buf, sizeof buf, NULL) > 0);
+}
+
 int main(void)
 {
     test_basics();
@@ -373,6 +477,7 @@ int main(void)
     test_encoding();
     test_exact_bytes();
     test_builders();
+    test_batch2();
     test_legacy_mic_e();
     test_locale();
     printf("%d checks, %d failed\n", checks, failures);
