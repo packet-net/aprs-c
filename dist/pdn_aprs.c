@@ -6864,7 +6864,7 @@ static void upper_case(char *s)
 
 static int fill_position(pdn_aprs_encoded *result, pdn_aprs_report *r, const pdn_aprs_position_args *p)
 {
-    size_t n;
+    size_t n = 0;
     int rc;
     r->latitude = p->latitude;
     r->longitude = p->longitude;
@@ -6972,7 +6972,7 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
 {
     pdn_aprs_data d;
     pdn_aprs_report *r = &d.as.report;
-    size_t n;
+    size_t n = 0;
     int rc;
     begin(result);
     if (!m)
@@ -7100,7 +7100,7 @@ static int build_message(const pdn_aprs_station *station, int type, const char *
                          pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
-    size_t n;
+    size_t n = 0;
     int rc;
     /* a message ID is 1-5 letters or digits: an empty one is refused, not
        taken as none (ruling B8) */
@@ -7194,7 +7194,7 @@ int pdn_aprs_build_status(const pdn_aprs_station *station, const pdn_aprs_status
 {
     pdn_aprs_data d;
     pdn_aprs_status *s = &d.as.status;
-    size_t n;
+    size_t n = 0;
     int rc;
     begin(result);
     if (!o)
@@ -7225,7 +7225,7 @@ int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const pdn_aprs_tel
 {
     pdn_aprs_data d;
     pdn_aprs_telemetry *t = &d.as.telemetry;
-    size_t n;
+    size_t n = 0;
     int i, rc;
     begin(result);
     if (!a)
@@ -7342,7 +7342,7 @@ int pdn_aprs_build_telemetry_bits(const pdn_aprs_station *station, const char *a
                                   const char *project, void *buf, size_t cap, pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
-    size_t n;
+    size_t n = 0;
     int rc;
     begin(result);
     addressee = meta_addressee(station, addressee);
