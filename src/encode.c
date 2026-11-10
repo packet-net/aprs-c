@@ -540,13 +540,17 @@ static int put_comment_part(pdn_aprs__ectx *e, const pdn_aprs_report *r, int at_
 {
     const char *c = r->comment;
     size_t n = r->comment_len;
-    int slash = 0;
+    int slash = 0, space = 0;
     if (n >= PDN_APRS_TEXT_SIZE)
         return pdn_aprs__refuse(e, "comment too long");
     if (!valid_text(c, n))
         return pdn_aprs__refuse(e, "the comment has a line break or is not UTF-8");
     if (n > 0 && (c[0] == ' ' || c[0] == '/' || (e->variant & 1)))
         slash = 1;
+    /* the last resort: a space, which unlike / cannot join base-91 bytes
+       before it into a Mic-E altitude (README Encoding rule) */
+    if (n > 0 && !slash && !r->has_frequency && (e->variant & 2))
+        space = 1;
     /* a delimiter only where the comment would otherwise read as something
        else (interpretations.md) */
     if (!slash && n > 0 && !r->has_frequency) {
@@ -594,6 +598,8 @@ static int put_comment_part(pdn_aprs__ectx *e, const pdn_aprs_report *r, int at_
     }
     if (slash)
         pdn_aprs__putc(e->b, '/');
+    else if (space)
+        pdn_aprs__putc(e->b, ' ');
     pdn_aprs__put(e->b, c, n);
     if (r->has_telemetry) {
         if (r->telemetry.analog_count < 1 || r->telemetry.analog_count > 5 ||
@@ -1161,7 +1167,8 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     {
         int alt_b91 = 0, at_ext = 0, ext_counts = 0;
         long v = 0;
-        if (r->has_altitude && finite_number(r->altitude_feet) && fabs(r->altitude_feet) < 1e9) {
+        if (r->has_altitude && !(e->flags & PDN_APRS__ENC_MIC_E_FEET) && finite_number(r->altitude_feet) &&
+            fabs(r->altitude_feet) < 1e9) {
             double back;
             v = (long)pdn_aprs__round(r->altitude_feet * 0.3048 + 10000.0);
             back = (double)(v - 10000) / 0.3048;
@@ -1833,8 +1840,8 @@ static int reads_back(const pdn_aprs_data *d, const uint8_t *info, size_t n, con
     return pdn_aprs__data_equal(&p.data, d, 1);
 }
 
-int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf, size_t cap,
-                         pdn_aprs_encoded *encoded)
+static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf, size_t cap,
+                       pdn_aprs_encoded *encoded, int flags)
 {
     pdn_aprs__buf b;
     pdn_aprs__ectx e;
@@ -1847,13 +1854,14 @@ int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_option
     if (!data || (!buf && cap))
         return PDN_APRS_ERR_ARGUMENT;
     /* written straight into buf, whatever its length: the canonical form
-       first; if that would not read back, the same with a delimiter before
-       the comment */
-    for (variant = 0; variant < 2; variant++) {
+       first; if that would not read back, the same with a / before the
+       comment, then with a space */
+    for (variant = 0; variant < 3; variant++) {
         memset(&e, 0, sizeof e);
         pdn_aprs__buf_init(&b, buf, cap);
         e.b = &b;
         e.variant = variant;
+        e.flags = flags;
         ok = pdn_aprs__encode_data(&e, data);
         if (!ok)
             break;
@@ -1880,13 +1888,19 @@ int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_option
     return (int)b.len;
 }
 
+int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf, size_t cap,
+                         pdn_aprs_encoded *encoded)
+{
+    return encode_info(data, options, buf, cap, encoded, 0);
+}
+
 /* Room for any header: every address and a separator or two, or seven
    bytes each in AX.25, and the control and PID bytes. */
 #define HEADER_ROOM ((PDN_APRS_MAX_PATH + 2) * (PDN_APRS_ADDR_SIZE + 2) + 2)
 
-static int encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *data,
-                         const pdn_aprs_encode_options *options, void *buf, size_t cap, pdn_aprs_encoded *encoded,
-                         int ax25)
+PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *data,
+                                              const pdn_aprs_encode_options *options, void *buf, size_t cap,
+                                              pdn_aprs_encoded *encoded, int ax25, int flags)
 {
     uint8_t head[HEADER_ROOM];
     uint8_t *out = (uint8_t *)buf;
@@ -1901,7 +1915,7 @@ static int encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *dat
     /* the information field first, at the start of buf, then moved along
        to make room for the header, which for Mic-E carries what the encoder
        computed */
-    n = pdn_aprs_encode_info(data, options, buf, cap, encoded);
+    n = encode_info(data, options, buf, cap, encoded, flags);
     if (n < 0)
         return n;
     dest = data->type == PDN_APRS_TYPE_MIC_E ? encoded->destination : header->destination;
@@ -1922,11 +1936,11 @@ static int encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *dat
 int pdn_aprs_encode_tnc2(const pdn_aprs_header *header, const pdn_aprs_data *data,
                          const pdn_aprs_encode_options *options, char *buf, size_t cap, pdn_aprs_encoded *encoded)
 {
-    return encode_packet(header, data, options, buf, cap, encoded, 0);
+    return pdn_aprs__encode_packet(header, data, options, buf, cap, encoded, 0, 0);
 }
 
 int pdn_aprs_encode_ax25(const pdn_aprs_header *header, const pdn_aprs_data *data,
                          const pdn_aprs_encode_options *options, void *buf, size_t cap, pdn_aprs_encoded *encoded)
 {
-    return encode_packet(header, data, options, buf, cap, encoded, 1);
+    return pdn_aprs__encode_packet(header, data, options, buf, cap, encoded, 1, 0);
 }

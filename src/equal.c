@@ -43,7 +43,10 @@ static int weather_eq(const pdn_aprs_weather *a, const pdn_aprs_weather *b, int 
            compressed wind reads back as 0 */
         if (loose && i == PDN_APRS_WX_WIND_DIRECTION && fabs(va - vb) > 180)
             va += va < vb ? 360 : -360;
-        if (a->has[i] && !near(va, vb, tol[i], i == PDN_APRS_WX_WIND_SPEED ? 0.045 : 0, loose))
+        /* snowfall is written in hundredths under 1 inch, tenths under 10,
+           and whole inches from there (ruling F3) */
+        if (a->has[i] && !near(va, vb, tol[i],
+                               i == PDN_APRS_WX_WIND_SPEED ? 0.045 : i == PDN_APRS_WX_SNOW_24H ? 0.051 : 0, loose))
             return 0;
     }
     if (a->software != b->software || !str_eq(a->unit, b->unit) || a->extra_count != b->extra_count)

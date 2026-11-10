@@ -40,16 +40,19 @@ static int station_header(const pdn_aprs_station *st, pdn_aprs_header *h)
     return 1;
 }
 
-int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_data *data, void *buf, size_t cap)
+static int build_with(const pdn_aprs_station *station, const pdn_aprs_data *data, void *buf, size_t cap, int flags)
 {
     pdn_aprs_header h;
     pdn_aprs_encode_options o;
     if (!data || !station_header(station, &h))
         return PDN_APRS_ERR_ARGUMENT;
     o.devices = station->devices;
-    if (station->ax25)
-        return pdn_aprs_encode_ax25(&h, data, &o, buf, cap, NULL);
-    return pdn_aprs_encode_tnc2(&h, data, &o, (char *)buf, cap, NULL);
+    return pdn_aprs__encode_packet(&h, data, &o, buf, cap, NULL, station->ax25 != 0, flags);
+}
+
+int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_data *data, void *buf, size_t cap)
+{
+    return build_with(station, data, buf, cap, 0);
 }
 
 static size_t set_text(char *dst, size_t cap, const char *src)
@@ -168,8 +171,12 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e *
     r->course_degrees = m->course_degrees;
     r->has_speed = 1;
     r->speed_knots = m->has_speed ? m->speed_knots : 0;
-    r->has_altitude = m->has_altitude;
-    r->altitude_feet = m->altitude_feet;
+    /* feet go in a /A=; metres in the Mic-E altitude bytes, whose unit is
+       the metre, rounded to it (ruling B2) */
+    if (m->has_altitude && m->has_altitude_m)
+        return PDN_APRS_ERR_ARGUMENT;
+    r->has_altitude = (uint8_t)(m->has_altitude || m->has_altitude_m);
+    r->altitude_feet = m->has_altitude_m ? pdn_aprs__round(m->altitude_m) / 0.3048 : m->altitude_feet;
     r->type_code = m->type_code;
     if (set_text(r->device_suffix, sizeof r->device_suffix, m->device_suffix) == (size_t)-1 ||
         set_text(r->locator, sizeof r->locator, m->locator) == (size_t)-1)
@@ -190,7 +197,7 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e *
     if (n == (size_t)-1)
         return PDN_APRS_ERR_ARGUMENT;
     r->comment_len = (uint16_t)n;
-    return pdn_aprs_build(station, &d, buf, cap);
+    return build_with(station, &d, buf, cap, m->has_altitude ? PDN_APRS__ENC_MIC_E_FEET : 0);
 }
 
 void pdn_aprs_weather_init(pdn_aprs_weather *weather)

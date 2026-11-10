@@ -1153,7 +1153,9 @@ typedef struct pdn_aprs_mic_e {
     uint8_t has_speed;
     double speed_knots;
     uint8_t has_altitude;
-    double altitude_feet;
+    double altitude_feet; /* written as a /A= */
+    uint8_t has_altitude_m;
+    double altitude_m;    /* in the Mic-E altitude bytes, rounded to the metre; not with altitude_feet */
     char type_code;       /* '`' messaging capable, '\'' not, or 0 */
     const char *device_suffix; /* "_%" etc., or NULL */
     const char *locator;  /* Maidenhead locator, or NULL */

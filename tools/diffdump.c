@@ -373,16 +373,6 @@ static const char *text_item(const char *key, const jval *v)
     return v->str;
 }
 
-/* v rounded to the nearest whole number, halves away from zero, a value
-   within 1e-6 of a half being the half (vectors ruling F2) */
-static double round_half_away(double v)
-{
-    double mag = fabs(v), w = floor(mag);
-    if (mag - w >= 0.5 - 1e-6)
-        w += 1;
-    return v < 0 ? -w : w;
-}
-
 static const char *text_arg(const jval *o, const char *key)
 {
     return text_item(key, json_get(o, key));
@@ -647,15 +637,13 @@ static int build_positioned(const char *report, const jval *a, const pdn_aprs_st
         m.course_degrees = p.pos.course_degrees;
         m.has_speed = p.pos.has_speed;
         m.speed_knots = p.pos.speed_knots;
-        m.has_altitude = p.pos.has_altitude;
-        m.altitude_feet = p.pos.altitude_feet;
-        {
-            /* metres go in the Mic-E altitude bytes, whose unit is the metre,
-               rounded to the metre (ruling B2): the builder writes them there
-               when the feet it is given are a whole number of metres */
-            double metres;
-            if (num(a, "altitude_m", &metres))
-                m.altitude_feet = round_half_away(metres) / 0.3048;
+        /* the Mic-E builder takes metres, for the Mic-E altitude bytes, and
+           feet, for a /A= */
+        if (num(a, "altitude_m", &m.altitude_m))
+            m.has_altitude_m = 1;
+        else if (p.pos.has_altitude) {
+            m.has_altitude = 1;
+            m.altitude_feet = p.pos.altitude_feet;
         }
         /* the type code says whether the station takes messages */
         m.type_code = flag(a, "messaging") ? '`' : '\'';
