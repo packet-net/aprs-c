@@ -709,14 +709,12 @@ static int build_other(const char *report, const jval *a, const pdn_aprs_station
     char ts[16];
     size_t k;
     if (strcmp(report, "message") == 0) {
-        static const char *const keys[] = {"addressee", "text", "message_id", NULL};
-        if (json_get(a, "reply_ack"))
-            cannot("reply_ack", "the message builder takes none");
+        static const char *const keys[] = {"addressee", "text", "message_id", "reply_ack", NULL};
         keys_only(a, keys, NULL);
         if (why[0])
             return 0;
-        return pdn_aprs_build_message(station, text_arg(a, "addressee"), text_arg(a, "text"),
-                                      text_arg(a, "message_id"), buf, cap);
+        return pdn_aprs_build_message_reply_ack(station, text_arg(a, "addressee"), text_arg(a, "text"),
+                                                text_arg(a, "message_id"), text_arg(a, "reply_ack"), buf, cap);
     }
     if (strcmp(report, "ack") == 0 || strcmp(report, "reject") == 0) {
         static const char *const keys[] = {"addressee", "message_id", NULL};
@@ -739,30 +737,50 @@ static int build_other(const char *report, const jval *a, const pdn_aprs_station
         return pdn_aprs_build_bulletin(station, id, text_arg(a, "text"), buf, cap);
     }
     if (strcmp(report, "status") == 0) {
-        static const char *const keys[] = {"text", "timestamp", NULL};
-        static const char *const none[] = {"locator", "symbol", "beam", NULL};
-        int has_ts, i;
-        for (i = 0; none[i]; i++)
-            if (json_get(a, none[i]))
-                cannot(none[i], "the status builder takes none");
+        static const char *const keys[] = {"text", "timestamp", "locator", "symbol", "beam", NULL};
+        pdn_aprs_status_options o;
+        jval *beam = json_get(a, "beam");
+        const char *hc = NULL, *pc = NULL;
+        int has_ts;
+        memset(&o, 0, sizeof o);
         keys_only(a, keys, NULL);
         has_ts = timestamp(a, ts, sizeof ts);
+        symbol(a, &o.symbol);
+        if (beam) {
+            static const char *const bkeys[] = {"heading_code", "power_code", NULL};
+            keys_only(beam, bkeys, NULL);
+            hc = text_arg(beam, "heading_code");
+            pc = text_arg(beam, "power_code");
+            if (!hc || !pc || strlen(hc) != 1 || strlen(pc) != 1)
+                cannot("beam", "not two one-character codes");
+            else {
+                o.has_beam = 1;
+                o.beam_heading = hc[0];
+                o.beam_power = pc[0];
+            }
+        }
         if (why[0])
             return 0;
-        return pdn_aprs_build_status(station, text_arg(a, "text"), has_ts ? ts : NULL, buf, cap);
+        o.text = text_arg(a, "text");
+        o.timestamp = has_ts ? ts : NULL;
+        o.locator = text_arg(a, "locator");
+        return pdn_aprs_build_status_options(station, &o, buf, cap);
     }
     if (strcmp(report, "telemetry") == 0) {
         static const char *const keys[] = {"sequence", "analog", "bits", "comment", NULL};
         jval *an = json_get(a, "analog");
         double analog[5] = {0, 0, 0, 0, 0};
+        uint8_t present[5] = {1, 1, 1, 1, 1};
         char seq[32];
         long sq = 0;
         keys_only(a, keys, NULL);
         if (!an || an->t != J_ARR || an->count != 5)
             cannot("analog", "the builder takes five values");
         for (k = 0; an && an->t == J_ARR && k < an->count && k < 5; k++) {
-            if (an->items[k]->t != J_NUM)
-                cannot("analog", "the builder takes no empty channel");
+            if (an->items[k]->t == J_NULL)
+                present[k] = 0;
+            else if (an->items[k]->t != J_NUM)
+                cannot("analog", "not a number or null");
             else
                 analog[k] = an->items[k]->num;
         }
@@ -777,7 +795,7 @@ static int build_other(const char *report, const jval *a, const pdn_aprs_station
         /* the builder takes the sequence as text, which APRS12c ch. 13 gives
            as three digits */
         snprintf(seq, sizeof seq, "%03ld", sq);
-        return pdn_aprs_build_telemetry(station, seq, analog, text_arg(a, "bits"), text_arg(a, "comment"), buf, cap);
+        return pdn_aprs_build_telemetry_channels(station, seq, analog, present, text_arg(a, "bits"), text_arg(a, "comment"), buf, cap);
     }
     if (strncmp(report, "telemetry-", 10) == 0) {
         static const char *const keys[] = {"names", "units", "coefficients", "bits", "project", "addressee", NULL};

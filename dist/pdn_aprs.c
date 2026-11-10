@@ -1124,7 +1124,8 @@ int pdn_aprs_decode_third_party(const pdn_aprs_data *outer, const pdn_aprs_decod
         return PDN_APRS_ERR_HEADER;
     }
     inner->header_ok = 1;
-    return decode_info_into(inner, options, t->packet + at, t->len - at, 1);
+    /* the inner field may be longer than a field off the air: then the packet keeps no copy of it */
+    return decode_info_into(inner, options, t->packet + at, t->len - at, t->len - at <= PDN_APRS_MAX_INFO);
 }
 
 /* ---- AX.25 ---- */
@@ -6379,7 +6380,7 @@ static int third_party_header_clean(const pdn_aprs_third_party *t)
 {
     pdn_aprs_packet p;
     pdn_aprs__dctx c;
-    size_t n = t->len <= PDN_APRS_MAX_INFO ? t->len : PDN_APRS_MAX_INFO;
+    size_t n = t->len <= sizeof t->packet ? t->len : sizeof t->packet;
     memset(&c, 0, sizeof c);
     p.diagnostic_count = 0;
     c.pkt = &p;
@@ -6486,7 +6487,8 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_da
                                        "data, so no clean form reproduces it");
         pdn_aprs__putc(e->b, '}');
         pdn_aprs__put(e->b, d->as.third_party.packet,
-                      d->as.third_party.len <= PDN_APRS_MAX_INFO ? d->as.third_party.len : PDN_APRS_MAX_INFO);
+                      d->as.third_party.len <= sizeof d->as.third_party.packet ? d->as.third_party.len
+                                                                                 : sizeof d->as.third_party.packet);
         return 1;
     case PDN_APRS_TYPE_USER_DEFINED:
         pdn_aprs__putc(e->b, '{');
@@ -6888,7 +6890,7 @@ int pdn_aprs_build_weather(const pdn_aprs_station *station, const char *timestam
 }
 
 static int build_message(const pdn_aprs_station *station, int type, const char *addressee, const char *text,
-                         const char *message_id, void *buf, size_t cap)
+                         const char *message_id, const char *reply_ack, void *buf, size_t cap)
 {
     pdn_aprs_data d;
     size_t n;
@@ -6903,13 +6905,24 @@ static int build_message(const pdn_aprs_station *station, int type, const char *
         n == (size_t)-1 || set_text(d.as.message.message_id, sizeof d.as.message.message_id, message_id) == (size_t)-1)
         return PDN_APRS_ERR_ARGUMENT;
     d.as.message.text_len = (uint16_t)n;
+    if (reply_ack) {
+        if (set_text(d.as.message.reply_ack, sizeof d.as.message.reply_ack, reply_ack) == (size_t)-1)
+            return PDN_APRS_ERR_ARGUMENT;
+        d.as.message.has_reply_ack = 1;
+    }
     return pdn_aprs_build(station, &d, buf, cap);
 }
 
 int pdn_aprs_build_message(const pdn_aprs_station *station, const char *addressee, const char *text,
                            const char *message_id, void *buf, size_t cap)
 {
-    return build_message(station, PDN_APRS_TYPE_MESSAGE, addressee, text, message_id, buf, cap);
+    return build_message(station, PDN_APRS_TYPE_MESSAGE, addressee, text, message_id, NULL, buf, cap);
+}
+
+int pdn_aprs_build_message_reply_ack(const pdn_aprs_station *station, const char *addressee, const char *text,
+                                     const char *message_id, const char *reply_ack, void *buf, size_t cap)
+{
+    return build_message(station, PDN_APRS_TYPE_MESSAGE, addressee, text, message_id, reply_ack, buf, cap);
 }
 
 static int build_ack(const pdn_aprs_station *station, int type, const char *addressee, const char *id, void *buf,
@@ -6943,25 +6956,54 @@ int pdn_aprs_build_bulletin(const pdn_aprs_station *station, const char *id, con
         return PDN_APRS_ERR_ARGUMENT;
     memcpy(addressee, "BLN", 3);
     pdn_aprs__strlcpy(addressee + 3, id, sizeof addressee - 3);
-    return build_message(station, PDN_APRS_TYPE_BULLETIN, addressee, text, NULL, buf, cap);
+    return build_message(station, PDN_APRS_TYPE_BULLETIN, addressee, text, NULL, NULL, buf, cap);
+}
+
+int pdn_aprs_build_status_options(const pdn_aprs_station *station, const pdn_aprs_status_options *o, void *buf,
+                                  size_t cap)
+{
+    pdn_aprs_data d;
+    pdn_aprs_status *s = &d.as.status;
+    size_t n;
+    if (!o)
+        return PDN_APRS_ERR_ARGUMENT;
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_STATUS;
+    n = set_text(s->text, sizeof s->text, o->text);
+    if (n == (size_t)-1 || set_text(s->timestamp, sizeof s->timestamp, o->timestamp) == (size_t)-1 ||
+        set_text(s->locator, sizeof s->locator, o->locator) == (size_t)-1)
+        return PDN_APRS_ERR_ARGUMENT;
+    s->text_len = (uint16_t)n;
+    /* a locator is sent in upper case */
+    for (n = 0; s->locator[n]; n++)
+        if (s->locator[n] >= 'a' && s->locator[n] <= 'z')
+            s->locator[n] = (char)(s->locator[n] - 'a' + 'A');
+    s->symbol = o->symbol;
+    s->has_beam = o->has_beam != 0;
+    s->beam_heading = o->beam_heading;
+    s->beam_power = o->beam_power;
+    return pdn_aprs_build(station, &d, buf, cap);
 }
 
 int pdn_aprs_build_status(const pdn_aprs_station *station, const char *text, const char *timestamp, void *buf,
                           size_t cap)
 {
-    pdn_aprs_data d;
-    size_t n;
-    memset(&d, 0, sizeof d);
-    d.type = PDN_APRS_TYPE_STATUS;
-    n = set_text(d.as.status.text, sizeof d.as.status.text, text);
-    if (n == (size_t)-1 || set_text(d.as.status.timestamp, sizeof d.as.status.timestamp, timestamp) == (size_t)-1)
-        return PDN_APRS_ERR_ARGUMENT;
-    d.as.status.text_len = (uint16_t)n;
-    return pdn_aprs_build(station, &d, buf, cap);
+    pdn_aprs_status_options o;
+    memset(&o, 0, sizeof o);
+    o.text = text;
+    o.timestamp = timestamp;
+    return pdn_aprs_build_status_options(station, &o, buf, cap);
 }
 
 int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const char *sequence, const double analog[5],
                              const char *bits, const char *comment, void *buf, size_t cap)
+{
+    return pdn_aprs_build_telemetry_channels(station, sequence, analog, NULL, bits, comment, buf, cap);
+}
+
+int pdn_aprs_build_telemetry_channels(const pdn_aprs_station *station, const char *sequence,
+                                      const double analog[5], const uint8_t present[5], const char *bits,
+                                      const char *comment, void *buf, size_t cap)
 {
     pdn_aprs_data d;
     size_t n;
@@ -6973,8 +7015,12 @@ int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const char *sequen
     if (!sequence || set_text(d.as.telemetry.sequence, sizeof d.as.telemetry.sequence, sequence) == (size_t)-1)
         return PDN_APRS_ERR_ARGUMENT;
     d.as.telemetry.analog_count = 5;
-    for (i = 0; i < 5; i++)
-        d.as.telemetry.analog[i].value = analog[i];
+    for (i = 0; i < 5; i++) {
+        if (present && !present[i])
+            d.as.telemetry.analog[i].is_null = 1;
+        else
+            d.as.telemetry.analog[i].value = analog[i];
+    }
     if (bits) {
         if (set_text(d.as.telemetry.bits, sizeof d.as.telemetry.bits, bits) == (size_t)-1)
             return PDN_APRS_ERR_ARGUMENT;

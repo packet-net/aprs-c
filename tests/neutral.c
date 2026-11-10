@@ -990,8 +990,10 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
     if (json_gets(data, "type") && strcmp(json_gets(data, "type"), "unrecognized") == 0) {
         /* an empty field is written back empty; any other the data does not give */
         free(inner);
-        if (!reason || strcmp(reason, "empty") != 0)
-            return cannot(cv, "is an unrecognized packet, whose information field the data does not give", "packet");
+        if (!reason || strcmp(reason, "empty") != 0) {
+            snprintf(cv->err, cv->errlen, "inner packet: unrecognized data has nothing to encode");
+            return -1;
+        }
         inner = NULL;
         i = 0;
         memset(&enc, 0, sizeof enc);

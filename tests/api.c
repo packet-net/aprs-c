@@ -321,6 +321,33 @@ static void test_builders(void)
           strstr(line, ":EQNS.0,0.5,-1.25"));
     CHECK(pdn_aprs_build_telemetry_bits(&me, "M0LTE-9", "11110000", "Balloon", line, sizeof line) > 0 &&
           strstr(line, ":BITS.11110000,Balloon"));
+    {
+        static const uint8_t gaps[5] = {1, 0, 1, 0, 0};
+        pdn_aprs_status_options so;
+        CHECK(pdn_aprs_build_telemetry_channels(&me, "007", analog, gaps, "10000001", NULL, line, sizeof line) > 0 &&
+              strstr(line, ":T#007,001,,003,,,10000001"));
+        CHECK(pdn_aprs_build_telemetry_channels(&me, "007", analog, NULL, "10000001", NULL, line, sizeof line) > 0 &&
+              strstr(line, ":T#007,001,2.5,003,004,005,10000001"));
+        memset(&so, 0, sizeof so);
+        so.text = "QRV";
+        so.locator = "io91sx";
+        so.symbol = pdn_aprs_symbol_make('/', '-');
+        CHECK(pdn_aprs_build_status_options(&me, &so, line, sizeof line) > 0 && strstr(line, ":>IO91SX/- QRV"));
+        so.timestamp = "092345z";
+        CHECK(pdn_aprs_build_status_options(&me, &so, line, sizeof line) == PDN_APRS_ERR_REFUSED);
+        memset(&so, 0, sizeof so);
+        so.text = "WXT";
+        so.has_beam = 1;
+        so.beam_heading = '4';
+        so.beam_power = '7';
+        CHECK(pdn_aprs_build_status_options(&me, &so, line, sizeof line) > 0 && strstr(line, ":>WXT^47"));
+        CHECK(pdn_aprs_build_message_reply_ack(&me, "G4XYZ", "hi", "42", "AB", line, sizeof line) > 0 &&
+              strstr(line, ":hi{42}AB"));
+        CHECK(pdn_aprs_build_message_reply_ack(&me, "G4XYZ", "hi", "42", "", line, sizeof line) > 0 &&
+              strstr(line, ":hi{42}") && line[strlen(line) - 1] == '}');
+        CHECK(pdn_aprs_build_message_reply_ack(&me, "G4XYZ", "hi", NULL, "AB", line, sizeof line) ==
+              PDN_APRS_ERR_REFUSED);
+    }
     me.destination = "APRS";
     CHECK(pdn_aprs_build_status(&me, "x", NULL, line, sizeof line) > 0 && strncmp(line, "M0LTE-9>APRS,", 13) == 0);
     me.source = "not a call!";
