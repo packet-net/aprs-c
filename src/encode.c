@@ -1672,7 +1672,7 @@ static int third_party_header_clean(const pdn_aprs_third_party *t)
 {
     pdn_aprs_packet p;
     pdn_aprs__dctx c;
-    size_t n = t->len <= PDN_APRS_MAX_INFO ? t->len : PDN_APRS_MAX_INFO;
+    size_t n = t->len <= sizeof t->packet ? t->len : sizeof t->packet;
     memset(&c, 0, sizeof c);
     p.diagnostic_count = 0;
     c.pkt = &p;
@@ -1779,7 +1779,8 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_da
                                        "data, so no clean form reproduces it");
         pdn_aprs__putc(e->b, '}');
         pdn_aprs__put(e->b, d->as.third_party.packet,
-                      d->as.third_party.len <= PDN_APRS_MAX_INFO ? d->as.third_party.len : PDN_APRS_MAX_INFO);
+                      d->as.third_party.len <= sizeof d->as.third_party.packet ? d->as.third_party.len
+                                                                                 : sizeof d->as.third_party.packet);
         return 1;
     case PDN_APRS_TYPE_USER_DEFINED:
         pdn_aprs__putc(e->b, '{');

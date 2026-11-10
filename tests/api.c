@@ -321,6 +321,33 @@ static void test_builders(void)
           strstr(line, ":EQNS.0,0.5,-1.25"));
     CHECK(pdn_aprs_build_telemetry_bits(&me, "M0LTE-9", "11110000", "Balloon", line, sizeof line) > 0 &&
           strstr(line, ":BITS.11110000,Balloon"));
+    {
+        static const uint8_t gaps[5] = {1, 0, 1, 0, 0};
+        pdn_aprs_status_options so;
+        CHECK(pdn_aprs_build_telemetry_channels(&me, "007", analog, gaps, "10000001", NULL, line, sizeof line) > 0 &&
+              strstr(line, ":T#007,001,,003,,,10000001"));
+        CHECK(pdn_aprs_build_telemetry_channels(&me, "007", analog, NULL, "10000001", NULL, line, sizeof line) > 0 &&
+              strstr(line, ":T#007,001,2.5,003,004,005,10000001"));
+        memset(&so, 0, sizeof so);
+        so.text = "QRV";
+        so.locator = "io91sx";
+        so.symbol = pdn_aprs_symbol_make('/', '-');
+        CHECK(pdn_aprs_build_status_options(&me, &so, line, sizeof line) > 0 && strstr(line, ":>IO91SX/- QRV"));
+        so.timestamp = "092345z";
+        CHECK(pdn_aprs_build_status_options(&me, &so, line, sizeof line) == PDN_APRS_ERR_REFUSED);
+        memset(&so, 0, sizeof so);
+        so.text = "WXT";
+        so.has_beam = 1;
+        so.beam_heading = '4';
+        so.beam_power = '7';
+        CHECK(pdn_aprs_build_status_options(&me, &so, line, sizeof line) > 0 && strstr(line, ":>WXT^47"));
+        CHECK(pdn_aprs_build_message_reply_ack(&me, "G4XYZ", "hi", "42", "AB", line, sizeof line) > 0 &&
+              strstr(line, ":hi{42}AB"));
+        CHECK(pdn_aprs_build_message_reply_ack(&me, "G4XYZ", "hi", "42", "", line, sizeof line) > 0 &&
+              strstr(line, ":hi{42}") && line[strlen(line) - 1] == '}');
+        CHECK(pdn_aprs_build_message_reply_ack(&me, "G4XYZ", "hi", NULL, "AB", line, sizeof line) ==
+              PDN_APRS_ERR_REFUSED);
+    }
     me.destination = "APRS";
     CHECK(pdn_aprs_build_status(&me, "x", NULL, line, sizeof line) > 0 && strncmp(line, "M0LTE-9>APRS,", 13) == 0);
     me.source = "not a call!";
@@ -544,6 +571,28 @@ static void test_batch2(void)
           strcmp(pkt.data.as.report.comment, "\"13.7V!w*@") == 0);
 }
 
+static void test_long_third_party(void)
+{
+    static pdn_aprs_data d;
+    static pdn_aprs_packet inner;
+    static char line[4096];
+    static const char head[] = "WB4APR-14>APRS:>";
+    pdn_aprs_station me = {"G9RXG", NULL, NULL, 0, NULL};
+    size_t h = sizeof head - 1, n = h + 600;
+    int w;
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_THIRD_PARTY;
+    memcpy(d.as.third_party.packet, head, h);
+    memset(d.as.third_party.packet + h, 'x', 600);
+    d.as.third_party.len = (uint16_t)n;
+    w = pdn_aprs_build(&me, &d, line, sizeof line);
+    CHECK(w > 0 && (size_t)w > PDN_APRS_MAX_INFO && strstr(line, ":}WB4APR-14>APRS:>xxx") != NULL);
+    CHECK(pdn_aprs_decode_third_party(&d, NULL, &inner) == PDN_APRS_OK &&
+          inner.data.type == PDN_APRS_TYPE_STATUS && inner.data.as.status.text_len == 600);
+    d.as.third_party.len = 60000;
+    CHECK(pdn_aprs_decode_third_party(&d, NULL, &inner) == PDN_APRS_ERR_ARGUMENT);
+}
+
 int main(void)
 {
     test_basics();
@@ -555,6 +604,7 @@ int main(void)
     test_batch2();
     test_legacy_mic_e();
     test_locale();
+    test_long_third_party();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

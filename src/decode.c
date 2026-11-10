@@ -504,6 +504,8 @@ int pdn_aprs_decode_third_party(const pdn_aprs_data *outer, const pdn_aprs_decod
     if (!outer || !inner || outer->type != PDN_APRS_TYPE_THIRD_PARTY)
         return PDN_APRS_ERR_ARGUMENT;
     t = &outer->as.third_party;
+    if (t->len > sizeof t->packet)
+        return PDN_APRS_ERR_ARGUMENT;
     packet_reset(inner);
     memset(&c, 0, sizeof c);
     c.opt = options;
@@ -516,7 +518,8 @@ int pdn_aprs_decode_third_party(const pdn_aprs_data *outer, const pdn_aprs_decod
         return PDN_APRS_ERR_HEADER;
     }
     inner->header_ok = 1;
-    return decode_info_into(inner, options, t->packet + at, t->len - at, 1);
+    /* the inner field may be longer than a field off the air: then the packet keeps no copy of it */
+    return decode_info_into(inner, options, t->packet + at, t->len - at, t->len - at <= PDN_APRS_MAX_INFO);
 }
 
 /* ---- AX.25 ---- */

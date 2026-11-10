@@ -855,7 +855,7 @@ typedef struct pdn_aprs_capabilities {
    the inner packet's q_construct is always -1. */
 typedef struct pdn_aprs_third_party {
     uint16_t len;
-    uint8_t packet[PDN_APRS_MAX_INFO];
+    uint8_t packet[2 * PDN_APRS_MAX_INFO]; /* the encoder takes twice what the decoder does, as for text */
 } pdn_aprs_third_party;
 
 /* User-defined data {UX... (APRS12c ch. 19): bytes as sent. */
@@ -1181,6 +1181,11 @@ void pdn_aprs_weather_set(pdn_aprs_weather *weather, int index, double value);
    addressee should ack). */
 int pdn_aprs_build_message(const pdn_aprs_station *station, const char *addressee, const char *text,
                            const char *message_id, void *buf, size_t cap);
+/* As pdn_aprs_build_message with a reply-ack (APRS12c ch. 14): reply_ack is the
+   ID of a message being acked, NULL for none, or "" for a sender that
+   supports reply-acks but has nothing to ack. Needs a message_id. */
+int pdn_aprs_build_message_reply_ack(const pdn_aprs_station *station, const char *addressee, const char *text,
+                                     const char *message_id, const char *reply_ack, void *buf, size_t cap);
 int pdn_aprs_build_ack(const pdn_aprs_station *station, const char *addressee, const char *message_id,
                        void *buf, size_t cap);
 int pdn_aprs_build_reject(const pdn_aprs_station *station, const char *addressee,
@@ -1195,11 +1200,37 @@ int pdn_aprs_build_bulletin(const pdn_aprs_station *station, const char *id, con
 int pdn_aprs_build_status(const pdn_aprs_station *station, const char *text, const char *timestamp,
                           void *buf, size_t cap);
 
+/* A status report with everything the format holds. timestamp ("DDHHMMz") or
+   locator (4 or 6 characters, with symbol after it) may be set, not both;
+   NULL or "" leaves either out. beam_heading and beam_power, when has_beam is
+   set, are the meteor scatter ^HP codes after the text. A locator is sent in
+   upper case. Zero the struct first (memset, or = {0}). */
+typedef struct pdn_aprs_status_options {
+    const char *text;
+    const char *timestamp;
+    const char *locator;
+    pdn_aprs_symbol symbol;
+    uint8_t has_beam;
+    char beam_heading;
+    char beam_power;
+} pdn_aprs_status_options;
+
+int pdn_aprs_build_status_options(const pdn_aprs_station *station, const pdn_aprs_status_options *options,
+                                  void *buf, size_t cap);
+
 /* A telemetry report: sequence ("001"), five analog values, eight bits
    ("01101001", B1 first, or NULL) and an optional comment. */
 int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const char *sequence,
                              const double analog[5], const char *bits, const char *comment,
                              void *buf, size_t cap);
+
+/* As pdn_aprs_build_telemetry, with channels that can be empty: present has
+   one entry per analog value, 0 for an empty channel (sent as nothing between
+   the commas; its analog value is ignored). present NULL means all five are
+   present. analog must not be NULL, even when every channel is empty. */
+int pdn_aprs_build_telemetry_channels(const pdn_aprs_station *station, const char *sequence,
+                                      const double analog[5], const uint8_t present[5], const char *bits,
+                                      const char *comment, void *buf, size_t cap);
 
 /* Telemetry metadata, sent as messages addressed to the station whose
    telemetry they describe: up to 13 names or units, up to 15 coefficients,
