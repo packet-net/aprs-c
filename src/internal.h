@@ -165,6 +165,10 @@ typedef struct pdn_aprs__cbuf {
     size_t n;
     /* 1 + where a Mic-E altitude was taken out, or 0: no !DAO! spans it */
     size_t cut;
+    /* where pdn_aprs__lift_telemetry_dao took telemetry or a !DAO! out, in
+       the text left: the bytes either side were not next to each other */
+    size_t gap[2];
+    int gaps;
 } pdn_aprs__cbuf;
 
 /* Returns 1, or 0 (after pdn_aprs__overflow) if [s, s+n) does not fit. */

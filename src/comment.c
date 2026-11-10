@@ -104,14 +104,21 @@ PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs
             }
         }
     }
+    cb->gaps = 0;
     if (have_dao && have_tlm && dao_pos > tstart) {
         pdn_aprs__cbuf_cut(cb, dao_pos, 5);
         pdn_aprs__cbuf_cut(cb, tstart, tend - tstart);
+        cb->gap[cb->gaps++] = tstart;
+        cb->gap[cb->gaps++] = dao_pos - (tend - tstart);
     } else {
         if (have_tlm)
             pdn_aprs__cbuf_cut(cb, tstart, tend - tstart);
         if (have_dao)
             pdn_aprs__cbuf_cut(cb, dao_pos, 5);
+        if (have_tlm)
+            cb->gap[cb->gaps++] = have_dao ? tstart - 5 : tstart;
+        if (have_dao)
+            cb->gap[cb->gaps++] = dao_pos;
     }
     if (have_dao) {
         r->has_dao = 1;

@@ -172,6 +172,10 @@ typedef struct pdn_aprs__cbuf {
     size_t n;
     /* 1 + where a Mic-E altitude was taken out, or 0: no !DAO! spans it */
     size_t cut;
+    /* where pdn_aprs__lift_telemetry_dao took telemetry or a !DAO! out, in
+       the text left: the bytes either side were not next to each other */
+    size_t gap[2];
+    int gaps;
 } pdn_aprs__cbuf;
 
 /* Returns 1, or 0 (after pdn_aprs__overflow) if [s, s+n) does not fit. */
@@ -2211,14 +2215,21 @@ PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs
             }
         }
     }
+    cb->gaps = 0;
     if (have_dao && have_tlm && dao_pos > tstart) {
         pdn_aprs__cbuf_cut(cb, dao_pos, 5);
         pdn_aprs__cbuf_cut(cb, tstart, tend - tstart);
+        cb->gap[cb->gaps++] = tstart;
+        cb->gap[cb->gaps++] = dao_pos - (tend - tstart);
     } else {
         if (have_tlm)
             pdn_aprs__cbuf_cut(cb, tstart, tend - tstart);
         if (have_dao)
             pdn_aprs__cbuf_cut(cb, dao_pos, 5);
+        if (have_tlm)
+            cb->gap[cb->gaps++] = have_dao ? tstart - 5 : tstart;
+        if (have_dao)
+            cb->gap[cb->gaps++] = dao_pos;
     }
     if (have_dao) {
         r->has_dao = 1;
@@ -2981,8 +2992,9 @@ static int rest_is_spaced(pdn_aprs__dctx *c, const uint8_t *t, size_t tl)
 }
 
 /* Whether lifting telemetry and a !DAO! from cb would leave an altitude
-   other than the one at found (cb->n for none). */
-static int joins_altitude(pdn_aprs__dctx *c, const pdn_aprs__cbuf *cb, size_t found)
+   formed across a place one was taken from; one the bytes already held is
+   not joined. */
+static int joins_altitude(pdn_aprs__dctx *c, const pdn_aprs__cbuf *cb)
 {
     static const pdn_aprs_report blank;
     pdn_aprs__cbuf copy;
@@ -2993,8 +3005,12 @@ static int joins_altitude(pdn_aprs__dctx *c, const pdn_aprs__cbuf *cb, size_t fo
         return 0;
     pdn_aprs__lift_telemetry_dao(&copy, &scratch, dao);
     for (k = 0; k + 4 <= copy.n; k++) {
-        if (A_B91(copy.b[k]) && A_B91(copy.b[k + 1]) && A_B91(copy.b[k + 2]) && copy.b[k + 3] == '}')
-            return found >= cb->n || memcmp(copy.b + k, cb->b + found, 4) != 0;
+        int g;
+        if (!(A_B91(copy.b[k]) && A_B91(copy.b[k + 1]) && A_B91(copy.b[k + 2]) && copy.b[k + 3] == '}'))
+            continue;
+        for (g = 0; g < copy.gaps; g++)
+            if (k < copy.gap[g] && copy.gap[g] < k + 4)
+                return 1;
     }
     return 0;
 }
@@ -3190,7 +3206,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
             r->altitude_feet = (double)(pdn_aprs__b91(cb.b + k, 3) - 10000) * FEET_PER_METRE;
             pdn_aprs__cbuf_cut(&cb, k, 4);
             cb.cut = k + 1;
-        } else if (k + 4 <= cb.n && joins_altitude(c, &cb, k)) {
+        } else if (k + 4 <= cb.n && joins_altitude(c, &cb)) {
             /* a later altitude declined: left as text, lifting the !DAO!
                would make one that is not in the bytes. With no later
                altitude there is nothing to decline, and a strict decoder
