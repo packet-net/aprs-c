@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 (2026-11-10)
+
+This is the first stable release. The public API is now frozen under semantic versioning. From 1.0 the major and minor version are shared with aprs-vectors and the other four libraries: a ruling round is a minor version for all five, this library's own fixes are patch versions, and an API break is a major version.
 
 The 1.0 API cleanup: one consistent shape for every build call, one way to report a refusal, and a written compatibility promise. Breaking changes are listed first, with what to do about each.
 
