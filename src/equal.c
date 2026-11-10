@@ -274,7 +274,7 @@ PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_apr
                (!a->as.query.has_footprint ||
                 (num_eq(a->as.query.latitude, b->as.query.latitude) &&
                  num_eq(a->as.query.longitude, b->as.query.longitude) &&
-                 a->as.query.radius_miles == b->as.query.radius_miles));
+                 near(a->as.query.radius_miles, b->as.query.radius_miles, 0.51, 0, loose)));
     case PDN_APRS_TYPE_CAPABILITIES: {
         const pdn_aprs_capabilities *s = &a->as.capabilities, *t = &b->as.capabilities;
         if (s->count != t->count)

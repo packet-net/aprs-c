@@ -312,7 +312,7 @@ static void test_builders(void)
           strstr(line, ":>092345zNet Control"));
     CHECK(pdn_aprs_build_status(&me, "x", "092345h", line, sizeof line) == PDN_APRS_ERR_REFUSED);
     CHECK(pdn_aprs_build_telemetry(&me, "7", analog, "10000001", "hi", line, sizeof line) > 0 &&
-          strstr(line, ":T#7,1,2.5,3,4,5,10000001hi"));
+          strstr(line, ":T#7,001,2.5,003,004,005,10000001hi"));
     CHECK(pdn_aprs_build_telemetry_names(&me, "M0LTE-9", names, 3, line, sizeof line) > 0 &&
           strstr(line, "::M0LTE-9  :PARM.Volts,Temp,Door"));
     CHECK(pdn_aprs_build_telemetry_units(&me, "M0LTE-9", names, 3, line, sizeof line) > 0 &&

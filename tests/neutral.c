@@ -168,7 +168,7 @@ static void positioned(jval *o, const pdn_aprs_report *r)
         json_set(o, "compression", c);
     }
     if (r->has_course)
-        json_set(o, "course_degrees", json_int(r->course_degrees));
+        json_set(o, "course_degrees", json_num(r->course_degrees));
     if (r->has_speed)
         json_set(o, "speed_knots", json_num(r->speed_knots));
     if (r->has_altitude)
@@ -450,7 +450,7 @@ jval *neutral_data(const pdn_aprs_data *d, const pdn_aprs_decode_options *opt)
             jval *f = json_obj();
             json_set(f, "latitude", json_num(d->as.query.latitude));
             json_set(f, "longitude", json_num(d->as.query.longitude));
-            json_set(f, "radius_miles", json_int(d->as.query.radius_miles));
+            json_set(f, "radius_miles", json_num(d->as.query.radius_miles));
             json_set(o, "footprint", f);
         }
         break;
@@ -756,8 +756,7 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
         enum_in(cv, v, "origin", origin_names, 8, &e);
         r->compression.origin = (uint8_t)e;
     }
-    r->has_course = (uint8_t)int_in(cv, o, "course_degrees", 0, 65535, &n);
-    r->course_degrees = (uint16_t)n;
+    r->has_course = (uint8_t)num_in(cv, o, "course_degrees", &r->course_degrees);
     r->has_speed = (uint8_t)num_in(cv, o, "speed_knots", &r->speed_knots);
     r->has_altitude = (uint8_t)num_in(cv, o, "altitude_feet", &r->altitude_feet);
     if ((v = json_get(o, "phg")) != NULL) {
@@ -977,8 +976,14 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
     keys_only(cv, p, keys);
     if (cv->bad)
         return 0;
-    if (json_get(p, "diagnostics"))
-        return -1; /* a tolerated defect in the inner header is part of its data */
+    {
+        /* a tolerated defect in the inner packet is part of its data, but an
+           info is not a defect (ruling F10) */
+        const jval *dg = json_get(p, "diagnostics");
+        for (k = 0; dg && dg->t == J_ARR && k < dg->count; k++)
+            if (dg->items[k]->t != J_STR || strncmp(dg->items[k]->str, "info:", 5) != 0)
+                return -1;
+    }
     if (!data)
         return cannot(cv, "has no data", "packet");
     inner = (pdn_aprs_data *)malloc(sizeof *inner);
@@ -1240,8 +1245,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
             d->as.query.has_footprint = 1;
             num_in(cv, f, "latitude", &d->as.query.latitude);
             num_in(cv, f, "longitude", &d->as.query.longitude);
-            int_in(cv, f, "radius_miles", 0, 65535, &n);
-            d->as.query.radius_miles = (uint16_t)n;
+            num_in(cv, f, "radius_miles", &d->as.query.radius_miles);
         }
         break;
     }
