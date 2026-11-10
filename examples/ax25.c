@@ -16,6 +16,7 @@ int main(void)
     pdn_aprs_decode_options fussy = {.reject = {[PDN_APRS_CODE_NUL_PADDED_ADDRESS] = 1}};
     unsigned char out[330];
     pdn_aprs_station me = {.source = "M0LTE-7", .path = "WIDE2-1", .ax25 = 1};
+    pdn_aprs_status_args status = {.text = "On the air"};
     int n, i;
 
     pdn_aprs_decode_ax25(frame, sizeof frame, NULL, &p);
@@ -29,7 +30,7 @@ int main(void)
     n = pdn_aprs_decode_ax25(frame, sizeof frame, &fussy, &p);
     printf("rejecting only NUL padding: %s\n", n == PDN_APRS_ERR_HEADER ? "header rejected" : "accepted");
 
-    n = pdn_aprs_build_status(&me, "On the air", NULL, out, sizeof out);
+    n = pdn_aprs_build_status(&me, &status, out, sizeof out, NULL);
     printf("built a %d-byte frame:", n);
     for (i = 0; i < n; i++)
         printf(" %02X", out[i]);

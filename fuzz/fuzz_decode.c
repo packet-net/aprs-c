@@ -47,7 +47,7 @@ static void check_encoding(const pdn_aprs_packet *p, const pdn_aprs_decode_optio
         memcpy(h.destination, enc.destination, sizeof h.destination);
     /* text received as Latin-1 is written back as UTF-8, so what was
        written may be longer than the decoder takes off the air */
-    rc = pdn_aprs_decode_written(&h, buf, (size_t)n, o, &again);
+    rc = pdn_aprs_decode_info_unbounded(&h, buf, (size_t)n, o, &again);
     require(rc == PDN_APRS_OK);
     require(again.data.type == p->data.type);
     for (i = 0; i < again.diagnostic_count; i++)

@@ -7,6 +7,5 @@ Name: pdn_aprs
 Description: APRS encoder and decoder in C99
 URL: https://github.com/packet-net/aprs-c
 Version: @PROJECT_VERSION@
-Libs: -L${libdir} -lpdn_aprs
-Libs.private: @PDN_APRS_PC_LIBS@
+Libs: -L${libdir} -lpdn_aprs @PDN_APRS_PC_LIBS@
 Cflags: -I${includedir}

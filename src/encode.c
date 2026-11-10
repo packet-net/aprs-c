@@ -288,9 +288,9 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
     pdn_aprs__putc(e->b, r->symbol.code);
     if (weather) {
         const pdn_aprs_weather *w = &r->weather;
-        if (w->has[PDN_APRS_WX_WIND_DIRECTION] && w->has[PDN_APRS_WX_WIND_SPEED] &&
-            !(r->has_compression && r->compression.source == PDN_APRS_NMEA_GGA)) {
-            double dir = w->value[PDN_APRS_WX_WIND_DIRECTION], mph = w->value[PDN_APRS_WX_WIND_SPEED];
+        if (w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] && w->has[PDN_APRS_WX_WIND_SPEED_MPH] &&
+            !(r->has_compression && r->compression.source == PDN_APRS_SOURCE_GGA)) {
+            double dir = w->value[PDN_APRS_WX_WIND_DIRECTION_DEGREES], mph = w->value[PDN_APRS_WX_WIND_SPEED_MPH];
             long c, s;
             /* rounded to the nearest 4 degrees; 360 is north, c = 0 */
             if (!finite_number(dir) || pdn_aprs__round(dir) < 0 || pdn_aprs__round(dir) > 360)
@@ -302,7 +302,7 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
             pdn_aprs__putc(e->b, (int)(33 + c));
             pdn_aprs__putc(e->b, (int)(33 + s));
             pdn_aprs__putc(e->b, t_byte(r));
-        } else if (r->has_compression && r->compression.source == PDN_APRS_NMEA_GGA && r->has_altitude) {
+        } else if (r->has_compression && r->compression.source == PDN_APRS_SOURCE_GGA && r->has_altitude) {
             put_gga_altitude(e->b, r->altitude_feet, alt_in_cs);
             pdn_aprs__putc(e->b, t_byte(r));
         } else if (r->has_range && cs_range_step(r->range_miles) >= 0) {
@@ -316,7 +316,7 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         } else {
             pdn_aprs__puts(e->b, " sT");
         }
-    } else if (r->has_compression && r->compression.source == PDN_APRS_NMEA_GGA) {
+    } else if (r->has_compression && r->compression.source == PDN_APRS_SOURCE_GGA) {
         if (!r->has_altitude)
             return pdn_aprs__refuse(e, "a GGA compressed position needs an altitude");
         put_gga_altitude(e->b, r->altitude_feet, alt_in_cs);
@@ -683,7 +683,7 @@ static int put_wx_field(pdn_aprs__ectx *e, char letter, const pdn_aprs_weather *
         }
         return 1;
     }
-    if (letter == 's' && idx == PDN_APRS_WX_SNOW_24H) {
+    if (letter == 's' && idx == PDN_APRS_WX_SNOW_24H_IN) {
         /* snowfall: exactly three characters, a decimal point where the
            value needs one: a whole number as three digits (002), under 1 as
            . and two digits (.50, .32), and otherwise a digit, . and a digit
@@ -744,26 +744,26 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const p
 {
     int i;
     if (positionless) {
-        if (!put_wx_field(e, 'c', w, PDN_APRS_WX_WIND_DIRECTION, 1) ||
-            !put_wx_field(e, 's', w, PDN_APRS_WX_WIND_SPEED, 1))
+        if (!put_wx_field(e, 'c', w, PDN_APRS_WX_WIND_DIRECTION_DEGREES, 1) ||
+            !put_wx_field(e, 's', w, PDN_APRS_WX_WIND_SPEED_MPH, 1))
             return 0;
     }
-    if (!put_wx_field(e, 'g', w, PDN_APRS_WX_WIND_GUST, 1) || !put_wx_field(e, 't', w, PDN_APRS_WX_TEMPERATURE, 1) ||
-        !put_wx_field(e, 'r', w, PDN_APRS_WX_RAIN_1H, 0) || !put_wx_field(e, 'p', w, PDN_APRS_WX_RAIN_24H, 0) ||
-        !put_wx_field(e, 'P', w, PDN_APRS_WX_RAIN_MIDNIGHT, 0) || !put_wx_field(e, 'h', w, PDN_APRS_WX_HUMIDITY, 0) ||
-        !put_wx_field(e, 'b', w, PDN_APRS_WX_PRESSURE, 0))
+    if (!put_wx_field(e, 'g', w, PDN_APRS_WX_WIND_GUST_MPH, 1) || !put_wx_field(e, 't', w, PDN_APRS_WX_TEMPERATURE_F, 1) ||
+        !put_wx_field(e, 'r', w, PDN_APRS_WX_RAIN_1H_IN, 0) || !put_wx_field(e, 'p', w, PDN_APRS_WX_RAIN_24H_IN, 0) ||
+        !put_wx_field(e, 'P', w, PDN_APRS_WX_RAIN_MIDNIGHT_IN, 0) || !put_wx_field(e, 'h', w, PDN_APRS_WX_HUMIDITY_PERCENT, 0) ||
+        !put_wx_field(e, 'b', w, PDN_APRS_WX_PRESSURE_MBAR, 0))
         return 0;
-    if (w->has[PDN_APRS_WX_LUMINOSITY]) {
-        if (pdn_aprs__round(w->value[PDN_APRS_WX_LUMINOSITY]) >= 1000) {
-            if (!put_wx_field(e, 'l', w, PDN_APRS_WX_LUMINOSITY, 0))
+    if (w->has[PDN_APRS_WX_LUMINOSITY_W_M2]) {
+        if (pdn_aprs__round(w->value[PDN_APRS_WX_LUMINOSITY_W_M2]) >= 1000) {
+            if (!put_wx_field(e, 'l', w, PDN_APRS_WX_LUMINOSITY_W_M2, 0))
                 return 0;
-        } else if (!put_wx_field(e, 'L', w, PDN_APRS_WX_LUMINOSITY, 0)) {
+        } else if (!put_wx_field(e, 'L', w, PDN_APRS_WX_LUMINOSITY_W_M2, 0)) {
             return 0;
         }
     }
-    if (w->has[PDN_APRS_WX_SNOW_24H]) {
+    if (w->has[PDN_APRS_WX_SNOW_24H_IN]) {
         /* after the wind speed, which is always written, s is snowfall */
-        if (!put_wx_field(e, 's', w, PDN_APRS_WX_SNOW_24H, 0))
+        if (!put_wx_field(e, 's', w, PDN_APRS_WX_SNOW_24H_IN, 0))
             return 0;
     }
     if (!put_wx_field(e, '#', w, PDN_APRS_WX_RAIN_RAW, 0))
@@ -845,7 +845,7 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         const pdn_aprs_weather *w = &r->weather;
         /* a GGA altitude the cs bytes do not hold exactly has no /A= here,
            which has no comment: the nearest cs value alone (ruling F14) */
-        int gga_in_cs = r->compressed && r->has_compression && r->compression.source == PDN_APRS_NMEA_GGA;
+        int gga_in_cs = r->compressed && r->has_compression && r->compression.source == PDN_APRS_SOURCE_GGA;
         if (r->comment_len)
             return pdn_aprs__refuse(e, "a weather report has no comment");
         if (r->has_telemetry)
@@ -855,8 +855,8 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
             (r->has_altitude && !alt_in_cs && !gga_in_cs) || r->has_frequency || r->signpost[0])
             return pdn_aprs__refuse(e, "a weather report has no room for this data");
         if (!r->compressed) {
-            int dh = w->has[PDN_APRS_WX_WIND_DIRECTION], sh = w->has[PDN_APRS_WX_WIND_SPEED];
-            double dv = w->value[PDN_APRS_WX_WIND_DIRECTION], sv = w->value[PDN_APRS_WX_WIND_SPEED];
+            int dh = w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES], sh = w->has[PDN_APRS_WX_WIND_SPEED_MPH];
+            double dv = w->value[PDN_APRS_WX_WIND_DIRECTION_DEGREES], sv = w->value[PDN_APRS_WX_WIND_SPEED_MPH];
             if ((dh && (!finite_number(dv) || pdn_aprs__round(dv) < 0 || pdn_aprs__round(dv) > 360)) ||
                 (sh && (!finite_number(sv) || pdn_aprs__round(sv) < 0 || pdn_aprs__round(sv) > 999)))
                 return pdn_aprs__refuse(e, "wind out of range");
@@ -869,8 +869,8 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
                 pdn_aprs__putu(e->b, (unsigned long)pdn_aprs__round(sv), 3);
             else
                 pdn_aprs__puts(e->b, "...");
-        } else if (!(w->has[PDN_APRS_WX_WIND_DIRECTION] && w->has[PDN_APRS_WX_WIND_SPEED]) &&
-                   (w->has[PDN_APRS_WX_WIND_DIRECTION] || w->has[PDN_APRS_WX_WIND_SPEED])) {
+        } else if (!(w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] && w->has[PDN_APRS_WX_WIND_SPEED_MPH]) &&
+                   (w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] || w->has[PDN_APRS_WX_WIND_SPEED_MPH])) {
             return pdn_aprs__refuse(e, "a compressed weather report needs both wind direction and speed");
         }
         if (!pdn_aprs__encode_weather_fields(e, w, 0))
@@ -1178,7 +1178,7 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     {
         int alt_b91 = 0, at_ext = 0, ext_counts = 0;
         long v = 0;
-        if (r->has_altitude && !(e->flags & PDN_APRS__ENC_MIC_E_FEET) && finite_number(r->altitude_feet) &&
+        if (r->has_altitude && !r->altitude_in_comment && finite_number(r->altitude_feet) &&
             fabs(r->altitude_feet) < 1e9) {
             double back;
             v = (long)pdn_aprs__round(r->altitude_feet * 0.3048 + 10000.0);
@@ -1566,8 +1566,8 @@ static int encode_status(pdn_aprs__ectx *e, const pdn_aprs_status *s)
     pdn_aprs__put(e->b, s->text, s->text_len);
     if (s->has_beam) {
         pdn_aprs__putc(e->b, '^');
-        pdn_aprs__putc(e->b, s->beam_heading);
-        pdn_aprs__putc(e->b, s->beam_power);
+        pdn_aprs__putc(e->b, s->beam_heading_code);
+        pdn_aprs__putc(e->b, s->beam_power_code);
     }
     return 1;
 }
@@ -1844,7 +1844,7 @@ static int reads_back(const pdn_aprs_data *d, const uint8_t *info, size_t n, con
             o.devices = &table;
         }
     }
-    if (pdn_aprs_decode_written(&h, info, n, &o, &p) != PDN_APRS_OK)
+    if (pdn_aprs_decode_info_unbounded(&h, info, n, &o, &p) != PDN_APRS_OK)
         return 0;
     for (i = 0; i < p.diagnostic_count; i++)
         if (p.diagnostics[i].severity != PDN_APRS_SEVERITY_INFO)
@@ -1853,7 +1853,7 @@ static int reads_back(const pdn_aprs_data *d, const uint8_t *info, size_t n, con
 }
 
 static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf, size_t cap,
-                       pdn_aprs_encoded *encoded, int flags)
+                       pdn_aprs_encoded *encoded)
 {
     pdn_aprs__buf b;
     pdn_aprs__ectx e;
@@ -1873,7 +1873,6 @@ static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options 
         pdn_aprs__buf_init(&b, buf, cap);
         e.b = &b;
         e.variant = variant;
-        e.flags = flags;
         ok = pdn_aprs__encode_data(&e, data);
         if (!ok)
             break;
@@ -1903,7 +1902,7 @@ static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options 
 int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf, size_t cap,
                          pdn_aprs_encoded *encoded)
 {
-    return encode_info(data, options, buf, cap, encoded, 0);
+    return encode_info(data, options, buf, cap, encoded);
 }
 
 /* Room for any header: every address and a separator or two, or seven
@@ -1912,7 +1911,7 @@ int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_option
 
 PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *data,
                                               const pdn_aprs_encode_options *options, void *buf, size_t cap,
-                                              pdn_aprs_encoded *encoded, int ax25, int flags)
+                                              pdn_aprs_encoded *encoded, int ax25)
 {
     uint8_t head[HEADER_ROOM];
     uint8_t *out = (uint8_t *)buf;
@@ -1927,7 +1926,7 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
     /* the information field first, at the start of buf, then moved along
        to make room for the header, which for Mic-E carries what the encoder
        computed */
-    n = encode_info(data, options, buf, cap, encoded, flags);
+    n = encode_info(data, options, buf, cap, encoded);
     if (n < 0)
         return n;
     dest = data->type == PDN_APRS_TYPE_MIC_E ? encoded->destination : header->destination;
@@ -1948,11 +1947,91 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
 int pdn_aprs_encode_tnc2(const pdn_aprs_header *header, const pdn_aprs_data *data,
                          const pdn_aprs_encode_options *options, char *buf, size_t cap, pdn_aprs_encoded *encoded)
 {
-    return pdn_aprs__encode_packet(header, data, options, buf, cap, encoded, 0, 0);
+    return pdn_aprs__encode_packet(header, data, options, buf, cap, encoded, 0);
 }
 
 int pdn_aprs_encode_ax25(const pdn_aprs_header *header, const pdn_aprs_data *data,
                          const pdn_aprs_encode_options *options, void *buf, size_t cap, pdn_aprs_encoded *encoded)
 {
-    return pdn_aprs__encode_packet(header, data, options, buf, cap, encoded, 1, 0);
+    return pdn_aprs__encode_packet(header, data, options, buf, cap, encoded, 1);
+}
+
+/* ---- a decoded packet written back as received ---- */
+
+static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int ax25)
+{
+    uint8_t head[HEADER_ROOM];
+    uint8_t *out = (uint8_t *)buf;
+    pdn_aprs__buf hb;
+    int rc;
+    if (!p || (!buf && cap))
+        return PDN_APRS_ERR_ARGUMENT;
+    if (!p->header_ok)
+        return PDN_APRS_ERR_HEADER;
+    if (p->info_len > sizeof p->info)
+        return PDN_APRS_ERR_ARGUMENT;
+    pdn_aprs__buf_init(&hb, head, sizeof head);
+    if (ax25) {
+        rc = pdn_aprs__write_header_ax25(&hb, &p->header, p->header.destination);
+    } else {
+        /* a TNC2 line marks only the last entry that has been used */
+        pdn_aprs_header h = p->header;
+        unsigned i, last = 0;
+        for (i = 0; i < h.path_count && i < PDN_APRS_MAX_PATH; i++) {
+            if (h.path[i].used)
+                last = i + 1;
+            h.path[i].marked = 0;
+        }
+        if (last)
+            h.path[last - 1].marked = 1;
+        /* as received: the decoded strings, with no address check (the
+           lenient decoder accepts an empty destination, say) */
+        pdn_aprs__puts(&hb, h.source);
+        pdn_aprs__putc(&hb, '>');
+        pdn_aprs__puts(&hb, h.destination);
+        for (i = 0; i < h.path_count && i < PDN_APRS_MAX_PATH; i++) {
+            pdn_aprs__putc(&hb, ',');
+            pdn_aprs__puts(&hb, h.path[i].call);
+            if (h.path[i].marked)
+                pdn_aprs__putc(&hb, '*');
+        }
+        pdn_aprs__putc(&hb, ':');
+        rc = PDN_APRS_OK;
+    }
+    if (rc != PDN_APRS_OK)
+        return PDN_APRS_ERR_REFUSED;
+    if (hb.overflow || hb.len > cap || p->info_len > cap - hb.len)
+        return PDN_APRS_ERR_BUFFER;
+    memcpy(out, head, hb.len);
+    if (p->info_len)
+        memcpy(out + hb.len, p->info, p->info_len);
+    if (!ax25 && hb.len + p->info_len < cap)
+        out[hb.len + p->info_len] = 0;
+    return (int)(hb.len + p->info_len);
+}
+
+int pdn_aprs_write_tnc2(const pdn_aprs_packet *packet, char *buf, size_t cap)
+{
+    return write_received(packet, buf, cap, 0);
+}
+
+int pdn_aprs_write_ax25(const pdn_aprs_packet *packet, void *buf, size_t cap)
+{
+    return write_received(packet, buf, cap, 1);
+}
+
+int pdn_aprs_phg_values(const pdn_aprs_phg *phg, double *watts, double *height_feet, double *gain_db,
+                        int *directivity_degrees)
+{
+    if (!phg)
+        return 0;
+    if (watts)
+        *watts = (double)phg->power * (double)phg->power;
+    if (height_feet)
+        *height_feet = ldexp(10.0, phg->height);
+    if (gain_db)
+        *gain_db = (double)phg->gain;
+    if (directivity_degrees)
+        *directivity_degrees = phg->directivity == 0 ? -1 : phg->directivity * 45;
+    return 1;
 }

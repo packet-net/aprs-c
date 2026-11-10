@@ -404,7 +404,7 @@ static void check_decode_case(const jval *c, const char *id)
                     snprintf(h.destination, sizeof h.destination, "%s", enc.destination);
                 /* what the encoder writes may be longer than the decoder
                    takes off the air */
-                rc2 = pdn_aprs_decode_written(&h, buf, (size_t)n, &lenient, &pkt2);
+                rc2 = pdn_aprs_decode_info_unbounded(&h, buf, (size_t)n, &lenient, &pkt2);
                 again = neutral_result(&pkt2, rc2, &lenient);
                 d2 = json_get(again, "data");
                 eq = rounded || json_equal(d2, json_get(got, "data"));

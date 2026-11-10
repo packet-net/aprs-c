@@ -51,7 +51,7 @@ jobs:
           cmake -S consumer -B consumer/build -DCMAKE_PREFIX_PATH="$PWD/prefix"
           cmake --build consumer/build
           consumer/build/consumer
-          PKG_CONFIG_PATH="$PWD/prefix/lib/pkgconfig" ${{ matrix.cc }} consumer/main.c $(PKG_CONFIG_PATH="$PWD/prefix/lib/pkgconfig" pkg-config --cflags --libs --static pdn_aprs) -o consumer/pc
+          PKG_CONFIG_PATH="$PWD/prefix/lib/pkgconfig" ${{ matrix.cc }} consumer/main.c $(PKG_CONFIG_PATH="$PWD/prefix/lib/pkgconfig" pkg-config --cflags --libs pdn_aprs) -o consumer/pc
           consumer/pc
 
   sanitizers:

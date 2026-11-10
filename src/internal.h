@@ -122,7 +122,7 @@ PDN_APRS__PRIVATE size_t pdn_aprs__take_text(pdn_aprs__dctx *c, char *dst, size_
 PDN_APRS__PRIVATE size_t pdn_aprs__take(pdn_aprs__dctx *c, char *dst, size_t cap, const uint8_t *s, size_t n,
                                         int latin1);
 /* A part of the field is longer than the packet can hold, which only a field
-   longer than PDN_APRS_MAX_INFO can be (pdn_aprs_decode_written): decoding
+   longer than PDN_APRS_MAX_INFO can be (pdn_aprs_decode_info_unbounded): decoding
    stops, and the result is PDN_APRS_ERR_TOO_LONG. Returns 0. */
 PDN_APRS__PRIVATE int pdn_aprs__overflow(pdn_aprs__dctx *c);
 
@@ -234,16 +234,12 @@ typedef struct pdn_aprs__ectx {
     const char *reason;
     char dest[PDN_APRS_ADDR_SIZE];
     int variant; /* 1: put a / before any comment, 2: a space */
-    int flags;   /* PDN_APRS__ENC_ */
 } pdn_aprs__ectx;
 
-/* Encoder flags the builder sets: a Mic-E altitude goes in a /A=, never in
-   the Mic-E altitude bytes (the program gave it in feet, ruling B2). */
-#define PDN_APRS__ENC_MIC_E_FEET 1
-/* pdn_aprs_encode_tnc2 or pdn_aprs_encode_ax25 (ax25 nonzero) with flags. */
+/* pdn_aprs_encode_tnc2 or pdn_aprs_encode_ax25 (ax25 nonzero). */
 PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *data,
                                               const pdn_aprs_encode_options *options, void *buf, size_t cap,
-                                              pdn_aprs_encoded *encoded, int ax25, int flags);
+                                              pdn_aprs_encoded *encoded, int ax25);
 
 PDN_APRS__PRIVATE int pdn_aprs__refuse(pdn_aprs__ectx *e, const char *why);
 PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_data *d);

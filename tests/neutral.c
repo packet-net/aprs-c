@@ -384,9 +384,9 @@ jval *neutral_data(const pdn_aprs_data *d, const pdn_aprs_decode_options *opt)
             jval *b = json_obj();
             char t[2];
             t[1] = 0;
-            t[0] = s->beam_heading;
+            t[0] = s->beam_heading_code;
             json_set(b, "heading_code", json_str(t));
-            t[0] = s->beam_power;
+            t[0] = s->beam_power_code;
             json_set(b, "power_code", json_str(t));
             json_set(o, "beam", b);
         }
@@ -1156,8 +1156,8 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
             static const char *const bk[] = {"heading_code", "power_code", NULL};
             keys_only(cv, b, bk);
             s->has_beam = 1;
-            char_in(cv, b, "heading_code", &s->beam_heading);
-            char_in(cv, b, "power_code", &s->beam_power);
+            char_in(cv, b, "heading_code", &s->beam_heading_code);
+            char_in(cv, b, "power_code", &s->beam_power_code);
         }
         str_in(cv, j, "text", s->text, sizeof s->text, &s->text_len);
         break;

@@ -21,9 +21,26 @@
  *    the input, so it may be copied and the input buffer reused.
  *  - Nothing is locale-dependent.
  *  - Public names start pdn_aprs_ / PDN_APRS_.
+ *
+ * What 1.x promises: source compatibility only. Struct sizes depend on the
+ * capacities below (which a program may override with -D), and 1.x may add a
+ * field to any struct, so rebuild everything that includes this header when
+ * you upgrade, and link the library statically or compile in the single file
+ * dist/pdn_aprs.c. Zero-initialise every input struct ("= {0}" or a
+ * designated initializer): a field added later means "absent" when zero.
  */
 #ifndef PDN_APRS_H
 #define PDN_APRS_H
+
+/* Marks the public functions, so a library built from the sources with hidden
+   visibility (the CMake default) still exports exactly these. */
+#ifndef PDN_APRS_API
+#if defined(__GNUC__) || defined(__clang__)
+#define PDN_APRS_API __attribute__((visibility("default")))
+#else
+#define PDN_APRS_API
+#endif
+#endif
 
 #include <stddef.h>
 #include <stdint.h>
@@ -38,7 +55,7 @@ extern "C" {
 #define PDN_APRS_VERSION "0.3.0"
 
 /* The version of the library that was compiled, as "MAJOR.MINOR.PATCH". */
-const char *pdn_aprs_version(void);
+PDN_APRS_API const char *pdn_aprs_version(void);
 
 /* ------------------------------------------------------------------------ */
 /* Capacities                                                               */
@@ -71,6 +88,9 @@ const char *pdn_aprs_version(void);
 #ifndef PDN_APRS_MAX_PATH
 #define PDN_APRS_MAX_PATH 16
 #endif
+/* The room reject[] in the decode options has for diagnostic codes: fixed, so
+   that adding a code never changes the struct. */
+#define PDN_APRS_MAX_CODES 128
 /* The most diagnostics kept for one packet; any beyond are dropped. */
 #define PDN_APRS_MAX_DIAGNOSTICS 24
 /* Base-91 comment telemetry and telemetry reports carry up to 5 analog
@@ -95,9 +115,10 @@ const char *pdn_aprs_version(void);
 #define PDN_APRS_ERR_TOO_LONG (-3) /* the information field is longer than PDN_APRS_MAX_INFO */
 #define PDN_APRS_ERR_BUFFER (-4)   /* the output buffer is too small */
 #define PDN_APRS_ERR_REFUSED (-5)  /* the encoder refuses: APRS does not allow writing this data */
+#define PDN_APRS_ERR_UNSUPPORTED (-6) /* APRS allows it, but it does not fit this library's fixed buffers */
 
 /* A short plain-ASCII description of a result code. */
-const char *pdn_aprs_strerror(int result);
+PDN_APRS_API const char *pdn_aprs_strerror(int result);
 
 /* ------------------------------------------------------------------------ */
 /* Diagnostics                                                              */
@@ -186,13 +207,13 @@ typedef struct pdn_aprs_diagnostic {
 } pdn_aprs_diagnostic;
 
 /* The vectors' id for a code ("trailing-line-break"), or NULL if out of range. */
-const char *pdn_aprs_code_name(int code);
+PDN_APRS_API const char *pdn_aprs_code_name(int code);
 /* The code for a vectors' id, or PDN_APRS_CODE_NONE. */
-int pdn_aprs_code_from_name(const char *name, size_t len);
+PDN_APRS_API int pdn_aprs_code_from_name(const char *name, size_t len);
 /* 1 if a lenient decoder may tolerate the code with a warning. */
-int pdn_aprs_code_tolerable(int code);
+PDN_APRS_API int pdn_aprs_code_tolerable(int code);
 /* "info", "warning" or "error". */
-const char *pdn_aprs_severity_name(int severity);
+PDN_APRS_API const char *pdn_aprs_severity_name(int severity);
 
 /* ------------------------------------------------------------------------ */
 /* Symbols                                                                  */
@@ -208,16 +229,16 @@ typedef struct pdn_aprs_symbol {
 /* The description from the APRS symbol tables ("Car"), or NULL if the
    symbol is not one the tables define. An overlay reads as the alternate
    table. */
-const char *pdn_aprs_symbol_description(pdn_aprs_symbol symbol);
+PDN_APRS_API const char *pdn_aprs_symbol_description(pdn_aprs_symbol symbol);
 /* The symbol's name in the named-symbol list ("CAR" for PDN_APRS_SYMBOL_CAR),
    or NULL. */
-const char *pdn_aprs_symbol_name(pdn_aprs_symbol symbol);
+PDN_APRS_API const char *pdn_aprs_symbol_name(pdn_aprs_symbol symbol);
 /* Places an overlay character (0-9 or A-Z) on an alternate-table symbol,
    returning 1 and setting *out; returns 0 if the overlay is not 0-9 or A-Z
    or the symbol is not on the alternate table (or already overlaid). */
-int pdn_aprs_symbol_overlay(pdn_aprs_symbol symbol, char overlay, pdn_aprs_symbol *out);
+PDN_APRS_API int pdn_aprs_symbol_overlay(pdn_aprs_symbol symbol, char overlay, pdn_aprs_symbol *out);
 /* Builds a symbol from its table and code characters. */
-pdn_aprs_symbol pdn_aprs_symbol_make(char table, char code);
+PDN_APRS_API pdn_aprs_symbol pdn_aprs_symbol_make(char table, char code);
 
 /* Every symbol the tables define, by name, as an initializer:
    pdn_aprs_symbol car = PDN_APRS_SYMBOL_CAR; or .symbol = PDN_APRS_SYMBOL_CAR */
@@ -442,14 +463,14 @@ typedef enum pdn_aprs_type {
 } pdn_aprs_type;
 
 /* The vectors' name for a type ("mic-e"), or NULL. */
-const char *pdn_aprs_type_name(int type);
+PDN_APRS_API const char *pdn_aprs_type_name(int type);
 
-typedef enum pdn_aprs_reason {
-    PDN_APRS_REASON_EMPTY = 0,          /* an empty information field */
-    PDN_APRS_REASON_NOT_APRS,           /* the first byte is not a data type identifier */
-    PDN_APRS_REASON_RESERVED_DATA_TYPE, /* &, + or . */
-    PDN_APRS_REASON_MALFORMED           /* an error stopped decoding; see the diagnostics */
-} pdn_aprs_reason;
+typedef enum pdn_aprs_unrecognized_reason {
+    PDN_APRS_UNRECOGNIZED_EMPTY = 0,          /* an empty information field */
+    PDN_APRS_UNRECOGNIZED_NOT_APRS,           /* the first byte is not a data type identifier */
+    PDN_APRS_UNRECOGNIZED_RESERVED_DATA_TYPE, /* &, + or . */
+    PDN_APRS_UNRECOGNIZED_MALFORMED           /* an error stopped decoding; see the diagnostics */
+} pdn_aprs_unrecognized_reason;
 
 typedef enum pdn_aprs_mic_e_message {
     PDN_APRS_MIC_E_OFF_DUTY = 0, /* M0 */
@@ -472,24 +493,31 @@ typedef enum pdn_aprs_mic_e_message {
 
 /* Compressed position type byte (APRS12c ch. 9). */
 typedef struct pdn_aprs_compression {
-    uint8_t fix;    /* PDN_APRS_FIX_OLD, PDN_APRS_FIX_CURRENT */
-    uint8_t source; /* PDN_APRS_NMEA_OTHER, _GLL, _GGA, _RMC */
-    uint8_t origin; /* PDN_APRS_ORIGIN_* (0-7) */
+    uint8_t fix;    /* pdn_aprs_fix */
+    uint8_t source; /* pdn_aprs_source */
+    uint8_t origin; /* pdn_aprs_origin */
 } pdn_aprs_compression;
-#define PDN_APRS_FIX_OLD 0
-#define PDN_APRS_FIX_CURRENT 1
-#define PDN_APRS_NMEA_OTHER 0
-#define PDN_APRS_NMEA_GLL 1
-#define PDN_APRS_NMEA_GGA 2
-#define PDN_APRS_NMEA_RMC 3
-#define PDN_APRS_ORIGIN_COMPRESSED 0
-#define PDN_APRS_ORIGIN_TNC_BEACON_TEXT 1
-#define PDN_APRS_ORIGIN_SOFTWARE 2
-#define PDN_APRS_ORIGIN_RESERVED3 3
-#define PDN_APRS_ORIGIN_KPC3 4
-#define PDN_APRS_ORIGIN_PICO 5
-#define PDN_APRS_ORIGIN_OTHER_TRACKER 6
-#define PDN_APRS_ORIGIN_DIGIPEATER_CONVERSION 7
+typedef enum pdn_aprs_fix {
+    PDN_APRS_FIX_OLD = 0,
+    PDN_APRS_FIX_CURRENT = 1
+} pdn_aprs_fix;
+/* Which NMEA sentence the compressed position came from. */
+typedef enum pdn_aprs_source {
+    PDN_APRS_SOURCE_OTHER = 0,
+    PDN_APRS_SOURCE_GLL = 1,
+    PDN_APRS_SOURCE_GGA = 2,
+    PDN_APRS_SOURCE_RMC = 3
+} pdn_aprs_source;
+typedef enum pdn_aprs_origin {
+    PDN_APRS_ORIGIN_COMPRESSED = 0,
+    PDN_APRS_ORIGIN_TNC_BEACON_TEXT = 1,
+    PDN_APRS_ORIGIN_SOFTWARE = 2,
+    PDN_APRS_ORIGIN_RESERVED3 = 3,
+    PDN_APRS_ORIGIN_KPC3 = 4,
+    PDN_APRS_ORIGIN_PICO = 5,
+    PDN_APRS_ORIGIN_OTHER_TRACKER = 6,
+    PDN_APRS_ORIGIN_DIGIPEATER_CONVERSION = 7
+} pdn_aprs_origin;
 
 /* Power, height, gain, directivity: codes as sent (APRS12c ch. 7). */
 typedef struct pdn_aprs_phg {
@@ -507,25 +535,44 @@ typedef struct pdn_aprs_dfs {
 
 /* Area object (APRS12c ch. 11). */
 typedef struct pdn_aprs_area {
-    uint8_t shape;      /* PDN_APRS_AREA_* 0-9 */
-    uint8_t color;      /* PDN_APRS_COLOR_* 0-15 */
+    uint8_t shape;      /* pdn_aprs_area_shape */
+    uint8_t color;      /* pdn_aprs_color */
     uint8_t lat_offset; /* yy, as sent */
     uint8_t lon_offset; /* xx, as sent */
     uint8_t has_corridor;
     uint16_t corridor_width_miles; /* {nnn} after a line */
 } pdn_aprs_area;
-#define PDN_APRS_AREA_OPEN_CIRCLE 0
-#define PDN_APRS_AREA_LINE_DOWN_RIGHT 1
-#define PDN_APRS_AREA_OPEN_ELLIPSE 2
-#define PDN_APRS_AREA_OPEN_TRIANGLE 3
-#define PDN_APRS_AREA_OPEN_BOX 4
-#define PDN_APRS_AREA_FILLED_CIRCLE 5
-#define PDN_APRS_AREA_LINE_DOWN_LEFT 6
-#define PDN_APRS_AREA_FILLED_ELLIPSE 7
-#define PDN_APRS_AREA_FILLED_TRIANGLE 8
-#define PDN_APRS_AREA_FILLED_BOX 9
-/* Colors 0-7 are high intensity (black, blue, green, cyan, red, violet,
-   yellow, gray); 8-15 the same at low intensity. */
+typedef enum pdn_aprs_area_shape {
+    PDN_APRS_AREA_OPEN_CIRCLE = 0,
+    PDN_APRS_AREA_LINE_DOWN_RIGHT = 1,
+    PDN_APRS_AREA_OPEN_ELLIPSE = 2,
+    PDN_APRS_AREA_OPEN_TRIANGLE = 3,
+    PDN_APRS_AREA_OPEN_BOX = 4,
+    PDN_APRS_AREA_FILLED_CIRCLE = 5,
+    PDN_APRS_AREA_LINE_DOWN_LEFT = 6,
+    PDN_APRS_AREA_FILLED_ELLIPSE = 7,
+    PDN_APRS_AREA_FILLED_TRIANGLE = 8,
+    PDN_APRS_AREA_FILLED_BOX = 9
+} pdn_aprs_area_shape;
+/* Colors 0-7 are high intensity, 8-15 the same at low intensity. */
+typedef enum pdn_aprs_color {
+    PDN_APRS_COLOR_BLACK = 0,
+    PDN_APRS_COLOR_BLUE = 1,
+    PDN_APRS_COLOR_GREEN = 2,
+    PDN_APRS_COLOR_CYAN = 3,
+    PDN_APRS_COLOR_RED = 4,
+    PDN_APRS_COLOR_VIOLET = 5,
+    PDN_APRS_COLOR_YELLOW = 6,
+    PDN_APRS_COLOR_GRAY = 7,
+    PDN_APRS_COLOR_BLACK_LOW = 8,
+    PDN_APRS_COLOR_BLUE_LOW = 9,
+    PDN_APRS_COLOR_GREEN_LOW = 10,
+    PDN_APRS_COLOR_CYAN_LOW = 11,
+    PDN_APRS_COLOR_RED_LOW = 12,
+    PDN_APRS_COLOR_VIOLET_LOW = 13,
+    PDN_APRS_COLOR_YELLOW_LOW = 14,
+    PDN_APRS_COLOR_GRAY_LOW = 15
+} pdn_aprs_color;
 
 /* DF report bearing and number/range/quality (APRS12c ch. 7). */
 typedef struct pdn_aprs_df_bearing {
@@ -535,7 +582,7 @@ typedef struct pdn_aprs_df_bearing {
 
 /* Storm data (APRS12c ch. 12). */
 typedef struct pdn_aprs_storm {
-    uint8_t type; /* PDN_APRS_STORM_* */
+    uint8_t type; /* pdn_aprs_storm_type */
     uint16_t sustained_wind_knots;
     uint16_t gust_knots;
     uint16_t central_pressure_mbar;
@@ -544,20 +591,24 @@ typedef struct pdn_aprs_storm {
     uint8_t has_whole_gale_radius;
     uint16_t whole_gale_radius_nm;
 } pdn_aprs_storm;
-#define PDN_APRS_STORM_TROPICAL_STORM 0 /* TS */
-#define PDN_APRS_STORM_HURRICANE 1      /* HC */
-#define PDN_APRS_STORM_TROPICAL_DEPRESSION 2 /* TD */
+typedef enum pdn_aprs_storm_type {
+    PDN_APRS_STORM_TROPICAL_STORM = 0,      /* TS */
+    PDN_APRS_STORM_HURRICANE = 1,           /* HC */
+    PDN_APRS_STORM_TROPICAL_DEPRESSION = 2  /* TD */
+} pdn_aprs_storm_type;
 
 /* !DAO! datum and precision. */
 typedef struct pdn_aprs_dao {
     /* 'W' for WGS84, as sent (upper case); or a digit 0-9, a locally
        defined datum, which carries no added precision */
     char datum;
-    uint8_t precision; /* PDN_APRS_DAO_* */
+    uint8_t precision; /* pdn_aprs_dao_precision */
 } pdn_aprs_dao;
-#define PDN_APRS_DAO_NONE 0
-#define PDN_APRS_DAO_THOUSANDTHS 1
-#define PDN_APRS_DAO_BASE91 2
+typedef enum pdn_aprs_dao_precision {
+    PDN_APRS_DAO_NONE = 0,
+    PDN_APRS_DAO_THOUSANDTHS = 1,
+    PDN_APRS_DAO_BASE91 = 2
+} pdn_aprs_dao_precision;
 
 /* Base-91 comment telemetry |ss1122...| (APRS12c ch. 13). */
 typedef struct pdn_aprs_comment_telemetry {
@@ -573,7 +624,7 @@ typedef struct pdn_aprs_comment_telemetry {
 /* APRS 1.2 voice frequency (APRS12c ch. 18). */
 typedef struct pdn_aprs_frequency {
     double mhz;
-    uint8_t tone;        /* PDN_APRS_TONE_* */
+    uint8_t tone;        /* pdn_aprs_tone */
     uint16_t tone_value; /* for TONE, CTCSS and DCS */
     uint8_t has_offset;
     int16_t offset_khz;
@@ -583,31 +634,33 @@ typedef struct pdn_aprs_frequency {
     uint8_t narrow;       /* lower-case tone letter: narrow modulation */
     uint8_t ten_khz_resolution; /* "146.52 MHz": the frequency to 10 kHz */
 } pdn_aprs_frequency;
-#define PDN_APRS_TONE_NONE 0
-#define PDN_APRS_TONE_OFF 1
-#define PDN_APRS_TONE_TONE 2
-#define PDN_APRS_TONE_CTCSS 3
-#define PDN_APRS_TONE_DCS 4
-#define PDN_APRS_TONE_BURST 5 /* 1750 Hz tone burst */
+typedef enum pdn_aprs_tone {
+    PDN_APRS_TONE_NONE = 0,
+    PDN_APRS_TONE_OFF = 1,
+    PDN_APRS_TONE_TONE = 2,
+    PDN_APRS_TONE_CTCSS = 3,
+    PDN_APRS_TONE_DCS = 4,
+    PDN_APRS_TONE_BURST = 5 /* 1750 Hz tone burst */
+} pdn_aprs_tone;
 
-/* Weather values, indexed by PDN_APRS_WX_*. Units are as APRS sends them;
-   nothing is converted except a compressed position's cs-byte wind speed,
-   which is knots on air and given here in mph. */
-enum {
-    PDN_APRS_WX_WIND_DIRECTION = 0, /* degrees */
-    PDN_APRS_WX_WIND_SPEED,         /* mph */
-    PDN_APRS_WX_WIND_GUST,          /* mph */
-    PDN_APRS_WX_TEMPERATURE,        /* degrees F */
-    PDN_APRS_WX_RAIN_1H,            /* inches */
-    PDN_APRS_WX_RAIN_24H,           /* inches */
-    PDN_APRS_WX_RAIN_MIDNIGHT,      /* inches */
-    PDN_APRS_WX_HUMIDITY,           /* percent */
-    PDN_APRS_WX_PRESSURE,           /* millibars */
-    PDN_APRS_WX_LUMINOSITY,         /* watts per square metre */
-    PDN_APRS_WX_SNOW_24H,           /* inches */
-    PDN_APRS_WX_RAIN_RAW,           /* raw rain counter */
+/* Weather values, indexed by PDN_APRS_WX_*, each named for its unit. Units are
+   as APRS sends them; nothing is converted except a compressed position's
+   cs-byte wind speed, which is knots on air and given here in mph. */
+typedef enum pdn_aprs_weather_field {
+    PDN_APRS_WX_WIND_DIRECTION_DEGREES = 0,
+    PDN_APRS_WX_WIND_SPEED_MPH,
+    PDN_APRS_WX_WIND_GUST_MPH,
+    PDN_APRS_WX_TEMPERATURE_F,
+    PDN_APRS_WX_RAIN_1H_IN,
+    PDN_APRS_WX_RAIN_24H_IN,
+    PDN_APRS_WX_RAIN_MIDNIGHT_IN,
+    PDN_APRS_WX_HUMIDITY_PERCENT,
+    PDN_APRS_WX_PRESSURE_MBAR,
+    PDN_APRS_WX_LUMINOSITY_W_M2,
+    PDN_APRS_WX_SNOW_24H_IN,
+    PDN_APRS_WX_RAIN_RAW, /* raw rain counter */
     PDN_APRS_WX_COUNT
-};
+} pdn_aprs_weather_field;
 
 typedef struct pdn_aprs_weather_extra {
     char letter;    /* a field letter the spec does not define */
@@ -624,7 +677,7 @@ typedef struct pdn_aprs_weather {
 } pdn_aprs_weather;
 
 /* The vectors' field name for a weather index ("temperature_f"). */
-const char *pdn_aprs_weather_field_name(int index);
+PDN_APRS_API const char *pdn_aprs_weather_field_name(int index);
 
 /*
  * A report with a position: a position report, a Mic-E report, an object or
@@ -642,6 +695,10 @@ typedef struct pdn_aprs_report {
     /* Mic-E. */
     uint8_t mic_e_message;    /* pdn_aprs_mic_e_message */
     uint8_t old_data;         /* ' rather than ` */
+    /* The altitude was sent as a /A= in the text, not in the Mic-E altitude
+       bytes (set by the decoder; the encoder writes it the same way). Outside
+       the vectors' neutral form. */
+    uint8_t altitude_in_comment;
     char type_code;           /* the device type code: ` ' > ] or space; 0 if none */
     char device_suffix[3];    /* "_%", "=" ...; "" if none */
     char locator[7];          /* Maidenhead locator from the status text, upper case */
@@ -744,7 +801,7 @@ typedef struct pdn_aprs_telemetry_meta {
 } pdn_aprs_telemetry_meta;
 
 /* The i-th name or unit of a PARM. or UNIT. message, or NULL. */
-const char *pdn_aprs_meta_item(const pdn_aprs_telemetry_meta *meta, unsigned i, size_t *len);
+PDN_APRS_API const char *pdn_aprs_telemetry_meta_item(const pdn_aprs_telemetry_meta *meta, unsigned i, size_t *len);
 
 /* A status report (APRS12c ch. 16). */
 typedef struct pdn_aprs_status {
@@ -752,8 +809,8 @@ typedef struct pdn_aprs_status {
     char locator[7];        /* Maidenhead locator, upper case, or "" */
     pdn_aprs_symbol symbol; /* after the locator */
     uint8_t has_beam;
-    char beam_heading;      /* meteor scatter ^HP: heading code */
-    char beam_power;        /* power code */
+    char beam_heading_code;      /* meteor scatter ^HP: heading code */
+    char beam_power_code;        /* power code */
     uint16_t text_len;
     char text[PDN_APRS_TEXT_SIZE]; /* as sent, spaces before a beam heading included */
 } pdn_aprs_status;
@@ -780,14 +837,16 @@ typedef struct pdn_aprs_weather_report {
 
 /* Raw weather station data. */
 typedef struct pdn_aprs_raw_weather {
-    uint8_t format; /* PDN_APRS_RAW_WX_* */
+    uint8_t format; /* pdn_aprs_raw_weather_format */
     uint16_t data_len;
     char data[PDN_APRS_TEXT_SIZE];
 } pdn_aprs_raw_weather;
-#define PDN_APRS_RAW_WX_PEET_BROS_HASH 0    /* # */
-#define PDN_APRS_RAW_WX_PEET_BROS_STAR 1    /* * */
-#define PDN_APRS_RAW_WX_ULTIMETER_PACKET 2  /* $ULTW */
-#define PDN_APRS_RAW_WX_ULTIMETER_LOGGING 3 /* !! */
+typedef enum pdn_aprs_raw_weather_format {
+    PDN_APRS_RAW_WX_PEET_BROS_HASH = 0,    /* # */
+    PDN_APRS_RAW_WX_PEET_BROS_STAR = 1,    /* * */
+    PDN_APRS_RAW_WX_ULTIMETER_PACKET = 2,  /* $ULTW */
+    PDN_APRS_RAW_WX_ULTIMETER_LOGGING = 3  /* !! */
+} pdn_aprs_raw_weather_format;
 
 /* A raw NMEA 0183 sentence (APRS12c ch. 5, 6). */
 typedef struct pdn_aprs_nmea {
@@ -834,17 +893,28 @@ typedef struct pdn_aprs_query {
     char longitude_text[24];
 } pdn_aprs_query;
 
+/* One capability: a token and an optional value, as offsets into the
+   capabilities' text. */
+typedef struct pdn_aprs_capability {
+    uint16_t token_offset, token_length;
+    uint8_t has_value;
+    uint16_t value_offset, value_length;
+} pdn_aprs_capability;
+
 /* Station capabilities: count items, each a token and an optional value,
    all stored in text. */
 typedef struct pdn_aprs_capabilities {
     uint8_t count;
-    struct {
-        uint16_t token_offset, token_length;
-        uint8_t has_value;
-        uint16_t value_offset, value_length;
-    } item[PDN_APRS_MAX_CAPABILITIES];
+    pdn_aprs_capability item[PDN_APRS_MAX_CAPABILITIES];
     char text[PDN_APRS_TEXT_SIZE + 2 * PDN_APRS_MAX_CAPABILITIES];
 } pdn_aprs_capabilities;
+
+/* The i-th item's token, or NULL; *len is its length. */
+PDN_APRS_API const char *pdn_aprs_capability_token(const pdn_aprs_capabilities *capabilities, unsigned i,
+                                                   size_t *len);
+/* The i-th item's value, or NULL if it has none; *len is its length. */
+PDN_APRS_API const char *pdn_aprs_capability_value(const pdn_aprs_capabilities *capabilities, unsigned i,
+                                                   size_t *len);
 
 /* A third-party packet }...: the encapsulated packet in TNC2 form, as
    received. pdn_aprs_decode_third_party() decodes it. Its source may be 1-9
@@ -880,7 +950,7 @@ typedef struct pdn_aprs_agrelo {
 
 typedef struct pdn_aprs_data {
     uint8_t type;   /* pdn_aprs_type */
-    uint8_t reason; /* for PDN_APRS_TYPE_UNRECOGNIZED: pdn_aprs_reason */
+    uint8_t reason; /* for PDN_APRS_TYPE_UNRECOGNIZED: pdn_aprs_unrecognized_reason */
     union {
         pdn_aprs_report report;           /* position, mic-e, object, item */
         pdn_aprs_message message;         /* message, bulletin, nws-bulletin */
@@ -940,7 +1010,7 @@ typedef struct pdn_aprs_decode_options {
     /* Strict: reject every tolerable defect. */
     uint8_t strict;
     /* Reject individual tolerable defects: reject[PDN_APRS_CODE_X] = 1. */
-    uint8_t reject[PDN_APRS_CODE_COUNT];
+    uint8_t reject[PDN_APRS_MAX_CODES];
     /* The device table, for Mic-E device suffixes; NULL for none. The
        optional pdn_aprs_deviceid.c provides pdn_aprs_devices(). */
     const pdn_aprs_device_table *devices;
@@ -965,22 +1035,22 @@ typedef struct pdn_aprs_packet {
  * Returns PDN_APRS_OK, PDN_APRS_ERR_HEADER (the packet still says why),
  * PDN_APRS_ERR_TOO_LONG or PDN_APRS_ERR_ARGUMENT. options may be NULL.
  */
-int pdn_aprs_decode_tnc2(const void *line, size_t len, const pdn_aprs_decode_options *options,
-                         pdn_aprs_packet *packet);
+PDN_APRS_API int pdn_aprs_decode_tnc2(const void *line, size_t len, const pdn_aprs_decode_options *options,
+                                      pdn_aprs_packet *packet);
 
 /*
  * Decodes an AX.25 UI frame as KISS carries it: addresses, control, PID and
  * information field, without flags or FCS.
  */
-int pdn_aprs_decode_ax25(const void *frame, size_t len, const pdn_aprs_decode_options *options,
-                         pdn_aprs_packet *packet);
+PDN_APRS_API int pdn_aprs_decode_ax25(const void *frame, size_t len, const pdn_aprs_decode_options *options,
+                                      pdn_aprs_packet *packet);
 
 /*
  * Decodes an information field on its own, with the given header (the
  * destination matters for Mic-E). header may be NULL for N0CALL>APZ001.
  */
-int pdn_aprs_decode_info(const pdn_aprs_header *header, const void *info, size_t len,
-                         const pdn_aprs_decode_options *options, pdn_aprs_packet *packet);
+PDN_APRS_API int pdn_aprs_decode_info(const pdn_aprs_header *header, const void *info, size_t len,
+                                      const pdn_aprs_decode_options *options, pdn_aprs_packet *packet);
 
 /*
  * Decodes an information field as pdn_aprs_decode_info does, but keeps no
@@ -990,22 +1060,21 @@ int pdn_aprs_decode_info(const pdn_aprs_header *header, const void *info, size_t
  * one back. Returns PDN_APRS_ERR_TOO_LONG, the data unrecognized, if a part
  * of the field is longer than the packet's data holds.
  */
-int pdn_aprs_decode_written(const pdn_aprs_header *header, const void *info, size_t len,
-                            const pdn_aprs_decode_options *options, pdn_aprs_packet *packet);
+PDN_APRS_API int pdn_aprs_decode_info_unbounded(const pdn_aprs_header *header, const void *info, size_t len,
+                                         const pdn_aprs_decode_options *options, pdn_aprs_packet *packet);
 
 /*
  * Decodes the packet inside a third-party packet (data.type
  * PDN_APRS_TYPE_THIRD_PARTY) into inner, which has its own header, data and
  * diagnostics.
  */
-int pdn_aprs_decode_third_party(const pdn_aprs_data *outer, const pdn_aprs_decode_options *options,
-                                pdn_aprs_packet *inner);
+PDN_APRS_API int pdn_aprs_decode_third_party(const pdn_aprs_data *outer, const pdn_aprs_decode_options *options,
+                                             pdn_aprs_packet *inner);
 
-/* Sets options to strict decoding. */
-void pdn_aprs_options_strict(pdn_aprs_decode_options *options);
-
-/* 1 if the packet has a diagnostic of this code (and severity, or -1 for any). */
-int pdn_aprs_has_diagnostic(const pdn_aprs_packet *packet, int code, int severity);
+/* 1 if the packet has a diagnostic of this code (or -1 for any code) and
+   severity (or -1 for any). pdn_aprs_has_diagnostic(p, -1, PDN_APRS_SEVERITY_ERROR)
+   says whether the packet has errors; with SEVERITY_WARNING, warnings. */
+PDN_APRS_API int pdn_aprs_has_diagnostic(const pdn_aprs_packet *packet, int code, int severity);
 
 /* ------------------------------------------------------------------------ */
 /* Device identification                                                    */
@@ -1023,11 +1092,11 @@ typedef struct pdn_aprs_device {
  * (tocall). Returns 1 and fills device if found, else 0. With a NULL table
  * the device is always unknown.
  */
-int pdn_aprs_identify_device(const pdn_aprs_device_table *table, const pdn_aprs_packet *packet,
-                             pdn_aprs_device *device);
+PDN_APRS_API int pdn_aprs_identify_device(const pdn_aprs_device_table *table, const pdn_aprs_packet *packet,
+                                          pdn_aprs_device *device);
 
 /* Provided by the optional pdn_aprs_deviceid.c (CC BY-SA 2.0 data). */
-const pdn_aprs_device_table *pdn_aprs_devices(void);
+PDN_APRS_API const pdn_aprs_device_table *pdn_aprs_devices(void);
 
 /* ------------------------------------------------------------------------ */
 /* Encoding                                                                 */
@@ -1055,31 +1124,31 @@ typedef struct pdn_aprs_encoded {
  * Encodes data as an information field. Writes at most cap bytes and no NUL.
  * There is no limit on the length but cap: a field may be longer than
  * PDN_APRS_MAX_INFO (text received as Latin-1 is written back as UTF-8, up
- * to twice as long), and pdn_aprs_decode_written reads one back. Returns the
+ * to twice as long), and pdn_aprs_decode_info_unbounded reads one back. Returns the
  * length, or PDN_APRS_ERR_REFUSED (encoded->reason says why),
  * PDN_APRS_ERR_BUFFER (buf is too small to write and check the field) or
  * PDN_APRS_ERR_ARGUMENT; on failure buf holds nothing of use. options and
  * encoded may be NULL, though a Mic-E report needs encoded for its
  * destination address.
  */
-int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf,
-                         size_t cap, pdn_aprs_encoded *encoded);
+PDN_APRS_API int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf,
+                                      size_t cap, pdn_aprs_encoded *encoded);
 
 /*
  * Encodes a whole TNC2 line "SRC>DEST,PATH:info", NUL-terminated if there
  * is room. For Mic-E the destination is the computed one.
  */
-int pdn_aprs_encode_tnc2(const pdn_aprs_header *header, const pdn_aprs_data *data,
-                         const pdn_aprs_encode_options *options, char *buf, size_t cap,
-                         pdn_aprs_encoded *encoded);
+PDN_APRS_API int pdn_aprs_encode_tnc2(const pdn_aprs_header *header, const pdn_aprs_data *data,
+                                      const pdn_aprs_encode_options *options, char *buf, size_t cap,
+                                      pdn_aprs_encoded *encoded);
 
 /*
  * Encodes an AX.25 UI frame (addresses, control 0x03, PID 0xF0, information
  * field), without flags or FCS, ready for KISS.
  */
-int pdn_aprs_encode_ax25(const pdn_aprs_header *header, const pdn_aprs_data *data,
-                         const pdn_aprs_encode_options *options, void *buf, size_t cap,
-                         pdn_aprs_encoded *encoded);
+PDN_APRS_API int pdn_aprs_encode_ax25(const pdn_aprs_header *header, const pdn_aprs_data *data,
+                                      const pdn_aprs_encode_options *options, void *buf, size_t cap,
+                                      pdn_aprs_encoded *encoded);
 
 /* ------------------------------------------------------------------------ */
 /* Building packets                                                         */
@@ -1099,15 +1168,40 @@ typedef struct pdn_aprs_station {
 #define PDN_APRS_DEFAULT_DESTINATION "APZ001"
 
 /*
- * A position for a position report, object or item. Set has_ flags for the
- * optional fields you want sent; designated initializers work well:
- *   pdn_aprs_position p = { .latitude = 51.5, .longitude = -0.1,
- *                           .symbol = PDN_APRS_SYMBOL_CAR,
- *                           .has_course = 1, .course_degrees = 88,
- *                           .has_speed = 1, .speed_knots = 36,
- *                           .comment = "Mobile" };
+ * Every build call ends with "buf, cap, result". result may be NULL; when it
+ * is not, the call fills it: len (the bytes written, as the return value),
+ * destination (the destination address, computed for Mic-E) and, on failure,
+ * reason, a plain-ASCII sentence that is not part of the stable API (do not
+ * match on it). The calls return the length written, or PDN_APRS_ERR_REFUSED
+ * for anything APRS cannot carry, PDN_APRS_ERR_ARGUMENT for a NULL required
+ * pointer or other misuse, PDN_APRS_ERR_UNSUPPORTED for text APRS allows but
+ * that does not fit the library's fixed buffers, and PDN_APRS_ERR_BUFFER if
+ * buf is too small.
+ *
+ * Every input struct below is zero-initialised by its user ("= {0}" or a
+ * designated initializer): zero is "absent" for any field a later 1.x adds.
  */
-typedef struct pdn_aprs_position {
+
+/*
+ * What a position report, an object or an item carries. Set the has_ flags
+ * for the optional fields you want sent; designated initializers work well:
+ *   pdn_aprs_position_args p = { .latitude = 51.5, .longitude = -0.1,
+ *                                .symbol = PDN_APRS_SYMBOL_CAR,
+ *                                .has_course = 1, .course_degrees = 88,
+ *                                .has_speed = 1, .speed_knots = 36,
+ *                                .comment = "Mobile" };
+ */
+typedef struct pdn_aprs_position_args {
+    /* Objects and items: the name (an object's up to 9 characters, an item's
+       3 to 9); killed removes it from maps. */
+    const char *name;
+    uint8_t killed;
+    /* Position reports and objects: "DDHHMMz" or "HHMMSSh" (see
+       pdn_aprs_format_timestamp), or NULL for none (an object always has
+       one). */
+    const char *timestamp;
+    /* Position reports: the station can receive messages. */
+    uint8_t messaging;
     double latitude, longitude;
     pdn_aprs_symbol symbol;
     uint8_t ambiguity;   /* 0-4 */
@@ -1126,27 +1220,32 @@ typedef struct pdn_aprs_position {
     const pdn_aprs_weather *weather;     /* NULL for none; needs the weather symbol */
     const pdn_aprs_comment_telemetry *telemetry; /* NULL for none */
     const char *comment;                 /* UTF-8, or NULL */
-} pdn_aprs_position;
+} pdn_aprs_position_args;
 
-/* A position report: ! or = without a timestamp, / or @ with one. timestamp
-   is "DDHHMMz", "HHMMSSh" or NULL; messaging marks the station as able to
-   receive messages. Returns the length written, or an error. */
-int pdn_aprs_build_position(const pdn_aprs_station *station, const pdn_aprs_position *position,
-                            const char *timestamp, int messaging, void *buf, size_t cap);
+/* A position report: ! or = without a timestamp, / or @ with one. Uses
+   everything but name and killed. */
+PDN_APRS_API int pdn_aprs_build_position(const pdn_aprs_station *station, const pdn_aprs_position_args *args,
+                                         void *buf, size_t cap, pdn_aprs_encoded *result);
 
-/* An object (name up to 9 characters, always with a timestamp) or an item
-   (name 3-9 characters). killed removes it from maps. */
-int pdn_aprs_build_object(const pdn_aprs_station *station, const char *name, const char *timestamp,
-                          int killed, const pdn_aprs_position *position, void *buf, size_t cap);
-int pdn_aprs_build_item(const pdn_aprs_station *station, const char *name, int killed,
-                        const pdn_aprs_position *position, void *buf, size_t cap);
+/* An object: name and timestamp are set, and killed if it is to be removed
+   from maps. */
+PDN_APRS_API int pdn_aprs_build_object(const pdn_aprs_station *station, const pdn_aprs_position_args *args,
+                                       void *buf, size_t cap, pdn_aprs_encoded *result);
 
-/* A Mic-E report. The destination address is computed and replaces the
-   station's; message is a pdn_aprs_mic_e_message (not UNKNOWN). */
-typedef struct pdn_aprs_mic_e {
+/* An item: name is set (3-9 characters), no timestamp. */
+PDN_APRS_API int pdn_aprs_build_item(const pdn_aprs_station *station, const pdn_aprs_position_args *args,
+                                     void *buf, size_t cap, pdn_aprs_encoded *result);
+
+/* A Mic-E report. The destination address is computed (result->destination)
+   and replaces the station's; mic_e_message is a pdn_aprs_mic_e_message (not
+   UNKNOWN). */
+typedef struct pdn_aprs_mic_e_args {
     double latitude, longitude;
     pdn_aprs_symbol symbol;
-    uint8_t message;      /* pdn_aprs_mic_e_message */
+    uint8_t mic_e_message; /* pdn_aprs_mic_e_message */
+    /* The station can receive messages: the type code written is ` for set
+       and ' for zero. Ignored when type_code names a device type. */
+    uint8_t messaging;
     uint8_t ambiguity;    /* 0-4 */
     uint8_t has_course;
     double course_degrees; /* 360 is north; 0 is unknown */
@@ -1156,97 +1255,152 @@ typedef struct pdn_aprs_mic_e {
     double altitude_feet; /* written as a /A= */
     uint8_t has_altitude_m;
     double altitude_m;    /* in the Mic-E altitude bytes, rounded to the metre; not with altitude_feet */
-    char type_code;       /* '`' messaging capable, '\'' not, or 0 */
+    /* A device type code: '>' or ']' (with device_suffix) or ' '; 0 for none,
+       and then messaging picks the type code. */
+    char type_code;
     const char *device_suffix; /* "_%" etc., or NULL */
     const char *locator;  /* Maidenhead locator, or NULL */
     const pdn_aprs_frequency *frequency;
     const pdn_aprs_dao *dao;
     const pdn_aprs_comment_telemetry *telemetry;
     const char *comment;
-} pdn_aprs_mic_e;
+} pdn_aprs_mic_e_args;
 
-int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e *mic_e, void *buf,
-                         size_t cap);
+PDN_APRS_API int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_args *args, void *buf,
+                                      size_t cap, pdn_aprs_encoded *result);
 
-/* A positionless weather report _MDHM (timestamp "MMDDHHMM"). For weather
-   with a position, use pdn_aprs_build_position with the weather symbol. */
-int pdn_aprs_build_weather(const pdn_aprs_station *station, const char *timestamp,
-                           const pdn_aprs_weather *weather, void *buf, size_t cap);
+/* A positionless weather report _MDHM (timestamp "MMDDHHMM"; see
+   pdn_aprs_format_timestamp). For weather with a position, use
+   pdn_aprs_build_position with the weather symbol. */
+PDN_APRS_API int pdn_aprs_build_weather(const pdn_aprs_station *station, const char *timestamp,
+                                        const pdn_aprs_weather *weather, void *buf, size_t cap,
+                                        pdn_aprs_encoded *result);
 
-/* Initializes weather to no fields; then set values with pdn_aprs_weather_set. */
-void pdn_aprs_weather_init(pdn_aprs_weather *weather);
-void pdn_aprs_weather_set(pdn_aprs_weather *weather, int index, double value);
+/* Initializes weather to no fields; then set values with pdn_aprs_weather_set,
+   index being a pdn_aprs_weather_field. */
+PDN_APRS_API void pdn_aprs_weather_init(pdn_aprs_weather *weather);
+PDN_APRS_API void pdn_aprs_weather_set(pdn_aprs_weather *weather, int index, double value);
 
-/* A message (message_id NULL for none, as "" is refused; with one, the
-   addressee should ack). */
-int pdn_aprs_build_message(const pdn_aprs_station *station, const char *addressee, const char *text,
-                           const char *message_id, void *buf, size_t cap);
-/* As pdn_aprs_build_message with a reply-ack (APRS12c ch. 14): reply_ack is the
-   ID of a message being acked, NULL for none, or "" for a sender that
-   supports reply-acks but has nothing to ack. Needs a message_id. */
-int pdn_aprs_build_message_reply_ack(const pdn_aprs_station *station, const char *addressee, const char *text,
-                                     const char *message_id, const char *reply_ack, void *buf, size_t cap);
-int pdn_aprs_build_ack(const pdn_aprs_station *station, const char *addressee, const char *message_id,
-                       void *buf, size_t cap);
-int pdn_aprs_build_reject(const pdn_aprs_station *station, const char *addressee,
-                          const char *message_id, void *buf, size_t cap);
+/* The formats of pdn_aprs_format_timestamp. */
+typedef enum pdn_aprs_timestamp_format {
+    PDN_APRS_TIMESTAMP_DHM = 0,  /* "DDHHMMz" */
+    PDN_APRS_TIMESTAMP_HMS = 1,  /* "HHMMSSh" */
+    PDN_APRS_TIMESTAMP_MDHM = 2  /* "MMDDHHMM" */
+} pdn_aprs_timestamp_format;
 
-/* A bulletin: id "0"-"9" for a general bulletin, "A"-"Z" for an
-   announcement, or a digit and a group name ("4WX"). */
-int pdn_aprs_build_bulletin(const pdn_aprs_station *station, const char *id, const char *text,
-                            void *buf, size_t cap);
+/* Room for the output of pdn_aprs_format_timestamp: eight characters and a NUL. */
+#define PDN_APRS_TIMESTAMP_SIZE 9
 
-/* A status report, with an optional DHM zulu timestamp "DDHHMMz". */
-int pdn_aprs_build_status(const pdn_aprs_station *station, const char *text, const char *timestamp,
-                          void *buf, size_t cap);
+/* Writes a UTC time in one of the formats as the builders take it, cutting
+   (not rounding) to the format's step. Returns the length (7 or 8), or
+   PDN_APRS_ERR_REFUSED for a time that is not a valid one (month 1-12, day
+   1-31, hour 0-23, minute 0-59, second 0-59) or PDN_APRS_ERR_ARGUMENT for a
+   format that does not exist or a NULL out. The year is not part of any of
+   the three formats. */
+PDN_APRS_API int pdn_aprs_format_timestamp(int year, int month, int day, int hour, int minute, int second,
+                                           int format, char out[PDN_APRS_TIMESTAMP_SIZE]);
 
-/* A status report with everything the format holds. timestamp ("DDHHMMz") or
-   locator (4 or 6 characters, with symbol after it) may be set, not both;
-   NULL or "" leaves either out. beam_heading and beam_power, when has_beam is
-   set, are the meteor scatter ^HP codes after the text. A locator is sent in
-   upper case. Zero the struct first (memset, or = {0}). */
-typedef struct pdn_aprs_status_options {
+/* A message. */
+typedef struct pdn_aprs_message_args {
+    const char *addressee;
+    const char *text;
+    /* NULL for none ("" is refused: an ID is 1-5 letters or digits); with
+       one, the addressee should ack. */
+    const char *message_id;
+    /* A reply-ack (APRS12c ch. 14): the ID of a message being acked, NULL for
+       none, or "" for a sender that supports reply-acks but has nothing to
+       ack. Needs a message_id. */
+    const char *reply_ack;
+} pdn_aprs_message_args;
+
+PDN_APRS_API int pdn_aprs_build_message(const pdn_aprs_station *station, const pdn_aprs_message_args *args,
+                                        void *buf, size_t cap, pdn_aprs_encoded *result);
+PDN_APRS_API int pdn_aprs_build_ack(const pdn_aprs_station *station, const char *addressee,
+                                    const char *message_id, void *buf, size_t cap, pdn_aprs_encoded *result);
+PDN_APRS_API int pdn_aprs_build_reject(const pdn_aprs_station *station, const char *addressee,
+                                       const char *message_id, void *buf, size_t cap, pdn_aprs_encoded *result);
+
+/* A bulletin: id '0'-'9' for a general bulletin or 'A'-'Z' for an
+   announcement, and for a digit a group of up to 5 characters (the encoder
+   refuses one that does not read back; NULL or "" for none). */
+PDN_APRS_API int pdn_aprs_build_bulletin(const pdn_aprs_station *station, char id, const char *group,
+                                         const char *text, void *buf, size_t cap, pdn_aprs_encoded *result);
+
+/* A status report. timestamp ("DDHHMMz") or locator (4 or 6 characters, with
+   symbol after it) may be set, not both; NULL or "" leaves either out.
+   beam_heading_code and beam_power_code, when has_beam is set, are the meteor
+   scatter ^HP codes after the text. A locator is sent in upper case. */
+typedef struct pdn_aprs_status_args {
     const char *text;
     const char *timestamp;
     const char *locator;
     pdn_aprs_symbol symbol;
     uint8_t has_beam;
-    char beam_heading;
-    char beam_power;
-} pdn_aprs_status_options;
+    char beam_heading_code;
+    char beam_power_code;
+} pdn_aprs_status_args;
 
-int pdn_aprs_build_status_options(const pdn_aprs_station *station, const pdn_aprs_status_options *options,
-                                  void *buf, size_t cap);
+PDN_APRS_API int pdn_aprs_build_status(const pdn_aprs_station *station, const pdn_aprs_status_args *args,
+                                       void *buf, size_t cap, pdn_aprs_encoded *result);
 
-/* A telemetry report: sequence ("001"), five analog values, eight bits
-   ("01101001", B1 first, or NULL) and an optional comment. */
-int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const char *sequence,
-                             const double analog[5], const char *bits, const char *comment,
-                             void *buf, size_t cap);
+/* A telemetry report: a sequence number 0-999 (written with three digits;
+   refused above), five analog values, eight bits ("01101001", B1 first, or
+   NULL for "00000000") and an optional comment. empty[i] set leaves analog
+   channel i empty (sent as nothing between the commas, its analog value
+   ignored); zero means present, so a zeroed struct has all five. */
+typedef struct pdn_aprs_telemetry_args {
+    unsigned sequence;
+    double analog[5];
+    uint8_t empty[5];
+    const char *bits;
+    const char *comment;
+} pdn_aprs_telemetry_args;
 
-/* As pdn_aprs_build_telemetry, with channels that can be empty: present has
-   one entry per analog value, 0 for an empty channel (sent as nothing between
-   the commas; its analog value is ignored). present NULL means all five are
-   present. analog must not be NULL, even when every channel is empty. */
-int pdn_aprs_build_telemetry_channels(const pdn_aprs_station *station, const char *sequence,
-                                      const double analog[5], const uint8_t present[5], const char *bits,
-                                      const char *comment, void *buf, size_t cap);
+PDN_APRS_API int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const pdn_aprs_telemetry_args *args,
+                                          void *buf, size_t cap, pdn_aprs_encoded *result);
 
 /* Telemetry metadata, sent as messages addressed to the station whose
-   telemetry they describe: up to 13 names or units, up to 15 coefficients,
-   and the bit sense with a project title of up to 23 characters. */
-int pdn_aprs_build_telemetry_names(const pdn_aprs_station *station, const char *addressee,
-                                   const char *const *names, size_t count, void *buf, size_t cap);
-int pdn_aprs_build_telemetry_units(const pdn_aprs_station *station, const char *addressee,
-                                   const char *const *units, size_t count, void *buf, size_t cap);
-int pdn_aprs_build_telemetry_coefficients(const pdn_aprs_station *station, const char *addressee,
-                                          const double *coefficients, size_t count, void *buf,
-                                          size_t cap);
-int pdn_aprs_build_telemetry_bits(const pdn_aprs_station *station, const char *addressee,
-                                  const char *bits, const char *project, void *buf, size_t cap);
+   telemetry they describe (addressee NULL means the station itself): up to 13
+   names or units, up to 15 coefficients, and the bit sense with a project
+   title of up to 23 characters. */
+PDN_APRS_API int pdn_aprs_build_telemetry_names(const pdn_aprs_station *station, const char *addressee,
+                                                const char *const *names, size_t count, void *buf, size_t cap,
+                                                pdn_aprs_encoded *result);
+PDN_APRS_API int pdn_aprs_build_telemetry_units(const pdn_aprs_station *station, const char *addressee,
+                                                const char *const *units, size_t count, void *buf, size_t cap,
+                                                pdn_aprs_encoded *result);
+PDN_APRS_API int pdn_aprs_build_telemetry_coefficients(const pdn_aprs_station *station, const char *addressee,
+                                                       const double *coefficients, size_t count, void *buf,
+                                                       size_t cap, pdn_aprs_encoded *result);
+PDN_APRS_API int pdn_aprs_build_telemetry_bits(const pdn_aprs_station *station, const char *addressee,
+                                               const char *bits, const char *project, void *buf, size_t cap,
+                                               pdn_aprs_encoded *result);
 
 /* Writes a station and ready-made data as a TNC2 line or AX.25 frame. */
-int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_data *data, void *buf, size_t cap);
+PDN_APRS_API int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_data *data, void *buf,
+                                size_t cap, pdn_aprs_encoded *result);
+
+/* ------------------------------------------------------------------------ */
+/* Reading a packet                                                         */
+/* ------------------------------------------------------------------------ */
+
+/* Writes a decoded packet back as it was received: its header and its
+   information field, as a TNC2 line (NUL-terminated if there is room) or as
+   an AX.25 UI frame (without flags or FCS). Return the length, or
+   PDN_APRS_ERR_HEADER if the packet's header was unusable,
+   PDN_APRS_ERR_REFUSED for an address the format cannot carry as sent (an
+   AX.25 frame holds no SSID with a leading zero, for one), or
+   PDN_APRS_ERR_BUFFER. A packet decoded with pdn_aprs_decode_info_unbounded
+   keeps no information field, so only the header is written. */
+PDN_APRS_API int pdn_aprs_write_tnc2(const pdn_aprs_packet *packet, char *buf, size_t cap);
+PDN_APRS_API int pdn_aprs_write_ax25(const pdn_aprs_packet *packet, void *buf, size_t cap);
+
+/* What a PHG's codes mean: watts (the power code squared), antenna height in
+   feet (10 x 2 to the height code), gain in dB, and directivity in degrees
+   (45 x the code; -1 for omnidirectional). Any output may be NULL. Returns 1,
+   or 0 if phg is NULL. */
+PDN_APRS_API int pdn_aprs_phg_values(const pdn_aprs_phg *phg, double *watts, double *height_feet,
+                                     double *gain_db, int *directivity_degrees);
 
 #ifdef __cplusplus
 }

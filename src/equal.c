@@ -41,12 +41,12 @@ static int weather_eq(const pdn_aprs_weather *a, const pdn_aprs_weather *b, int 
             return 0;
         /* a direction that rounds to 360 is written as north, which a
            compressed wind reads back as 0 */
-        if (loose && i == PDN_APRS_WX_WIND_DIRECTION && fabs(va - vb) > 180)
+        if (loose && i == PDN_APRS_WX_WIND_DIRECTION_DEGREES && fabs(va - vb) > 180)
             va += va < vb ? 360 : -360;
         /* snowfall is written in hundredths under 1 inch, tenths under 10,
            and whole inches from there (ruling F3) */
         if (a->has[i] && !near(va, vb, tol[i],
-                               i == PDN_APRS_WX_WIND_SPEED ? 0.045 : i == PDN_APRS_WX_SNOW_24H ? 0.051 : 0, loose))
+                               i == PDN_APRS_WX_WIND_SPEED_MPH ? 0.045 : i == PDN_APRS_WX_SNOW_24H_IN ? 0.051 : 0, loose))
             return 0;
     }
     if (a->software != b->software || !str_eq(a->unit, b->unit) || a->extra_count != b->extra_count)
@@ -229,7 +229,7 @@ PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_apr
         return str_eq(s->timestamp, t->timestamp) && str_eq(s->locator, t->locator) &&
                (!s->locator[0] || (s->symbol.table == t->symbol.table && s->symbol.code == t->symbol.code)) &&
                !s->has_beam == !t->has_beam &&
-               (!s->has_beam || (s->beam_heading == t->beam_heading && s->beam_power == t->beam_power)) &&
+               (!s->has_beam || (s->beam_heading_code == t->beam_heading_code && s->beam_power_code == t->beam_power_code)) &&
                s->text_len == t->text_len && memcmp(s->text, t->text, s->text_len) == 0;
     }
     case PDN_APRS_TYPE_TELEMETRY: {

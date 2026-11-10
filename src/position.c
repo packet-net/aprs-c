@@ -194,7 +194,7 @@ static int parse_compressed(pdn_aprs__dctx *c, const uint8_t *s, pdn_aprs_report
     }
     *cs_c = s[10] - 33;
     *cs_s = s[11] - 33;
-    if (r->compression.source == PDN_APRS_NMEA_GGA) {
+    if (r->compression.source == PDN_APRS_SOURCE_GGA) {
         *cs_kind = CS_ALTITUDE;
         r->has_altitude = 1;
         r->altitude_feet = pow(1.002, (double)(*cs_c * 91 + *cs_s));
@@ -421,10 +421,10 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_positioned(pdn_aprs__dctx *c, size_t at, 
                 /* the cs bytes carry the wind */
                 r->has_course = 0;
                 r->has_speed = 0;
-                w->has[PDN_APRS_WX_WIND_DIRECTION] = 1;
-                w->value[PDN_APRS_WX_WIND_DIRECTION] = cs_c * 4;
-                w->has[PDN_APRS_WX_WIND_SPEED] = 1;
-                w->value[PDN_APRS_WX_WIND_SPEED] = (pow(1.08, (double)cs_s) - 1.0) * PDN_APRS__KNOTS_TO_MPH;
+                w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] = 1;
+                w->value[PDN_APRS_WX_WIND_DIRECTION_DEGREES] = cs_c * 4;
+                w->has[PDN_APRS_WX_WIND_SPEED_MPH] = 1;
+                w->value[PDN_APRS_WX_WIND_SPEED_MPH] = (pow(1.08, (double)cs_s) - 1.0) * PDN_APRS__KNOTS_TO_MPH;
                 wind_known = 1;
                 mode = 2;
             } else {
@@ -439,14 +439,14 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_positioned(pdn_aprs__dctx *c, size_t at, 
                         return 0;
                     dir = -2;
                 }
-                w->has[PDN_APRS_WX_WIND_DIRECTION] = dir >= 0;
-                w->value[PDN_APRS_WX_WIND_DIRECTION] = dir >= 0 ? dir : 0;
-                w->has[PDN_APRS_WX_WIND_SPEED] = spd >= 0;
-                w->value[PDN_APRS_WX_WIND_SPEED] = spd >= 0 ? spd : 0;
+                w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] = dir >= 0;
+                w->value[PDN_APRS_WX_WIND_DIRECTION_DEGREES] = dir >= 0 ? dir : 0;
+                w->has[PDN_APRS_WX_WIND_SPEED_MPH] = spd >= 0;
+                w->value[PDN_APRS_WX_WIND_SPEED_MPH] = spd >= 0 ? spd : 0;
                 if (!r->has_compression && (dir >= 0 || spd >= 0)) {
                     r->has_compression = 1;
                     r->compression.fix = PDN_APRS_FIX_CURRENT;
-                    r->compression.source = PDN_APRS_NMEA_OTHER;
+                    r->compression.source = PDN_APRS_SOURCE_OTHER;
                     r->compression.origin = PDN_APRS_ORIGIN_SOFTWARE;
                 }
                 wind_known = 1;
@@ -461,10 +461,10 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_positioned(pdn_aprs__dctx *c, size_t at, 
                         return 0;
                     dir = -2;
                 }
-                w->has[PDN_APRS_WX_WIND_DIRECTION] = dir >= 0;
-                w->value[PDN_APRS_WX_WIND_DIRECTION] = dir >= 0 ? dir : 0;
-                w->has[PDN_APRS_WX_WIND_SPEED] = spd >= 0;
-                w->value[PDN_APRS_WX_WIND_SPEED] = spd >= 0 ? spd : 0;
+                w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] = dir >= 0;
+                w->value[PDN_APRS_WX_WIND_DIRECTION_DEGREES] = dir >= 0 ? dir : 0;
+                w->has[PDN_APRS_WX_WIND_SPEED_MPH] = spd >= 0;
+                w->value[PDN_APRS_WX_WIND_SPEED_MPH] = spd >= 0 ? spd : 0;
                 wind_known = 1;
                 s += 7;
                 n -= 7;

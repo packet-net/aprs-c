@@ -4,6 +4,9 @@
  */
 #include "internal.h"
 
+/* reject[] has room for every code */
+typedef char pdn_aprs__codes_fit[PDN_APRS_CODE_COUNT <= PDN_APRS_MAX_CODES ? 1 : -1];
+
 /* ---- diagnostics ---- */
 
 PDN_APRS__PRIVATE void pdn_aprs__diag(pdn_aprs__dctx *c, int severity, int code)
@@ -245,15 +248,11 @@ const char *pdn_aprs_strerror(int result)
         return "output buffer too small";
     case PDN_APRS_ERR_REFUSED:
         return "the encoder refuses this data";
+    case PDN_APRS_ERR_UNSUPPORTED:
+        return "allowed by APRS, but too big for this library's fixed buffers";
     default:
         return "unknown error";
     }
-}
-
-void pdn_aprs_options_strict(pdn_aprs_decode_options *options)
-{
-    if (options)
-        options->strict = 1;
 }
 
 int pdn_aprs_has_diagnostic(const pdn_aprs_packet *packet, int code, int severity)
@@ -262,18 +261,41 @@ int pdn_aprs_has_diagnostic(const pdn_aprs_packet *packet, int code, int severit
     if (!packet)
         return 0;
     for (i = 0; i < packet->diagnostic_count; i++)
-        if (packet->diagnostics[i].code == code && (severity < 0 || packet->diagnostics[i].severity == severity))
+        if ((code < 0 || packet->diagnostics[i].code == code) && (severity < 0 || packet->diagnostics[i].severity == severity))
             return 1;
     return 0;
 }
 
-const char *pdn_aprs_meta_item(const pdn_aprs_telemetry_meta *meta, unsigned i, size_t *len)
+const char *pdn_aprs_telemetry_meta_item(const pdn_aprs_telemetry_meta *meta, unsigned i, size_t *len)
 {
     if (!meta || i >= meta->count || i >= PDN_APRS_MAX_META_ITEMS)
         return NULL;
     if (len)
         *len = meta->length[i];
     return meta->text + meta->offset[i];
+}
+
+static const char *capability_part(const pdn_aprs_capabilities *c, unsigned i, int value, size_t *len)
+{
+    const pdn_aprs_capability *item;
+    if (!c || i >= c->count || i >= PDN_APRS_MAX_CAPABILITIES)
+        return NULL;
+    item = &c->item[i];
+    if (value && !item->has_value)
+        return NULL;
+    if (len)
+        *len = value ? item->value_length : item->token_length;
+    return c->text + (value ? item->value_offset : item->token_offset);
+}
+
+const char *pdn_aprs_capability_token(const pdn_aprs_capabilities *capabilities, unsigned i, size_t *len)
+{
+    return capability_part(capabilities, i, 0, len);
+}
+
+const char *pdn_aprs_capability_value(const pdn_aprs_capabilities *capabilities, unsigned i, size_t *len)
+{
+    return capability_part(capabilities, i, 1, len);
 }
 
 /* ---- dispatch ---- */
@@ -286,7 +308,7 @@ static void unrecognized(pdn_aprs__dctx *c, int reason)
 
 static void not_aprs(pdn_aprs__dctx *c)
 {
-    unrecognized(c, PDN_APRS_REASON_NOT_APRS);
+    unrecognized(c, PDN_APRS_UNRECOGNIZED_NOT_APRS);
     pdn_aprs__diag(c, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_NOT_APRS);
 }
 
@@ -299,12 +321,12 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_field(pdn_aprs__dctx *c)
     if (n != c->len) {
         c->len = n;
         if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_TRAILING_LINE_BREAK)) {
-            unrecognized(c, PDN_APRS_REASON_MALFORMED);
+            unrecognized(c, PDN_APRS_UNRECOGNIZED_MALFORMED);
             return;
         }
     }
     if (c->len == 0) {
-        unrecognized(c, PDN_APRS_REASON_EMPTY);
+        unrecognized(c, PDN_APRS_UNRECOGNIZED_EMPTY);
         return;
     }
     dti = c->info[0];
@@ -381,7 +403,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_field(pdn_aprs__dctx *c)
     case '&':
     case '+':
     case '.':
-        unrecognized(c, PDN_APRS_REASON_RESERVED_DATA_TYPE);
+        unrecognized(c, PDN_APRS_UNRECOGNIZED_RESERVED_DATA_TYPE);
         pdn_aprs__diag(c, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_RESERVED_DATA_TYPE);
         break;
     default:
@@ -390,7 +412,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_field(pdn_aprs__dctx *c)
         break;
     }
     if (c->failed)
-        unrecognized(c, PDN_APRS_REASON_MALFORMED);
+        unrecognized(c, PDN_APRS_UNRECOGNIZED_MALFORMED);
 }
 
 /* ---- entry points ---- */
@@ -410,7 +432,7 @@ static int decode_info_into(pdn_aprs_packet *packet, const pdn_aprs_decode_optio
     uint8_t mark = packet->diagnostic_count;
     if (keep && len > PDN_APRS_MAX_INFO) {
         packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
-        packet->data.reason = PDN_APRS_REASON_MALFORMED;
+        packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
         return PDN_APRS_ERR_TOO_LONG;
     }
     if (keep) {
@@ -428,7 +450,7 @@ static int decode_info_into(pdn_aprs_packet *packet, const pdn_aprs_decode_optio
     if (c.too_long) {
         memset(&packet->data, 0, sizeof packet->data);
         packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
-        packet->data.reason = PDN_APRS_REASON_MALFORMED;
+        packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
         packet->diagnostic_count = mark;
         return PDN_APRS_ERR_TOO_LONG;
     }
@@ -451,7 +473,7 @@ int pdn_aprs_decode_tnc2(const void *line, size_t len, const pdn_aprs_decode_opt
     at = pdn_aprs__parse_tnc2_header(&c, s, len, &packet->header, 0);
     if (!at) {
         packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
-        packet->data.reason = PDN_APRS_REASON_MALFORMED;
+        packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
         return PDN_APRS_ERR_HEADER;
     }
     packet->header_ok = 1;
@@ -489,7 +511,7 @@ int pdn_aprs_decode_info(const pdn_aprs_header *header, const void *info, size_t
     return decode_field_with(header, info, len, options, packet, 1);
 }
 
-int pdn_aprs_decode_written(const pdn_aprs_header *header, const void *info, size_t len,
+int pdn_aprs_decode_info_unbounded(const pdn_aprs_header *header, const void *info, size_t len,
                             const pdn_aprs_decode_options *options, pdn_aprs_packet *packet)
 {
     return decode_field_with(header, info, len, options, packet, 0);
@@ -514,7 +536,7 @@ int pdn_aprs_decode_third_party(const pdn_aprs_data *outer, const pdn_aprs_decod
     at = pdn_aprs__parse_tnc2_header(&c, t->packet, t->len, &inner->header, 1);
     if (!at) {
         inner->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
-        inner->data.reason = PDN_APRS_REASON_MALFORMED;
+        inner->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
         return PDN_APRS_ERR_HEADER;
     }
     inner->header_ok = 1;
@@ -577,7 +599,7 @@ int pdn_aprs_decode_ax25(const void *frame, size_t len, const pdn_aprs_decode_op
     c.data = &packet->data;
     h = &packet->header;
     packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
-    packet->data.reason = PDN_APRS_REASON_MALFORMED;
+    packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
     /* addresses end at the one whose low bit is set */
     for (i = 0; i + 7 <= len; i += 7) {
         naddr++;
