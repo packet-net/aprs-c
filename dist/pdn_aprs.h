@@ -1213,8 +1213,9 @@ typedef struct pdn_aprs_station {
  * is not, the call fills it: len (the bytes written, as the return value),
  * destination (the destination address, computed for Mic-E) and, on failure,
  * reason, a plain-ASCII sentence that is not part of the stable API (do not
- * match on it), and refusal, the pdn_aprs_refusal code to act on. The calls return the length written, or PDN_APRS_ERR_REFUSED
- * for anything APRS cannot carry, PDN_APRS_ERR_ARGUMENT for a NULL required
+ * match on it), and refusal, the pdn_aprs_refusal code to act on. The calls
+ * return the length written, or PDN_APRS_ERR_REFUSED for anything APRS cannot
+ * carry, PDN_APRS_ERR_ARGUMENT for a NULL required
  * pointer or other misuse, PDN_APRS_ERR_UNSUPPORTED for text APRS allows but
  * that does not fit the library's fixed buffers, and PDN_APRS_ERR_BUFFER if
  * buf is too small.

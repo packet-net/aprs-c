@@ -542,6 +542,7 @@ typedef struct conv {
     char *err;
     size_t errlen;
     int bad;
+    int short_legacy; /* Mic-E legacy telemetry of fewer than five values: refused */
 } conv;
 
 static int cannot(conv *cv, const char *what, const char *key)
@@ -905,7 +906,9 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
     str_in(cv, o, "locator", r->locator, sizeof r->locator, NULL);
     if ((v = json_get(o, "legacy_telemetry")) != NULL) {
         size_t k;
-        if (v->t != J_ARR || v->count != 5)
+        if (v->t == J_ARR && v->count < 5)
+            cv->short_legacy = 1;
+        else if (v->t != J_ARR || v->count != 5)
             cannot(cv, "is not the five channels the C data holds", "legacy_telemetry");
         for (k = 0; v->t == J_ARR && k < v->count && k < 5; k++) {
             if (v->items[k]->t != J_NUM || v->items[k]->num != floor(v->items[k]->num) || v->items[k]->num < 0 ||
@@ -1065,6 +1068,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
     c.err = err;
     c.errlen = errlen;
     c.bad = 0;
+    c.short_legacy = 0;
     err[0] = 0;
     last_refusal = 0;
     if (!type) {
@@ -1361,6 +1365,11 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         keys_only(cv, j, keys);
         break;
     }
+    }
+    if (c.short_legacy && !c.bad) {
+        snprintf(err, errlen, "legacy_telemetry has fewer than five values");
+        last_refusal = PDN_APRS_REFUSAL_MALFORMED;
+        return -1;
     }
     return c.bad ? 0 : 1;
 }

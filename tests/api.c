@@ -905,6 +905,32 @@ static void test_refusal_codes(void)
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
     CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_MALFORMED);
 
+    /* a 1-character addressee with over-long text reads no further than it is */
+    {
+        static char longtext[400];
+        char one[2] = {'A', 0};
+        pdn_aprs_message_args big;
+        memset(longtext, 'x', sizeof longtext - 1);
+        memset(&big, 0, sizeof big);
+        big.addressee = one;
+        big.text = longtext;
+        n = pdn_aprs_build_message(&me, &big, line, sizeof line, &enc);
+        CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+    }
+    /* feet and metres together, with a buffer too small: still the refusal, nothing written */
+    {
+        pdn_aprs_mic_e_args mic2;
+        memset(&mic2, 0, sizeof mic2);
+        mic2.latitude = 10;
+        mic2.longitude = 10;
+        mic2.symbol = pdn_aprs_symbol_make('/', '>');
+        mic2.has_altitude = 1;
+        mic2.has_altitude_m = 1;
+        n = pdn_aprs_build_mic_e(&me, &mic2, line, 4, &enc);
+        CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE && enc.len == 0 &&
+              enc.destination[0] == 0);
+    }
+
     /* a data type with no writer, and a bare NULL, which is no refusal */
     d.type = PDN_APRS_TYPE_UNRECOGNIZED;
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
