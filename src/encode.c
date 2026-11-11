@@ -456,8 +456,14 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         /* the cs bytes hold a course and a speed together (ruling F5) */
         if (!r->has_course || !r->has_speed)
             defer(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a compressed course/speed needs both a course and a speed");
-        if (r->has_range)
+        if (r->has_range) {
             defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed position has room for a course/speed or a range, not both");
+            /* a range no cs byte can hold is named before the conflict and a course of 0 */
+            if (not_a_number(e, r->range_miles))
+                return 0;
+            if (cs_range_step(r->range_miles) < 0)
+                return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "range out of range for a compressed position");
+        }
         if (r->has_course) {
             if (not_a_number(e, r->course_degrees))
                 return 0;
@@ -936,6 +942,31 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const p
 
 /* ---- reports ---- */
 
+/* What a weather report has no room for (rulings 10, 12 and 13); they apply
+   to any report that carries weather, whatever its symbol. */
+static int weather_rules(pdn_aprs__ectx *e, const pdn_aprs_report *r, int range_in_cs, int alt_in_cs, int gga_in_cs)
+{
+    int wind = r->weather.has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] && r->weather.has[PDN_APRS_WX_WIND_SPEED_MPH];
+    if (r->comment_len) {
+        if (!valid_text(r->comment, r->comment_len))
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");
+        defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report has no comment");
+    }
+    if (r->has_telemetry)
+        defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report cannot carry base-91 telemetry");
+    /* uncompressed, the wind holds the data extension: any other is a
+       conflict for it (ruling 12); compressed, a 7-byte extension was
+       refused above */
+    if (!r->compressed && (r->has_course || r->has_speed || r->has_phg || r->has_dfs || r->has_area ||
+                           r->has_df_bearing || r->has_storm || r->has_range))
+        defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "the wind of a weather report holds the data extension");
+    if (r->compressed && r->has_range && (!range_in_cs || wind))
+        defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed weather report has room for the wind alone in the cs bytes");
+    if ((r->has_altitude && !alt_in_cs && !gga_in_cs) || r->has_frequency || r->signpost[0])
+        defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report has no room for this data");
+    return 1;
+}
+
 static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
 {
     const pdn_aprs_report *r = &d->as.report;
@@ -962,8 +993,8 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
             if (!A_PRINT(r->name[i]))
                 return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_NAME, "an object name is printable ASCII");
         if (!r->timestamp[0])
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MISSING_FIELD, "an object needs a timestamp");
-        if (!timestamp_ok(r->timestamp, 7))
+            defer(e, PDN_APRS_REFUSAL_MISSING_FIELD, "an object needs a timestamp");
+        else if (!timestamp_ok(r->timestamp, 7))
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "invalid timestamp");
         pdn_aprs__putc(e->b, ';');
         pdn_aprs__puts(e->b, r->name);
@@ -994,28 +1025,19 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
     }
     symbol_end = e->b->len;
 
+    if (r->has_weather && !weather) {
+        int gga_in_cs = r->compressed && r->has_compression && r->compression.source == PDN_APRS_SOURCE_GGA;
+        if (!weather_rules(e, r, range_in_cs, alt_in_cs, gga_in_cs))
+            return 0;
+    }
+
     if (weather) {
         const pdn_aprs_weather *w = &r->weather;
         /* a GGA altitude the cs bytes do not hold exactly has no /A= here,
            which has no comment: the nearest cs value alone (ruling F14) */
         int gga_in_cs = r->compressed && r->has_compression && r->compression.source == PDN_APRS_SOURCE_GGA;
-        if (r->comment_len) {
-            if (!valid_text(r->comment, r->comment_len))
-                return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");
-            defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report has no comment");
-        }
-        if (r->has_telemetry)
-            defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report cannot carry base-91 telemetry");
-        /* uncompressed, the wind holds the data extension: any other is a
-           conflict for it (ruling 12); compressed, a 7-byte extension was
-           refused above */
-        if (!r->compressed && (r->has_course || r->has_speed || r->has_phg || r->has_dfs || r->has_area ||
-                               r->has_df_bearing || r->has_storm || r->has_range))
-            defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "the wind of a weather report holds the data extension");
-        if (r->compressed && r->has_range && !range_in_cs)
-            defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed weather report has room for the wind alone in the cs bytes");
-        if ((r->has_altitude && !alt_in_cs && !gga_in_cs) || r->has_frequency || r->signpost[0])
-            defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report has no room for this data");
+        if (!weather_rules(e, r, range_in_cs, alt_in_cs, gga_in_cs))
+            return 0;
         if (!r->compressed) {
             int dh = w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES], sh = w->has[PDN_APRS_WX_WIND_SPEED_MPH];
             double dv = w->value[PDN_APRS_WX_WIND_DIRECTION_DEGREES], sv = w->value[PDN_APRS_WX_WIND_SPEED_MPH];
@@ -1047,8 +1069,11 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
     /* the data extension */
     if (!r->compressed) {
         int kinds = (r->has_course || r->has_speed) + r->has_phg + (r->has_range ? 1 : 0) + r->has_dfs + r->has_area;
-        if (kinds > 1)
+        if (kinds > 1 || (r->has_df_bearing && r->has_storm))
             defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "only one data extension fits");
+        /* course/speed on the area symbol with no area reads back as an area */
+        if ((r->has_course || r->has_speed) && !r->has_area && r->symbol.table == '\\' && r->symbol.code == 'l')
+            defer(e, PDN_APRS_REFUSAL_SYMBOL_MISMATCH, "course/speed on the area symbol with no area");
         if ((r->has_df_bearing || r->has_storm) && !(r->has_course || r->has_speed) && kinds)
             defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "DF bearing and storm data follow a course/speed");
         if (r->has_df_bearing && !(r->symbol.table == '/' && r->symbol.code == '\\'))
@@ -1251,12 +1276,6 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "position out of range for Mic-E");
     if (gdeg > 179 || ambiguous_past(ldeg, lh, amb, 90.0))
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "position out of range for Mic-E");
-    if (r->mic_e_message > PDN_APRS_MIC_E_EMERGENCY)
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, "a Mic-E message type mixing standard and custom bits has no meaning");
-    if (r->has_dao && !dao_datum_ok(&r->dao))
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, DAO_DATUM_REFUSAL);
-    if (!pdn_aprs__symbol_table_ok(r->symbol.table) || !A_GRAPH(r->symbol.code))
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_SYMBOL, "invalid symbol");
     /* destination: six latitude digits carrying the message bits and flags */
     if (r->mic_e_message == PDN_APRS_MIC_E_EMERGENCY) {
         bits = 0;
@@ -1330,6 +1349,12 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
        as no course (ruling F1) */
     if (r->has_course && course == 0)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "a Mic-E course of 0 means unknown");
+    if (r->mic_e_message > PDN_APRS_MIC_E_EMERGENCY)
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, "a Mic-E message type mixing standard and custom bits has no meaning");
+    if (r->has_dao && !dao_datum_ok(&r->dao))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, DAO_DATUM_REFUSAL);
+    if (!pdn_aprs__symbol_table_ok(r->symbol.table) || !A_GRAPH(r->symbol.code))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_SYMBOL, "invalid symbol");
     /* speed tens + 80 below 190 knots; 190-199 is /, the printable one of
        its two forms (APRS12c ch. 10), and 200 on + 0 */
     info[4] = (uint8_t)(speed < 190 ? speed / 10 + 108 : speed / 10 + 28);
@@ -1517,6 +1542,14 @@ static int encode_message(pdn_aprs__ectx *e, const pdn_aprs_data *d)
     } else if (d->type == PDN_APRS_TYPE_NWS_BULLETIN) {
         if (!(memcmp(m->addressee, "NWS-", 4) == 0 || memcmp(m->addressee, "NWS_", 4) == 0))
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "an NWS bulletin is addressed NWS- or NWS_");
+    }
+    if (d->type == PDN_APRS_TYPE_MESSAGE) {
+        /* an addressee that makes it read back as a bulletin (ruling 15) */
+        const char *a = m->addressee;
+        size_t n = strlen(a);
+        if ((n >= 4 && memcmp(a, "BLN", 3) == 0 && (A_DIGIT(a[3]) || (A_UPPER(a[3]) && n == 4))) ||
+            memcmp(a, "NWS-", 4) == 0 || memcmp(a, "NWS_", 4) == 0)
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "this addressee would read back as a bulletin");
     }
     if (!valid_text(m->text, m->text_len))
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the text has a line break or is not UTF-8");
@@ -1745,22 +1778,22 @@ static int encode_telemetry(pdn_aprs__ectx *e, const pdn_aprs_telemetry *t)
 
 static int encode_status(pdn_aprs__ectx *e, const pdn_aprs_status *s)
 {
+    if (s->timestamp[0] && !timestamp_ok(s->timestamp, 1))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "a status timestamp is DHM zulu");
+    if (s->locator[0] && (!pdn_aprs__symbol_table_ok(s->symbol.table) || !A_GRAPH(s->symbol.code)))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_SYMBOL, "a locator is 4 or 6 characters, then a symbol");
     if (!valid_text(s->text, s->text_len))
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the text has a line break or is not UTF-8");
     pdn_aprs__putc(e->b, '>');
     if (s->timestamp[0]) {
         if (s->locator[0])
             defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a status report with a locator has no timestamp");
-        if (!timestamp_ok(s->timestamp, 1))
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "a status timestamp is DHM zulu");
         pdn_aprs__puts(e->b, s->timestamp);
     }
     if (s->locator[0]) {
         size_t ll = strlen(s->locator);
         if (!(ll == 4 || ll == 6))
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a locator is 4 or 6 characters, then a symbol");
-        if (!pdn_aprs__symbol_table_ok(s->symbol.table) || !A_GRAPH(s->symbol.code))
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_SYMBOL, "a locator is 4 or 6 characters, then a symbol");
         pdn_aprs__puts(e->b, s->locator);
         pdn_aprs__putc(e->b, s->symbol.table);
         pdn_aprs__putc(e->b, s->symbol.code);
@@ -1859,6 +1892,25 @@ static int encode_capabilities(pdn_aprs__ectx *e, const pdn_aprs_capabilities *c
     unsigned i;
     if (c->count == 0)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a capabilities report lists at least one capability");
+    /* by code across all the entries (ruling 1): a value with a comma or
+       control character, then a padded value, then a bad token */
+    for (i = 0; i < c->count && i < PDN_APRS_MAX_CAPABILITIES; i++) {
+        const char *v = c->text + c->item[i].value_offset;
+        size_t vl = c->item[i].value_length, k;
+        if (!c->item[i].has_value)
+            continue;
+        if (memchr(v, ',', vl))
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "a capability value has no commas");
+        for (k = 0; k < vl; k++)
+            if ((uint8_t)v[k] < 0x20 || v[k] == 0x7f)
+                return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "a capability value has no control characters");
+    }
+    for (i = 0; i < c->count && i < PDN_APRS_MAX_CAPABILITIES; i++) {
+        const char *v = c->text + c->item[i].value_offset;
+        size_t vl = c->item[i].value_length;
+        if (c->item[i].has_value && vl > 0 && (v[0] == ' ' || v[vl - 1] == ' '))
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_PADDING_SPACE, "a capability value cannot start or end with a space");
+    }
     pdn_aprs__putc(e->b, '<');
     for (i = 0; i < c->count && i < PDN_APRS_MAX_CAPABILITIES; i++) {
         const char *t = c->text + c->item[i].token_offset;

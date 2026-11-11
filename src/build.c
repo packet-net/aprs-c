@@ -384,6 +384,15 @@ static int build_message(const pdn_aprs_station *station, int type, const char *
         int bad = al < 1 || al > 9;
         for (i = 0; !bad && i < al; i++)
             bad = !A_GRAPH(addressee[i]) || addressee[i] == ':';
+        if (!bad && type == PDN_APRS_TYPE_BULLETIN)
+            bad = !(al >= 4 && memcmp(addressee, "BLN", 3) == 0 &&
+                    (A_DIGIT(addressee[3]) || (A_UPPER(addressee[3]) && al == 4)));
+        if (!bad && type == PDN_APRS_TYPE_NWS_BULLETIN)
+            bad = !(memcmp(addressee, "NWS-", 4) == 0 || memcmp(addressee, "NWS_", 4) == 0);
+        if (!bad && type == PDN_APRS_TYPE_MESSAGE)
+            bad = (al >= 4 && memcmp(addressee, "BLN", 3) == 0 &&
+                   (A_DIGIT(addressee[3]) || (A_UPPER(addressee[3]) && al == 4))) ||
+                  memcmp(addressee, "NWS-", 4) == 0 || memcmp(addressee, "NWS_", 4) == 0;
         if (bad)
             return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESSEE,
                         "an addressee is 1-9 printable characters without spaces or colons");
