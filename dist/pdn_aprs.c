@@ -5189,7 +5189,8 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         int wind = w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] && w->has[PDN_APRS_WX_WIND_SPEED_MPH];
         /* the cs bytes hold the wind, so they cannot also hold a course and
            speed, a range or a GGA altitude (rulings 12 and 13) */
-        if (r->has_course || r->has_speed || (r->has_range && wind) || (wind && gga))
+        if (r->has_course || r->has_speed || (r->has_range && wind) ||
+            ((w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] || w->has[PDN_APRS_WX_WIND_SPEED_MPH]) && gga))
             defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed weather report has room for the wind alone in the cs bytes");
         if (wind && !gga) {
             double dir = w->value[PDN_APRS_WX_WIND_DIRECTION_DEGREES], mph = w->value[PDN_APRS_WX_WIND_SPEED_MPH];
@@ -5806,6 +5807,15 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         if (!weather_rules(e, r, range_in_cs, alt_in_cs, gga_in_cs))
             return 0;
         /* the values are checked all the same, before the symbol (ruling 1) */
+        if (!r->compressed) {
+            int dh = r->weather.has[PDN_APRS_WX_WIND_DIRECTION_DEGREES], sh = r->weather.has[PDN_APRS_WX_WIND_SPEED_MPH];
+            double dv = r->weather.value[PDN_APRS_WX_WIND_DIRECTION_DEGREES], sv = r->weather.value[PDN_APRS_WX_WIND_SPEED_MPH];
+            if ((dh && not_a_number(e, dv)) || (sh && not_a_number(e, sv)))
+                return 0;
+            if ((dh && (pdn_aprs__round(dv) < 0 || pdn_aprs__round(dv) > 360)) ||
+                (sh && (pdn_aprs__round(sv) < 0 || pdn_aprs__round(sv) > 999)))
+                return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "wind out of range");
+        }
         {
             pdn_aprs__buf scratch, *saved = e->b;
             uint8_t sbuf[1024];

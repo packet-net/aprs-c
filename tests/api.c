@@ -972,6 +972,28 @@ static void test_refusal_codes(void)
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
     CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE);
 
+    /* round 4: wind speed past 999 before the symbol; wind and a GGA altitude both want the cs bytes */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 10;
+    d.as.report.longitude = 10;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '>');
+    d.as.report.has_weather = 1;
+    d.as.report.weather.has[PDN_APRS_WX_WIND_SPEED_MPH] = 1;
+    d.as.report.weather.value[PDN_APRS_WX_WIND_SPEED_MPH] = 1000;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE);
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '_');
+    d.as.report.compressed = 1;
+    d.as.report.has_compression = 1;
+    d.as.report.compression.source = PDN_APRS_SOURCE_GGA;
+    d.as.report.has_altitude = 1;
+    d.as.report.altitude_feet = 18;
+    d.as.report.weather.value[PDN_APRS_WX_WIND_SPEED_MPH] = 0;
+    d.as.report.has_telemetry = 1;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_EXTENSION_CONFLICT);
+
     /* a data type with no writer, and a bare NULL, which is no refusal */
     d.type = PDN_APRS_TYPE_UNRECOGNIZED;
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
