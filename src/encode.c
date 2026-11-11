@@ -418,10 +418,10 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         const pdn_aprs_weather *w = &r->weather;
         int gga = r->has_compression && r->compression.source == PDN_APRS_SOURCE_GGA;
         int wind = w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] && w->has[PDN_APRS_WX_WIND_SPEED_MPH];
+        int anywind = w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] || w->has[PDN_APRS_WX_WIND_SPEED_MPH];
         /* the cs bytes hold the wind, so they cannot also hold a course and
            speed, a range or a GGA altitude (rulings 12 and 13) */
-        if (r->has_course || r->has_speed || (r->has_range && wind) ||
-            ((w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] || w->has[PDN_APRS_WX_WIND_SPEED_MPH]) && gga))
+        if (r->has_course || r->has_speed || (r->has_range && anywind) || (anywind && gga))
             defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed weather report has room for the wind alone in the cs bytes");
         if (wind && !gga) {
             double dir = w->value[PDN_APRS_WX_WIND_DIRECTION_DEGREES], mph = w->value[PDN_APRS_WX_WIND_SPEED_MPH];
@@ -955,7 +955,7 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const p
    to any report that carries weather, whatever its symbol. */
 static int weather_rules(pdn_aprs__ectx *e, const pdn_aprs_report *r, int range_in_cs, int alt_in_cs, int gga_in_cs)
 {
-    int wind = r->weather.has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] && r->weather.has[PDN_APRS_WX_WIND_SPEED_MPH];
+    int wind = r->weather.has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] || r->weather.has[PDN_APRS_WX_WIND_SPEED_MPH];
     /* a comment has no place on a weather report, so its characters are not
        checked (ruling 25) */
     if (r->comment_len)
@@ -1796,7 +1796,7 @@ static int encode_telemetry(pdn_aprs__ectx *e, const pdn_aprs_telemetry *t)
             return 0;
     /* T#MIC has no form without a first channel (a decoder reads it as
        Mic-E telemetry only with one) */
-    if (strcmp(t->sequence, "MIC") == 0 && t->analog_count == 5 && t->analog[0].is_null)
+    if (strcmp(t->sequence, "MIC") == 0 && (t->analog_count == 0 || t->analog[0].is_null))
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "T#MIC needs a first channel");
     if (!valid_text(t->comment, t->comment_len))
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");

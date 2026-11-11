@@ -1030,6 +1030,25 @@ static void test_refusal_codes(void)
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
     CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_CHARACTER);
 
+    /* round 7: a wind speed alone and a range both want the cs bytes; T#MIC with no values has no form */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 39.3;
+    d.as.report.longitude = -123.2;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '_');
+    d.as.report.compressed = 1;
+    d.as.report.has_weather = 1;
+    d.as.report.weather.has[PDN_APRS_WX_WIND_SPEED_MPH] = 1;
+    d.as.report.has_range = 1;
+    d.as.report.range_miles = 29.5;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_EXTENSION_CONFLICT);
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_TELEMETRY;
+    snprintf(d.as.telemetry.sequence, sizeof d.as.telemetry.sequence, "MIC");
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM);
+
     /* a data type with no writer, and a bare NULL, which is no refusal */
     d.type = PDN_APRS_TYPE_UNRECOGNIZED;
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
