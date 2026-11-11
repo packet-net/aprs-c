@@ -994,6 +994,31 @@ static void test_refusal_codes(void)
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
     CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_EXTENSION_CONFLICT);
 
+    /* round 5: a speed alone on the area symbol is written; a course is a symbol mismatch */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 32.84108241758242;
+    d.as.report.longitude = -97.31199450549451;
+    d.as.report.symbol = pdn_aprs_symbol_make('\\', 'l');
+    d.as.report.has_speed = 1;
+    d.as.report.speed_knots = 12;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n > 4 && memcmp(line + n - 4, "/012", 4) == 0);
+    d.as.report.has_course = 1;
+    d.as.report.course_degrees = 1;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_SYMBOL_MISMATCH);
+    /* a Mic-E altitude past a /A= whose first byte reads as a type code has no form */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_MIC_E;
+    d.as.report.latitude = 47.2;
+    d.as.report.longitude = -122.5;
+    d.as.report.symbol = pdn_aprs_symbol_make('W', 'v');
+    d.as.report.has_altitude = 1;
+    d.as.report.altitude_feet = 1597896.9816272964;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM);
+
     /* a data type with no writer, and a bare NULL, which is no refusal */
     d.type = PDN_APRS_TYPE_UNRECOGNIZED;
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);

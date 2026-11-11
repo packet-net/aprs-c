@@ -5870,8 +5870,8 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         if (kinds > 1 || (r->has_df_bearing && r->has_storm))
             defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "only one data extension fits");
         /* course/speed on the area symbol with no area reads back as an area */
-        if ((r->has_course || r->has_speed) && !r->has_area && r->symbol.table == '\\' && r->symbol.code == 'l')
-            defer(e, PDN_APRS_REFUSAL_SYMBOL_MISMATCH, "course/speed on the area symbol with no area");
+        if (r->has_course && !r->has_area && r->symbol.table == '\\' && r->symbol.code == 'l')
+            defer(e, PDN_APRS_REFUSAL_SYMBOL_MISMATCH, "a course/speed on the area symbol with no area");
         if ((r->has_df_bearing || r->has_storm) && !(r->has_course || r->has_speed) && kinds)
             defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "DF bearing and storm data follow a course/speed");
         if (r->has_df_bearing && !(r->symbol.table == '/' && r->symbol.code == '\\'))
@@ -6043,6 +6043,20 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
 
 /* ---- Mic-E ---- */
 
+/* 1 if a Mic-E altitude goes in the Mic-E altitude bytes (whole metres), with
+   the value to write in *v; otherwise it needs a /A=. */
+static int mic_e_altitude_bytes(const pdn_aprs_report *r, long *v)
+{
+    double back;
+    *v = 0;
+    if (!r->has_altitude || r->altitude_in_comment || !finite_number(r->altitude_feet) || fabs(r->altitude_feet) >= 1e9)
+        return 0;
+    *v = (long)pdn_aprs__round(r->altitude_feet * 0.3048 + 10000.0);
+    back = (double)(*v - 10000) / 0.3048;
+    return *v >= 0 && *v < 91L * 91 * 91 &&
+           fabs(back - r->altitude_feet) <= 1e-9 * (fabs(r->altitude_feet) > 1 ? fabs(r->altitude_feet) : 1);
+}
+
 PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_report *r)
 {
     int ldeg, gdeg, i, bits, std, lon100, amb = r->ambiguity, dao_prec = r->has_dao ? r->dao.precision : -1;
@@ -6147,6 +6161,16 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
        as no course (ruling F1) */
     if (r->has_course && course == 0)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "a Mic-E course of 0 means unknown");
+    {
+        /* an altitude that needs a /A= and is past its field comes first */
+        long av;
+        if (r->has_altitude && !mic_e_altitude_bytes(r, &av)) {
+            if (not_a_number(e, r->altitude_feet))
+                return 0;
+            if (pdn_aprs__round(r->altitude_feet) < -99999 || pdn_aprs__round(r->altitude_feet) > 999999)
+                return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "altitude out of range");
+        }
+    }
     if (r->has_legacy_telemetry && memchr(r->legacy_telemetry, 0xFF, 5) != NULL)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "obsolete Mic-E binary telemetry values are 0-254");
     if (r->mic_e_message > PDN_APRS_MIC_E_EMERGENCY)
@@ -6195,15 +6219,13 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     {
         int alt_b91 = 0, at_ext = 0, ext_counts = 0;
         long v = 0;
-        if (r->has_altitude && !r->altitude_in_comment && finite_number(r->altitude_feet) &&
-            fabs(r->altitude_feet) < 1e9) {
-            double back;
-            v = (long)pdn_aprs__round(r->altitude_feet * 0.3048 + 10000.0);
-            back = (double)(v - 10000) / 0.3048;
-            alt_b91 = v >= 0 && v < 91L * 91 * 91 &&
-                      fabs(back - r->altitude_feet) <= 1e-9 * (fabs(r->altitude_feet) > 1 ? fabs(r->altitude_feet) : 1);
-        }
+        alt_b91 = mic_e_altitude_bytes(r, &v);
         if (alt_b91) {
+            /* with no type code, a first byte that is one reads back as it
+               (ruling 28): beyond a /A=, the altitude has no form */
+            if (!r->type_code && strchr("`'>] ", (int)(33 + v / (91L * 91) % 91)) &&
+                (pdn_aprs__round(r->altitude_feet) > 999999 || pdn_aprs__round(r->altitude_feet) < -99999))
+                return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "this altitude has no form in the Mic-E bytes");
             put_b91(e->b, v, 3);
             pdn_aprs__putc(e->b, '}');
             alt_written = 1;
@@ -6535,8 +6557,6 @@ static int encode_telemetry(pdn_aprs__ectx *e, const pdn_aprs_telemetry *t)
 {
     size_t sl = strlen(t->sequence), i;
     int k;
-    if (!valid_text(t->comment, t->comment_len))
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");
     for (k = 0; k < 5 && t->analog_count == 5; k++)
         if (!t->analog[k].is_null && not_a_number(e, t->analog[k].value))
             return 0;
@@ -6544,6 +6564,8 @@ static int encode_telemetry(pdn_aprs__ectx *e, const pdn_aprs_telemetry *t)
        Mic-E telemetry only with one) */
     if (strcmp(t->sequence, "MIC") == 0 && t->analog_count == 5 && t->analog[0].is_null)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "T#MIC needs a first channel");
+    if (!valid_text(t->comment, t->comment_len))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");
     if (sl == 0)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a telemetry report needs a sequence");
     for (i = 0; i < sl; i++)
