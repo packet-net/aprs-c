@@ -1019,6 +1019,17 @@ static void test_refusal_codes(void)
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
     CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM);
 
+    /* round 6: Mic-E legacy telemetry ending in CR would end the field in it */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_MIC_E;
+    d.as.report.latitude = 33.42733333333334;
+    d.as.report.longitude = -112.129;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', 'j');
+    d.as.report.has_legacy_telemetry = 1;
+    d.as.report.legacy_telemetry[4] = 13;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_CHARACTER);
+
     /* a data type with no writer, and a bare NULL, which is no refusal */
     d.type = PDN_APRS_TYPE_UNRECOGNIZED;
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);

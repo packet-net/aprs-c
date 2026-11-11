@@ -6314,6 +6314,9 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     }
     if (r->device_suffix[0])
         pdn_aprs__puts(e->b, r->device_suffix);
+    /* a field that would end in a CR or LF (legacy telemetry ends it) loses it */
+    if (!e->b->overflow && e->b->len > 0 && (e->b->p[e->b->len - 1] == '\r' || e->b->p[e->b->len - 1] == '\n'))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the field would end with a line break");
     return 1;
 }
 
