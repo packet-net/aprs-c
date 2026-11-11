@@ -5159,6 +5159,14 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_SYMBOL, "invalid symbol table");
     if (!A_GRAPH(r->symbol.code))
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_SYMBOL, "invalid symbol code");
+    /* a range no cs byte can hold is named before anything else wanting the
+       cs bytes (ruling 1) */
+    if (r->has_range) {
+        if (not_a_number(e, r->range_miles))
+            return 0;
+        if (cs_range_step(r->range_miles) < 0)
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "range out of range for a compressed position");
+    }
     if (r->ambiguity)
         defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a compressed position cannot be ambiguous");
     if (r->has_phg || r->has_dfs || r->has_area || r->has_df_bearing || r->has_storm)
@@ -5181,7 +5189,7 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         int wind = w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] && w->has[PDN_APRS_WX_WIND_SPEED_MPH];
         /* the cs bytes hold the wind, so they cannot also hold a course and
            speed, a range or a GGA altitude (rulings 12 and 13) */
-        if (r->has_course || r->has_speed || (r->has_range && wind) || (wind && gga && r->has_altitude))
+        if (r->has_course || r->has_speed || (r->has_range && wind) || (wind && gga))
             defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed weather report has room for the wind alone in the cs bytes");
         if (wind && !gga) {
             double dir = w->value[PDN_APRS_WX_WIND_DIRECTION_DEGREES], mph = w->value[PDN_APRS_WX_WIND_SPEED_MPH];
@@ -5716,11 +5724,10 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const p
 static int weather_rules(pdn_aprs__ectx *e, const pdn_aprs_report *r, int range_in_cs, int alt_in_cs, int gga_in_cs)
 {
     int wind = r->weather.has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] && r->weather.has[PDN_APRS_WX_WIND_SPEED_MPH];
-    if (r->comment_len) {
-        if (!valid_text(r->comment, r->comment_len))
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");
+    /* a comment has no place on a weather report, so its characters are not
+       checked (ruling 25) */
+    if (r->comment_len)
         defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report has no comment");
-    }
     if (r->has_telemetry)
         defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report cannot carry base-91 telemetry");
     /* uncompressed, the wind holds the data extension: any other is a
@@ -5798,6 +5805,18 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         int gga_in_cs = r->compressed && r->has_compression && r->compression.source == PDN_APRS_SOURCE_GGA;
         if (!weather_rules(e, r, range_in_cs, alt_in_cs, gga_in_cs))
             return 0;
+        /* the values are checked all the same, before the symbol (ruling 1) */
+        {
+            pdn_aprs__buf scratch, *saved = e->b;
+            uint8_t sbuf[1024];
+            int ok;
+            pdn_aprs__buf_init(&scratch, sbuf, sizeof sbuf);
+            e->b = &scratch;
+            ok = pdn_aprs__encode_weather_fields(e, &r->weather, 0);
+            e->b = saved;
+            if (!ok)
+                return 0;
+        }
     }
 
     if (weather) {
@@ -5962,7 +5981,7 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
             ext_counts = 1;
         }
     } else if (r->has_range && !range_in_cs) {
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed position has room for a course/speed or a range, not both");
+        defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed position has room for a course/speed or a range, not both");
     }
     /* then, in this order: the voice frequency, in the first bytes of the
        comment where radios read it (APRS12c ch. 18), after a / straight
@@ -6000,12 +6019,12 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         pdn_aprs__putc(e->b, '}');
         at_ext = 0;
     }
-    if (r->has_altitude && !alt_in_cs) {
+    if (r->has_altitude && !alt_in_cs && !r->has_weather) {
         if (!put_altitude(e, r->altitude_feet))
             return 0;
         at_ext = 0;
     }
-    if (!put_comment_part(e, r, at_ext, e->b->len != symbol_end, ext_counts, 0))
+    if (!r->has_weather && !put_comment_part(e, r, at_ext, e->b->len != symbol_end, ext_counts, 0))
         return 0;
     if (r->has_dao)
         pdn_aprs__put(e->b, dao, 5);
@@ -6118,6 +6137,8 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
        as no course (ruling F1) */
     if (r->has_course && course == 0)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "a Mic-E course of 0 means unknown");
+    if (r->has_legacy_telemetry && memchr(r->legacy_telemetry, 0xFF, 5) != NULL)
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "obsolete Mic-E binary telemetry values are 0-254");
     if (r->mic_e_message > PDN_APRS_MIC_E_EMERGENCY)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, "a Mic-E message type mixing standard and custom bits has no meaning");
     if (r->has_dao && !dao_datum_ok(&r->dao))
@@ -6297,6 +6318,15 @@ static void put_addressee(pdn_aprs__buf *b, const char *a)
     pdn_aprs__putc(b, ':');
 }
 
+/* 1 if an addressee is a bulletin form (BLN and 0-9 or A-Z, or NWS- or NWS_):
+   a message to it reads back as a bulletin (rulings 15 and 26). */
+static int bulletin_form(const char *a)
+{
+    size_t n = strlen(a);
+    return (n >= 4 && memcmp(a, "BLN", 3) == 0 && (A_DIGIT(a[3]) || (A_UPPER(a[3]) && n == 4))) ||
+           (n >= 4 && (memcmp(a, "NWS-", 4) == 0 || memcmp(a, "NWS_", 4) == 0));
+}
+
 static int encode_message(pdn_aprs__ectx *e, const pdn_aprs_data *d)
 {
     const pdn_aprs_message *m = &d->as.message;
@@ -6314,10 +6344,7 @@ static int encode_message(pdn_aprs__ectx *e, const pdn_aprs_data *d)
     }
     if (d->type == PDN_APRS_TYPE_MESSAGE) {
         /* an addressee that makes it read back as a bulletin (ruling 15) */
-        const char *a = m->addressee;
-        size_t n = strlen(a);
-        if ((n >= 4 && memcmp(a, "BLN", 3) == 0 && (A_DIGIT(a[3]) || (A_UPPER(a[3]) && n == 4))) ||
-            memcmp(a, "NWS-", 4) == 0 || memcmp(a, "NWS_", 4) == 0)
+        if (bulletin_form(m->addressee))
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "this addressee would read back as a bulletin");
     }
     if (!valid_text(m->text, m->text_len))
@@ -6583,8 +6610,6 @@ static int encode_status(pdn_aprs__ectx *e, const pdn_aprs_status *s)
 static int encode_positionless_weather(pdn_aprs__ectx *e, const pdn_aprs_weather_report *w)
 {
     size_t i;
-    if (w->comment_len && !valid_text(w->comment, w->comment_len))
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");
     if (strlen(w->timestamp) != 8)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "a positionless weather report has an MDHM timestamp");
     for (i = 0; i < 8; i++)
@@ -6943,9 +6968,7 @@ static int blank_free_text(pdn_aprs_data *d)
 static int read_back_refusal(const pdn_aprs_data *d)
 {
     pdn_aprs_data c;
-    if (d->type == PDN_APRS_TYPE_MESSAGE &&
-        (memcmp(d->as.message.addressee, "BLN", 3) == 0 || memcmp(d->as.message.addressee, "NWS-", 4) == 0 ||
-         memcmp(d->as.message.addressee, "NWS_", 4) == 0))
+    if (d->type == PDN_APRS_TYPE_MESSAGE && bulletin_form(d->as.message.addressee))
         return PDN_APRS_REFUSAL_INVALID_ADDRESSEE;
     c = *d;
     return blank_free_text(&c) ? PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD : PDN_APRS_REFUSAL_DOES_NOT_READ_BACK;

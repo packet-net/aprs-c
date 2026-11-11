@@ -931,6 +931,47 @@ static void test_refusal_codes(void)
               enc.destination[0] == 0);
     }
 
+    /* round 3: a weather comment is not checked, a bulletin look-alike is a station, a short range is
+       range-checked before the cs bytes conflict, weather values before the symbol */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_WEATHER;
+    snprintf(d.as.weather.timestamp, sizeof d.as.weather.timestamp, "10090556");
+    d.as.weather.comment_len = 1;
+    d.as.weather.comment[0] = '\n';
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED);
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_MESSAGE;
+    snprintf(d.as.message.addressee, sizeof d.as.message.addressee, "BLNe");
+    d.as.message.text_len = 3;
+    memcpy(d.as.message.text, "?WX", 4);
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD);
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 10;
+    d.as.report.longitude = 10;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '-');
+    d.as.report.compressed = 1;
+    d.as.report.has_compression = 1;
+    d.as.report.compression.source = PDN_APRS_SOURCE_GGA;
+    d.as.report.has_altitude = 1;
+    d.as.report.altitude_feet = 100;
+    d.as.report.has_range = 1;
+    d.as.report.range_miles = 1;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE);
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 10;
+    d.as.report.longitude = 10;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '>');
+    d.as.report.has_weather = 1;
+    d.as.report.weather.has[PDN_APRS_WX_TEMPERATURE_F] = 1;
+    d.as.report.weather.value[PDN_APRS_WX_TEMPERATURE_F] = -999;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE);
+
     /* a data type with no writer, and a bare NULL, which is no refusal */
     d.type = PDN_APRS_TYPE_UNRECOGNIZED;
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
