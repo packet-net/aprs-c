@@ -232,6 +232,7 @@ PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_apr
 typedef struct pdn_aprs__ectx {
     pdn_aprs__buf *b;
     const char *reason;
+    int refusal;
     char dest[PDN_APRS_ADDR_SIZE];
     int variant; /* 1: put a / before any comment, 2: a space */
 } pdn_aprs__ectx;
@@ -241,7 +242,7 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
                                               const pdn_aprs_encode_options *options, void *buf, size_t cap,
                                               pdn_aprs_encoded *encoded, int ax25);
 
-PDN_APRS__PRIVATE int pdn_aprs__refuse(pdn_aprs__ectx *e, const char *why);
+PDN_APRS__PRIVATE int pdn_aprs__refuse(pdn_aprs__ectx *e, int code, const char *why);
 PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_data *d);
 PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_report *r);
 PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const pdn_aprs_weather *w, int positionless);

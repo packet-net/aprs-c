@@ -18,5 +18,7 @@ jval *neutral_diagnostics(const pdn_aprs_packet *p);
 
 /* Fills data from the neutral form. Returns 1, or 0 with a message in err. */
 int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen);
+/* After neutral_to_data returned -1: the pdn_aprs_refusal code for it. */
+int neutral_refusal(void);
 
 #endif

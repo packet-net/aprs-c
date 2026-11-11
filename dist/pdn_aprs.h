@@ -1112,12 +1112,53 @@ typedef struct pdn_aprs_encode_options {
     const pdn_aprs_device_table *devices;
 } pdn_aprs_encode_options;
 
+/* Why the encoder refused: the vectors' refusal reason codes (codes.json,
+   "refusals"), in order. Values are fixed once released; new ones are only
+   appended, so a caller must allow one it does not know. zero means none.
+   pdn_aprs_refusal_name() gives the vectors' kebab-case id. */
+typedef enum pdn_aprs_refusal {
+    PDN_APRS_REFUSAL_NONE = 0,
+    PDN_APRS_REFUSAL_INVALID_ADDRESS,
+    PDN_APRS_REFUSAL_AX25_CANNOT_CARRY,
+    PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY,
+    PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER,
+    PDN_APRS_REFUSAL_INVALID_ADDRESSEE,
+    PDN_APRS_REFUSAL_INVALID_NAME,
+    PDN_APRS_REFUSAL_INVALID_MESSAGE_ID,
+    PDN_APRS_REFUSAL_PADDING_SPACE,
+    PDN_APRS_REFUSAL_TOO_LONG,
+    PDN_APRS_REFUSAL_MALFORMED,
+    PDN_APRS_REFUSAL_INVALID_CHARACTER,
+    PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD,
+    PDN_APRS_REFUSAL_NOT_A_NUMBER,
+    PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE,
+    PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM,
+    PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE,
+    PDN_APRS_REFUSAL_INVALID_TIMESTAMP,
+    PDN_APRS_REFUSAL_MISSING_FIELD,
+    PDN_APRS_REFUSAL_INVALID_SYMBOL,
+    PDN_APRS_REFUSAL_SYMBOL_MISMATCH,
+    PDN_APRS_REFUSAL_EXTENSION_CONFLICT,
+    PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED,
+    PDN_APRS_REFUSAL_INVALID_CODE,
+    PDN_APRS_REFUSAL_INVALID_NMEA,
+    PDN_APRS_REFUSAL_NOT_ENCODABLE,
+    PDN_APRS_REFUSAL_DOES_NOT_READ_BACK
+} pdn_aprs_refusal;
+
+/* The vectors' id for a refusal code ("too-long"), or NULL if out of range or
+   zero. */
+PDN_APRS_API const char *pdn_aprs_refusal_name(int refusal);
+
 typedef struct pdn_aprs_encoded {
     size_t len; /* bytes written */
     /* Mic-E: the destination address the encoder computed ("S32UVT"). */
     char destination[PDN_APRS_ADDR_SIZE];
     /* Why the encoder refused, as plain ASCII, or NULL. */
     const char *reason;
+    /* Why, as a pdn_aprs_refusal code the vectors name: zero (none) on
+       success and for every error that is not PDN_APRS_ERR_REFUSED. */
+    int refusal;
 } pdn_aprs_encoded;
 
 /*
@@ -1172,7 +1213,7 @@ typedef struct pdn_aprs_station {
  * is not, the call fills it: len (the bytes written, as the return value),
  * destination (the destination address, computed for Mic-E) and, on failure,
  * reason, a plain-ASCII sentence that is not part of the stable API (do not
- * match on it). The calls return the length written, or PDN_APRS_ERR_REFUSED
+ * match on it), and refusal, the pdn_aprs_refusal code to act on. The calls return the length written, or PDN_APRS_ERR_REFUSED
  * for anything APRS cannot carry, PDN_APRS_ERR_ARGUMENT for a NULL required
  * pointer or other misuse, PDN_APRS_ERR_UNSUPPORTED for text APRS allows but
  * that does not fit the library's fixed buffers, and PDN_APRS_ERR_BUFFER if

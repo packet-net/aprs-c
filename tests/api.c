@@ -759,6 +759,90 @@ static void test_long_third_party(void)
     CHECK(pdn_aprs_decode_third_party(&d, NULL, &inner) == PDN_APRS_ERR_ARGUMENT);
 }
 
+/* Refusals carry a reason code: one from each group, and zero when nothing
+   is refused or the error is not a refusal. */
+static void test_refusal_codes(void)
+{
+    char line[600];
+    uint8_t frame[200];
+    int n;
+    pdn_aprs_station me = {"M0LTE-9", NULL, NULL, 0, NULL};
+    pdn_aprs_position_args pos;
+    pdn_aprs_message_args msg;
+    pdn_aprs_header h;
+    pdn_aprs_data d;
+    pdn_aprs_encoded enc;
+    CHECK(strcmp(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_INVALID_ADDRESS), "invalid-address") == 0);
+    CHECK(strcmp(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_DOES_NOT_READ_BACK), "does-not-read-back") == 0);
+    CHECK(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_NONE) == NULL && pdn_aprs_refusal_name(99) == NULL);
+
+    memset(&pos, 0, sizeof pos);
+    pos.latitude = 49.058333;
+    pos.longitude = -72.029167;
+    pos.symbol = pdn_aprs_symbol_make('/', '-');
+    memset(&enc, 0xff, sizeof enc);
+    n = pdn_aprs_build_position(&me, &pos, line, sizeof line, &enc);
+    CHECK(n > 0 && enc.refusal == 0 && enc.reason == NULL);
+    pos.latitude = 91;
+    n = pdn_aprs_build_position(&me, &pos, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE && enc.reason);
+    pos.latitude = 49;
+    pos.comment = "a\nb";
+    n = pdn_aprs_build_position(&me, &pos, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_CHARACTER);
+    pos.comment = NULL;
+    pos.timestamp = "9";
+    n = pdn_aprs_build_position(&me, &pos, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_TIMESTAMP);
+
+    memset(&msg, 0, sizeof msg);
+    msg.addressee = "TOOLONGADDRESSEE";
+    msg.text = "hello";
+    n = pdn_aprs_build_message(&me, &msg, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_ADDRESSEE);
+    msg.addressee = "M0LTE";
+    msg.message_id = "TOOLONGID";
+    n = pdn_aprs_build_message(&me, &msg, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_MESSAGE_ID);
+    msg.message_id = NULL;
+    msg.reply_ack = "1";
+    n = pdn_aprs_build_message(&me, &msg, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_MISSING_FIELD);
+
+    /* a bad station address is a refusal, a NULL station is not */
+    me.source = "WAYTOOLONGCALL";
+    n = pdn_aprs_build_message(&me, &msg, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_ADDRESS);
+    n = pdn_aprs_build_message(NULL, &msg, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_ARGUMENT && enc.refusal == 0);
+    me.source = "M0LTE-9";
+
+    /* header addresses the encoder cannot write are refused, not an argument error */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_STATUS;
+    d.as.status.text_len = 2;
+    memcpy(d.as.status.text, "hi", 3);
+    memset(&h, 0, sizeof h);
+    h.q_construct = -1;
+    snprintf(h.source, sizeof h.source, "bad addr");
+    snprintf(h.destination, sizeof h.destination, "APRS");
+    n = pdn_aprs_encode_tnc2(&h, &d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_ADDRESS);
+    snprintf(h.source, sizeof h.source, "m0lte");
+    n = pdn_aprs_encode_ax25(&h, &d, NULL, frame, sizeof frame, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_AX25_CANNOT_CARRY);
+    snprintf(h.source, sizeof h.source, "M0LTE");
+    n = pdn_aprs_encode_ax25(&h, &d, NULL, frame, sizeof frame, &enc);
+    CHECK(n > 0 && enc.refusal == 0);
+
+    /* a data type with no writer, and a bare NULL, which is no refusal */
+    d.type = PDN_APRS_TYPE_UNRECOGNIZED;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE);
+    n = pdn_aprs_encode_info(NULL, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_ARGUMENT && enc.refusal == 0);
+}
+
 int main(void)
 {
     test_basics();
@@ -773,6 +857,7 @@ int main(void)
     test_legacy_mic_e();
     test_locale();
     test_long_third_party();
+    test_refusal_codes();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

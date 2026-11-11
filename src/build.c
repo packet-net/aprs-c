@@ -12,14 +12,17 @@ static void begin(pdn_aprs_encoded *result)
         result->len = 0;
         result->destination[0] = 0;
         result->reason = NULL;
+        result->refusal = 0;
     }
 }
 
 /* Ends a call in failure with a code and a reason (a string that lives on). */
-static int fail(pdn_aprs_encoded *result, int rc, const char *reason)
+static int fail(pdn_aprs_encoded *result, int rc, int refusal, const char *reason)
 {
-    if (result)
+    if (result) {
         result->reason = reason;
+        result->refusal = rc == PDN_APRS_ERR_REFUSED ? refusal : 0;
+    }
     return rc;
 }
 
@@ -33,13 +36,13 @@ static int station_header(const pdn_aprs_station *st, pdn_aprs_header *h, pdn_ap
     memset(h, 0, sizeof *h);
     h->q_construct = -1;
     if (!st || !st->source)
-        return fail(result, PDN_APRS_ERR_ARGUMENT, NO_STATION);
+        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_STATION);
     if (strlen(st->source) >= sizeof h->source)
-        return fail(result, PDN_APRS_ERR_REFUSED, "the source address is longer than an address can be");
+        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESS, "the source address is longer than an address can be");
     pdn_aprs__strlcpy(h->source, st->source, sizeof h->source);
     p = st->destination ? st->destination : PDN_APRS_DEFAULT_DESTINATION;
     if (strlen(p) >= sizeof h->destination)
-        return fail(result, PDN_APRS_ERR_REFUSED, "the destination address is longer than an address can be");
+        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESS, "the destination address is longer than an address can be");
     pdn_aprs__strlcpy(h->destination, p, sizeof h->destination);
     p = st->path;
     while (p && *p) {
@@ -47,7 +50,7 @@ static int station_header(const pdn_aprs_station *st, pdn_aprs_header *h, pdn_ap
         size_t n = comma ? (size_t)(comma - p) : strlen(p);
         pdn_aprs_path_entry *e;
         if (h->path_count >= PDN_APRS_MAX_PATH)
-            return fail(result, PDN_APRS_ERR_REFUSED, "the path has more entries than a header can hold");
+            return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESS, "the path has more entries than a header can hold");
         e = &h->path[h->path_count];
         if (n > 0 && p[n - 1] == '*') {
             e->marked = 1;
@@ -55,7 +58,7 @@ static int station_header(const pdn_aprs_station *st, pdn_aprs_header *h, pdn_ap
             n--;
         }
         if (n == 0 || n >= sizeof e->call)
-            return fail(result, PDN_APRS_ERR_REFUSED, "a path entry is empty or longer than an address can be");
+            return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESS, "a path entry is empty or longer than an address can be");
         memcpy(e->call, p, n);
         e->call[n] = 0;
         h->path_count++;
@@ -73,7 +76,7 @@ int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_data *data, v
     memset(&o, 0, sizeof o);
     begin(result);
     if (!data)
-        return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
+        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     rc = station_header(station, &h, result);
     if (rc != PDN_APRS_OK)
         return rc;
@@ -91,20 +94,21 @@ int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_data *data, v
 /* Text APRS limits to a few characters (a message's 67, a project title's
    23) is refused, not unsupported, when it is far past the limit: no UTF-8
    text of that many characters takes more than four bytes each. */
-static int too_long_for_aprs(pdn_aprs_encoded *result, const char *text, size_t max_chars, const char *what)
+static int too_long_for_aprs(pdn_aprs_encoded *result, const char *text, size_t max_chars, int refusal, const char *what)
 {
     if (text && strlen(text) > 4 * max_chars)
-        return fail(result, PDN_APRS_ERR_REFUSED, what);
+        return fail(result, PDN_APRS_ERR_REFUSED, refusal, what);
     return PDN_APRS_OK;
 }
 
-static int put(pdn_aprs_encoded *result, char *dst, size_t cap, const char *src, size_t *len, const char *what)
+static int put(pdn_aprs_encoded *result, char *dst, size_t cap, const char *src, size_t *len, int refusal,
+               const char *what)
 {
     size_t n = src ? strlen(src) : 0;
     if (n >= cap) {
         if (cap >= PDN_APRS_TEXT_SIZE)
-            return fail(result, PDN_APRS_ERR_UNSUPPORTED, TOO_BIG);
-        return fail(result, PDN_APRS_ERR_REFUSED, what);
+            return fail(result, PDN_APRS_ERR_UNSUPPORTED, 0, TOO_BIG);
+        return fail(result, PDN_APRS_ERR_REFUSED, refusal, what);
     }
     if (n)
         memcpy(dst, src, n);
@@ -158,7 +162,7 @@ static int fill_position(pdn_aprs_encoded *result, pdn_aprs_report *r, const pdn
         r->has_telemetry = 1;
         r->telemetry = *p->telemetry;
     }
-    rc = put(result, r->comment, sizeof r->comment, p->comment, &n, "the comment is too long");
+    rc = put(result, r->comment, sizeof r->comment, p->comment, &n, PDN_APRS_REFUSAL_TOO_LONG, "the comment is too long");
     r->comment_len = (uint16_t)n;
     return rc;
 }
@@ -170,13 +174,13 @@ int pdn_aprs_build_position(const pdn_aprs_station *station, const pdn_aprs_posi
     int rc;
     begin(result);
     if (!args)
-        return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
+        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     memset(&d, 0, sizeof d);
     d.type = PDN_APRS_TYPE_POSITION;
     rc = fill_position(result, &d.as.report, args);
     if (rc == PDN_APRS_OK)
         rc = put(result, d.as.report.timestamp, sizeof d.as.report.timestamp, args->timestamp, NULL,
-                 "the timestamp is longer than a timestamp can be");
+                 PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "the timestamp is longer than a timestamp can be");
     if (rc != PDN_APRS_OK)
         return rc;
     d.as.report.messaging = (uint8_t)(args->messaging != 0);
@@ -190,16 +194,16 @@ int pdn_aprs_build_object(const pdn_aprs_station *station, const pdn_aprs_positi
     int rc;
     begin(result);
     if (!args)
-        return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
+        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     memset(&d, 0, sizeof d);
     d.type = PDN_APRS_TYPE_OBJECT;
     rc = fill_position(result, &d.as.report, args);
     if (rc == PDN_APRS_OK)
         rc = put(result, d.as.report.name, sizeof d.as.report.name, args->name, NULL,
-                 "the name is longer than an object name can be");
+                 PDN_APRS_REFUSAL_INVALID_NAME, "the name is longer than an object name can be");
     if (rc == PDN_APRS_OK)
         rc = put(result, d.as.report.timestamp, sizeof d.as.report.timestamp, args->timestamp, NULL,
-                 "the timestamp is longer than a timestamp can be");
+                 PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "the timestamp is longer than a timestamp can be");
     if (rc != PDN_APRS_OK)
         return rc;
     d.as.report.killed = (uint8_t)(args->killed != 0);
@@ -213,13 +217,13 @@ int pdn_aprs_build_item(const pdn_aprs_station *station, const pdn_aprs_position
     int rc;
     begin(result);
     if (!args)
-        return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
+        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     memset(&d, 0, sizeof d);
     d.type = PDN_APRS_TYPE_ITEM;
     rc = fill_position(result, &d.as.report, args);
     if (rc == PDN_APRS_OK)
         rc = put(result, d.as.report.name, sizeof d.as.report.name, args->name, NULL,
-                 "the name is longer than an item name can be");
+                 PDN_APRS_REFUSAL_INVALID_NAME, "the name is longer than an item name can be");
     if (rc != PDN_APRS_OK)
         return rc;
     d.as.report.killed = (uint8_t)(args->killed != 0);
@@ -235,7 +239,7 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
     int rc;
     begin(result);
     if (!m)
-        return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
+        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     memset(&d, 0, sizeof d);
     d.type = PDN_APRS_TYPE_MIC_E;
     r->latitude = m->latitude;
@@ -252,7 +256,7 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
     /* feet go in a /A=; metres in the Mic-E altitude bytes, whose unit is
        the metre, rounded to it (ruling B2) */
     if (m->has_altitude && m->has_altitude_m)
-        return fail(result, PDN_APRS_ERR_ARGUMENT, "give the altitude in feet or in metres, not both");
+        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, "give the altitude in feet or in metres, not both");
     r->has_altitude = (uint8_t)(m->has_altitude || m->has_altitude_m);
     r->altitude_feet = m->has_altitude_m ? pdn_aprs__round(m->altitude_m) / 0.3048 : m->altitude_feet;
     r->altitude_in_comment = (uint8_t)(m->has_altitude != 0);
@@ -260,16 +264,16 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
        takes messages */
     if (m->type_code) {
         if (m->type_code != '>' && m->type_code != ']' && m->type_code != ' ')
-            return fail(result, PDN_APRS_ERR_REFUSED, "type_code names a device type: > ] or a space");
+            return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_CODE, "type_code names a device type: > ] or a space");
         r->type_code = m->type_code;
     } else {
         r->type_code = m->messaging ? '`' : '\'';
     }
     rc = put(result, r->device_suffix, sizeof r->device_suffix, m->device_suffix, NULL,
-             "the device suffix is longer than a suffix can be");
+             PDN_APRS_REFUSAL_TOO_LONG, "the device suffix is longer than a suffix can be");
     if (rc == PDN_APRS_OK)
         rc = put(result, r->locator, sizeof r->locator, m->locator, NULL,
-                 "the locator is longer than a locator can be");
+                 PDN_APRS_REFUSAL_MALFORMED, "the locator is longer than a locator can be");
     if (rc != PDN_APRS_OK)
         return rc;
     upper_case(r->locator);
@@ -285,7 +289,7 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
         r->has_telemetry = 1;
         r->telemetry = *m->telemetry;
     }
-    rc = put(result, r->comment, sizeof r->comment, m->comment, &n, "the comment is too long");
+    rc = put(result, r->comment, sizeof r->comment, m->comment, &n, PDN_APRS_REFUSAL_TOO_LONG, "the comment is too long");
     if (rc != PDN_APRS_OK)
         return rc;
     r->comment_len = (uint16_t)n;
@@ -343,11 +347,11 @@ int pdn_aprs_build_weather(const pdn_aprs_station *station, const char *timestam
     int rc;
     begin(result);
     if (!weather)
-        return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
+        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     memset(&d, 0, sizeof d);
     d.type = PDN_APRS_TYPE_WEATHER;
     rc = put(result, d.as.weather.timestamp, sizeof d.as.weather.timestamp, timestamp, NULL,
-             "the timestamp is longer than a timestamp can be");
+             PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "the timestamp is longer than a timestamp can be");
     if (rc != PDN_APRS_OK)
         return rc;
     d.as.weather.weather = *weather;
@@ -364,27 +368,27 @@ static int build_message(const pdn_aprs_station *station, int type, const char *
     /* a message ID is 1-5 letters or digits: an empty one is refused, not
        taken as none (ruling B8) */
     if (message_id && !message_id[0])
-        return fail(result, PDN_APRS_ERR_REFUSED, "a message ID is 1 to 5 letters or digits");
+        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_MESSAGE_ID, "a message ID is 1 to 5 letters or digits");
     if (!addressee)
-        return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
+        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     memset(&d, 0, sizeof d);
     d.type = (uint8_t)type;
-    rc = too_long_for_aprs(result, text, 67, "message text is at most 67 characters");
+    rc = too_long_for_aprs(result, text, 67, PDN_APRS_REFUSAL_TOO_LONG, "message text is at most 67 characters");
     if (rc != PDN_APRS_OK)
         return rc;
-    rc = put(result, d.as.message.text, sizeof d.as.message.text, text, &n, "the text is too long");
+    rc = put(result, d.as.message.text, sizeof d.as.message.text, text, &n, PDN_APRS_REFUSAL_TOO_LONG, "the text is too long");
     if (rc == PDN_APRS_OK)
         rc = put(result, d.as.message.addressee, sizeof d.as.message.addressee, addressee, NULL,
-                 "the addressee is longer than an addressee can be");
+                 PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "the addressee is longer than an addressee can be");
     if (rc == PDN_APRS_OK)
         rc = put(result, d.as.message.message_id, sizeof d.as.message.message_id, message_id, NULL,
-                 "the message ID is longer than an ID can be");
+                 PDN_APRS_REFUSAL_INVALID_MESSAGE_ID, "the message ID is longer than an ID can be");
     if (rc != PDN_APRS_OK)
         return rc;
     d.as.message.text_len = (uint16_t)n;
     if (reply_ack) {
         rc = put(result, d.as.message.reply_ack, sizeof d.as.message.reply_ack, reply_ack, NULL,
-                 "the reply-ack is longer than an ID can be");
+                 PDN_APRS_REFUSAL_INVALID_MESSAGE_ID, "the reply-ack is longer than an ID can be");
         if (rc != PDN_APRS_OK)
             return rc;
         d.as.message.has_reply_ack = 1;
@@ -397,7 +401,7 @@ int pdn_aprs_build_message(const pdn_aprs_station *station, const pdn_aprs_messa
 {
     begin(result);
     if (!args)
-        return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
+        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     return build_message(station, PDN_APRS_TYPE_MESSAGE, args->addressee, args->text, args->message_id,
                          args->reply_ack, buf, cap, result);
 }
@@ -409,13 +413,13 @@ static int build_ack(const pdn_aprs_station *station, int type, const char *addr
     int rc;
     begin(result);
     if (!addressee || !id)
-        return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
+        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     memset(&d, 0, sizeof d);
     d.type = (uint8_t)type;
     rc = put(result, d.as.ack.addressee, sizeof d.as.ack.addressee, addressee, NULL,
-             "the addressee is longer than an addressee can be");
+             PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "the addressee is longer than an addressee can be");
     if (rc == PDN_APRS_OK)
-        rc = put(result, d.as.ack.id, sizeof d.as.ack.id, id, NULL, "the message ID is longer than an ID can be");
+        rc = put(result, d.as.ack.id, sizeof d.as.ack.id, id, NULL, PDN_APRS_REFUSAL_INVALID_MESSAGE_ID, "the message ID is longer than an ID can be");
     if (rc != PDN_APRS_OK)
         return rc;
     return pdn_aprs_build(station, &d, buf, cap, result);
@@ -440,9 +444,9 @@ int pdn_aprs_build_bulletin(const pdn_aprs_station *station, char id, const char
     size_t g = group ? strlen(group) : 0;
     begin(result);
     if (id == 0)
-        return fail(result, PDN_APRS_ERR_REFUSED, "a bulletin needs an identifier: 0-9 or A-Z");
+        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "a bulletin needs an identifier: 0-9 or A-Z");
     if (g > 5)
-        return fail(result, PDN_APRS_ERR_REFUSED, "a bulletin group is up to 5 characters");
+        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "a bulletin group is up to 5 characters");
     memcpy(addressee, "BLN", 3);
     addressee[3] = id;
     if (g)
@@ -460,16 +464,16 @@ int pdn_aprs_build_status(const pdn_aprs_station *station, const pdn_aprs_status
     int rc;
     begin(result);
     if (!o)
-        return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
+        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     memset(&d, 0, sizeof d);
     d.type = PDN_APRS_TYPE_STATUS;
-    rc = put(result, s->text, sizeof s->text, o->text, &n, "the text is too long");
+    rc = put(result, s->text, sizeof s->text, o->text, &n, PDN_APRS_REFUSAL_TOO_LONG, "the text is too long");
     if (rc == PDN_APRS_OK)
         rc = put(result, s->timestamp, sizeof s->timestamp, o->timestamp, NULL,
-                 "the timestamp is longer than a timestamp can be");
+                 PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "the timestamp is longer than a timestamp can be");
     if (rc == PDN_APRS_OK)
         rc = put(result, s->locator, sizeof s->locator, o->locator, NULL,
-                 "the locator is longer than a locator can be");
+                 PDN_APRS_REFUSAL_MALFORMED, "the locator is longer than a locator can be");
     if (rc != PDN_APRS_OK)
         return rc;
     s->text_len = (uint16_t)n;
@@ -491,11 +495,11 @@ int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const pdn_aprs_tel
     int i, rc;
     begin(result);
     if (!a)
-        return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
+        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     /* a program's number has a three-digit form up to 999, and is refused
        above it, not wrapped (ruling B6) */
     if (a->sequence > 999)
-        return fail(result, PDN_APRS_ERR_REFUSED, "a telemetry sequence number is 0 to 999");
+        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "a telemetry sequence number is 0 to 999");
     memset(&d, 0, sizeof d);
     d.type = PDN_APRS_TYPE_TELEMETRY;
     t->sequence[0] = (char)('0' + a->sequence / 100);
@@ -509,14 +513,14 @@ int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const pdn_aprs_tel
             t->analog[i].value = a->analog[i];
     }
     if (a->bits) {
-        rc = put(result, t->bits, sizeof t->bits, a->bits, NULL, "the bits are eight 0 or 1 characters");
+        rc = put(result, t->bits, sizeof t->bits, a->bits, NULL, PDN_APRS_REFUSAL_MALFORMED, "the bits are eight 0 or 1 characters");
         if (rc != PDN_APRS_OK)
             return rc;
     } else {
         memcpy(t->bits, "00000000", 9);
     }
     t->has_bits = 1;
-    rc = put(result, t->comment, sizeof t->comment, a->comment, &n, "the comment is too long");
+    rc = put(result, t->comment, sizeof t->comment, a->comment, &n, PDN_APRS_REFUSAL_TOO_LONG, "the comment is too long");
     if (rc != PDN_APRS_OK)
         return rc;
     t->comment_len = (uint16_t)n;
@@ -539,19 +543,19 @@ static int build_list(const pdn_aprs_station *station, int type, const char *add
     begin(result);
     addressee = meta_addressee(station, addressee);
     if (!addressee || (count && !items))
-        return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
+        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     memset(&d, 0, sizeof d);
     d.type = (uint8_t)type;
     rc = put(result, m->addressee, sizeof m->addressee, addressee, NULL,
-             "the addressee is longer than an addressee can be");
+             PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "the addressee is longer than an addressee can be");
     if (rc != PDN_APRS_OK)
         return rc;
     if (count > 13)
-        return fail(result, PDN_APRS_ERR_REFUSED, "telemetry metadata names at most 13 channels");
+        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_MALFORMED, "telemetry metadata names at most 13 channels");
     for (i = 0; i < count; i++) {
         size_t n = items[i] ? strlen(items[i]) : 0;
         if (out + n + 1 > sizeof m->text)
-            return fail(result, PDN_APRS_ERR_REFUSED, "a telemetry name or unit is longer than APRS allows");
+            return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_TOO_LONG, "a telemetry name or unit is longer than APRS allows");
         if (n)
             memcpy(m->text + out, items[i], n);
         m->text[out + n] = 0;
@@ -585,15 +589,15 @@ int pdn_aprs_build_telemetry_coefficients(const pdn_aprs_station *station, const
     begin(result);
     addressee = meta_addressee(station, addressee);
     if (!addressee || (count && !coefficients))
-        return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
+        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     memset(&d, 0, sizeof d);
     d.type = PDN_APRS_TYPE_TELEMETRY_COEFFICIENTS;
     rc = put(result, d.as.meta.addressee, sizeof d.as.meta.addressee, addressee, NULL,
-             "the addressee is longer than an addressee can be");
+             PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "the addressee is longer than an addressee can be");
     if (rc != PDN_APRS_OK)
         return rc;
     if (count > 15)
-        return fail(result, PDN_APRS_ERR_REFUSED, "telemetry metadata gives at most 15 coefficients");
+        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_MALFORMED, "telemetry metadata gives at most 15 coefficients");
     for (i = 0; i < count; i++)
         d.as.meta.coefficient[i].value = coefficients[i];
     d.as.meta.count = (uint8_t)count;
@@ -609,18 +613,18 @@ int pdn_aprs_build_telemetry_bits(const pdn_aprs_station *station, const char *a
     begin(result);
     addressee = meta_addressee(station, addressee);
     if (!addressee || !bits)
-        return fail(result, PDN_APRS_ERR_ARGUMENT, NO_ARGS);
+        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     memset(&d, 0, sizeof d);
     d.type = PDN_APRS_TYPE_TELEMETRY_BITS;
-    rc = too_long_for_aprs(result, project, 23, "a project title is at most 23 characters");
+    rc = too_long_for_aprs(result, project, 23, PDN_APRS_REFUSAL_TOO_LONG, "a project title is at most 23 characters");
     if (rc != PDN_APRS_OK)
         return rc;
     rc = put(result, d.as.meta.addressee, sizeof d.as.meta.addressee, addressee, NULL,
-             "the addressee is longer than an addressee can be");
+             PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "the addressee is longer than an addressee can be");
     if (rc == PDN_APRS_OK)
-        rc = put(result, d.as.meta.bits, sizeof d.as.meta.bits, bits, NULL, "the bits are eight 0 or 1 characters");
+        rc = put(result, d.as.meta.bits, sizeof d.as.meta.bits, bits, NULL, PDN_APRS_REFUSAL_MALFORMED, "the bits are eight 0 or 1 characters");
     if (rc == PDN_APRS_OK)
-        rc = put(result, d.as.meta.text, sizeof d.as.meta.text, project, &n, "the project title is too long");
+        rc = put(result, d.as.meta.text, sizeof d.as.meta.text, project, &n, PDN_APRS_REFUSAL_TOO_LONG, "the project title is too long");
     if (rc != PDN_APRS_OK)
         return rc;
     d.as.meta.project_len = (uint16_t)n;

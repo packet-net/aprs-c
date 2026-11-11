@@ -955,6 +955,13 @@ static void meta_strings_in(conv *cv, const jval *a, const char *k, pdn_aprs_tel
     }
 }
 
+static int last_refusal;
+
+int neutral_refusal(void)
+{
+    return last_refusal;
+}
+
 /* A third-party packet's inner packet, written as its TNC2 form: the header,
    with * on the last used path entry, and the inner data encoded. Returns 1,
    0 when the C data cannot hold it, or -1 when the encoder refuses it. */
@@ -981,8 +988,10 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
            info is not a defect (ruling F10) */
         const jval *dg = json_get(p, "diagnostics");
         for (k = 0; dg && dg->t == J_ARR && k < dg->count; k++)
-            if (dg->items[k]->t != J_STR || strncmp(dg->items[k]->str, "info:", 5) != 0)
+            if (dg->items[k]->t != J_STR || strncmp(dg->items[k]->str, "info:", 5) != 0) {
+                last_refusal = PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER;
                 return -1;
+            }
     }
     if (!data)
         return cannot(cv, "has no data", "packet");
@@ -992,6 +1001,7 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         free(inner);
         if (!reason || strcmp(reason, "empty") != 0) {
             snprintf(cv->err, cv->errlen, "inner packet: unrecognized data has nothing to encode");
+            last_refusal = PDN_APRS_REFUSAL_NOT_ENCODABLE;
             return -1;
         }
         inner = NULL;
@@ -1009,6 +1019,7 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         if (i < 0) {
             free(inner);
             snprintf(cv->err, cv->errlen, "inner packet: %s", enc.reason ? enc.reason : pdn_aprs_strerror(i));
+            last_refusal = enc.refusal;
             return -1;
         }
     }
@@ -1048,6 +1059,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
     c.errlen = errlen;
     c.bad = 0;
     err[0] = 0;
+    last_refusal = 0;
     if (!type) {
         snprintf(err, errlen, "no type");
         return 0;
@@ -1092,6 +1104,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         if (!c.bad && json_get(j, "message_id")) {
             /* an ack does not carry its own message ID: make the encoder see it */
             snprintf(err, errlen, "ack with message_id");
+            last_refusal = PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED;
             return -1;
         }
         break;
