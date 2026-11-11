@@ -877,6 +877,34 @@ static void test_refusal_codes(void)
     n = pdn_aprs_encode_tnc2(&h, &d, NULL, line, sizeof line, &enc);
     CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_ADDRESS);
 
+    /* a list over its limit is too long; a compressed course below 0 is out of range */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_TELEMETRY_NAMES;
+    snprintf(d.as.meta.addressee, sizeof d.as.meta.addressee, "M0LTE");
+    d.as.meta.count = 14;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 10;
+    d.as.report.longitude = 10;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '-');
+    d.as.report.compressed = 1;
+    d.as.report.has_course = 1;
+    d.as.report.has_speed = 1;
+    d.as.report.course_degrees = -0.7;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE);
+    d.as.report.course_degrees = 0;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM);
+
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_TELEMETRY;
+    d.as.telemetry.analog_count = 5;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_MALFORMED);
+
     /* a data type with no writer, and a bare NULL, which is no refusal */
     d.type = PDN_APRS_TYPE_UNRECOGNIZED;
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);

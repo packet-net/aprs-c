@@ -583,7 +583,7 @@ static int build_list(const pdn_aprs_station *station, int type, const char *add
     if (rc != PDN_APRS_OK)
         return rc;
     if (count > 13)
-        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_MALFORMED, "telemetry metadata names at most 13 channels");
+        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_TOO_LONG, "telemetry metadata names at most 13 channels");
     for (i = 0; i < count; i++) {
         size_t n = items[i] ? strlen(items[i]) : 0;
         if (out + n + 1 > sizeof m->text)
@@ -629,7 +629,7 @@ int pdn_aprs_build_telemetry_coefficients(const pdn_aprs_station *station, const
     if (rc != PDN_APRS_OK)
         return rc;
     if (count > 15)
-        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_MALFORMED, "telemetry metadata gives at most 15 coefficients");
+        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_TOO_LONG, "telemetry metadata gives at most 15 coefficients");
     for (i = 0; i < count; i++)
         d.as.meta.coefficient[i].value = coefficients[i];
     d.as.meta.count = (uint8_t)count;

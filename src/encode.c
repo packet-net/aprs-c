@@ -471,7 +471,7 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         }
         if (r->has_speed && not_a_number(e, r->speed_knots))
             return 0;
-        if (r->has_course && cr > 360)
+        if (r->has_course && (cr > 360 || cr < 0))
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "course out of range for a compressed position");
         if (r->has_speed) {
             s = cs_speed_step(r->speed_knots);
@@ -1651,7 +1651,7 @@ static int encode_meta(pdn_aprs__ectx *e, const pdn_aprs_data *d)
     case PDN_APRS_TYPE_TELEMETRY_NAMES:
     case PDN_APRS_TYPE_TELEMETRY_UNITS:
         if (m->count > 13)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "names and units cover at most 13 channels");
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_TOO_LONG, "names and units cover at most 13 channels");
         pdn_aprs__puts(e->b, d->type == PDN_APRS_TYPE_TELEMETRY_NAMES ? "PARM." : "UNIT.");
         for (i = 0; i < m->count; i++) {
             const char *s = m->text + m->offset[i];
@@ -1729,8 +1729,6 @@ static int encode_telemetry(pdn_aprs__ectx *e, const pdn_aprs_telemetry *t)
 {
     size_t sl = strlen(t->sequence), i;
     int k;
-    if (sl == 0)
-        defer(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a telemetry report needs a sequence");
     if (!valid_text(t->comment, t->comment_len))
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");
     for (k = 0; k < 5 && t->analog_count == 5; k++)
@@ -1740,6 +1738,8 @@ static int encode_telemetry(pdn_aprs__ectx *e, const pdn_aprs_telemetry *t)
        Mic-E telemetry only with one) */
     if (strcmp(t->sequence, "MIC") == 0 && t->analog_count == 5 && t->analog[0].is_null)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "T#MIC needs a first channel");
+    if (sl == 0)
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a telemetry report needs a sequence");
     for (i = 0; i < sl; i++)
         if (!A_ALNUM(t->sequence[i]))
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a telemetry sequence is letters and digits");
