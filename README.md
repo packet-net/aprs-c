@@ -2,7 +2,9 @@
 
 An APRS encoder and decoder in C99. It reads TNC2 / APRS-IS lines and AX.25 UI frames, tells you what each packet means and what is wrong with it, and writes packets back out. It is two files, `pdn_aprs.h` and `pdn_aprs.c`, plus an optional third holding the device identification table, and it is meant to be dropped into an existing C program such as a packet node, an IGate or a digipeater.
 
-It is the C member of a family of APRS libraries that all run the same language-neutral conformance vectors, [packet-net/aprs-vectors](https://github.com/packet-net/aprs-vectors): [Packet.Aprs](https://github.com/packet-net/packet.net) (C#), [pdn-aprs](https://github.com/packet-net/aprs-rs) (Rust), [pdn-aprs](https://github.com/packet-net/aprs-py) (Python) and [@packet-net/pdn-aprs](https://github.com/packet-net/aprs-ts) (TypeScript). It passes every check in the vectors, and at 0.1.0 it decoded all 6,879,893 packets of a real APRS-IS capture exactly as the Rust library did.
+Conforms to [aprs-vectors](https://github.com/packet-net/aprs-vectors) 1.0: every case passes.
+
+It is the C member of a family of APRS libraries that all run the same language-neutral conformance vectors, [packet-net/aprs-vectors](https://github.com/packet-net/aprs-vectors): [Packet.Aprs](https://github.com/packet-net/packet.net) (C#), [pdn-aprs](https://github.com/packet-net/aprs-rs) (Rust), [pdn-aprs](https://github.com/packet-net/aprs-py) (Python) and [@packet-net/pdn-aprs](https://github.com/packet-net/aprs-ts) (TypeScript). At 0.1.0 it decoded all 6,879,893 packets of a real APRS-IS capture exactly as the Rust library did.
 
 - Every APRS data type: positions (plain, compressed, with timestamps, ambiguity, `!DAO!`, data extensions, frequencies, base-91 telemetry), Mic-E, objects, items, weather, messages, acks, bulletins, NWS bulletins, telemetry and its metadata, status, queries, capabilities, third-party, NMEA, raw weather, user-defined, test and Agrelo DF.
 - Lenient decoding by default, strict on request, and each tolerated defect switchable on its own.
@@ -248,7 +250,7 @@ The library was written to be added to the source tree of a program like LinBPQ/
 
 The tests run every check the vectors' README defines against every case in [packet-net/aprs-vectors](https://github.com/packet-net/aprs-vectors), which is a submodule at `vectors/`: the lenient decode, the strict decode, the decode with each single tolerance switched off, the re-encode (identical; `canonical_info` byte for byte, for equivalent and rounded; or refused) and the encode cases.
 
-- **Vectors:** all 6,176 checks pass over 1,961 cases: 1,844 lenient decodes, 1,844 strict decodes, 699 decodes with a single tolerance switched off, 1,672 re-encodes and 117 encode cases. `pdn_aprs_vectors vectors -v` lists every check by case id.
+- **Vectors:** all 6,183 checks pass over 1,966 cases: 1,845 lenient decodes, 1,845 strict decodes, 699 decodes with a single tolerance switched off, 1,673 re-encodes and 121 encode cases. `pdn_aprs_vectors vectors -v` lists every check by case id.
 - **A real capture:** at 0.1.0, on 6,879,893 packets from APRS-IS, the decodings (lenient and strict) and re-encodings agreed with the Rust library's on every packet, by the vectors' `tools/compare.py`. The only differences were encoder choices the comparison does not count: for 114 objects this library wrote the original bytes back where Rust wrote different but equivalent ones.
 - **Differential fuzzing:** the five implementations were also compared over 2,000,000 mutated packets (2026-09-27). Every disagreement was settled by a ruling, and the rulings are in the vectors as cases.
 

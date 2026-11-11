@@ -1,5 +1,5 @@
 /*
- * pdn_aprs.c - APRS encoder and decoder in C99, version 0.3.0.
+ * pdn_aprs.c - APRS encoder and decoder in C99, version 1.0.0.
  *
  * https://github.com/packet-net/aprs-c
  * SPDX-License-Identifier: MIT
