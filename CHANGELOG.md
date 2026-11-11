@@ -6,6 +6,8 @@
 
 - A refusal now says why in a form a program can act on: `pdn_aprs_encoded` gains `int refusal` at the end (a `pdn_aprs_refusal` code, zero for none and for every error that is not `PDN_APRS_ERR_REFUSED`), and `pdn_aprs_refusal_name()` gives the vectors' kebab-case id. The 26 codes are the refusal ids of the shared vectors; new ones may be appended in a later 1.x release, so keep a default case. Build calls fill it in `result` too. The message text is unchanged and still not stable API.
 - Fixed: a header address the encoder cannot write (`pdn_aprs_encode_tnc2` and `pdn_aprs_encode_ax25`) returned `PDN_APRS_ERR_ARGUMENT`, though the header documents `PDN_APRS_ERR_REFUSED`. It is now `PDN_APRS_ERR_REFUSED` with `PDN_APRS_REFUSAL_INVALID_ADDRESS` (TNC2) or `PDN_APRS_REFUSAL_AX25_CANNOT_CARRY` (AX.25) and a reason. NULL pointers stay `PDN_APRS_ERR_ARGUMENT`.
+- An altitude given to `pdn_aprs_build_mic_e` in feet and in metres is now `PDN_APRS_ERR_REFUSED` with `PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE`, where it was `PDN_APRS_ERR_ARGUMENT`.
+- When data breaks several rules the refusal names the first by the shared order of the vectors' DESIGN.md (a fault in a field on its own before one about how fields relate; the header before the data).
 - The dump tool writes `refusal` (encode and build), `reencode_refusal` (decode) and `ax25_refusal` (the API view) in its records.
 
 ## 1.0.0 (2026-11-10)

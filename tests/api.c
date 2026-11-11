@@ -598,7 +598,11 @@ static void test_batch2(void)
     CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line, NULL) > 0 && strstr(line, "/A=") == NULL &&
           decode(line) == PDN_APRS_OK && fabs(pkt.data.as.report.altitude_feet - 100 / 0.3048) < 1e-6);
     mic.has_altitude = 1;
-    CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line, NULL) == PDN_APRS_ERR_ARGUMENT);
+    {
+        pdn_aprs_encoded twice;
+        CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line, &twice) == PDN_APRS_ERR_REFUSED &&
+              twice.refusal == PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE);
+    }
     /* with ambiguity the longitude digits a decoder ignores hold the centre
        it reports: 07.74 minutes at two levels is 07.50 */
     mic.has_altitude = 0;
@@ -834,6 +838,44 @@ static void test_refusal_codes(void)
     snprintf(h.source, sizeof h.source, "M0LTE");
     n = pdn_aprs_encode_ax25(&h, &d, NULL, frame, sizeof frame, &enc);
     CHECK(n > 0 && enc.refusal == 0);
+
+    /* the first rule by the shared order: a fault in a field on its own before
+       one about how fields relate, and NaN before a range */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 10;
+    d.as.report.longitude = 10;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '_');
+    d.as.report.has_course = 1;
+    d.as.report.has_phg = 1;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_EXTENSION_CONFLICT);
+    d.as.report.comment_len = 3;
+    memcpy(d.as.report.comment, "a\nb", 4);
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_CHARACTER);
+    d.as.report.comment_len = 0;
+    d.as.report.has_course = 0;
+    d.as.report.has_phg = 0;
+    d.as.report.latitude = NAN;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_NOT_A_NUMBER);
+    d.as.report.latitude = 10;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_SYMBOL_MISMATCH);
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '-');
+    d.as.report.ambiguity = 2;
+    d.as.report.latitude = 90;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM);
+    /* the header before the data */
+    memset(&h, 0, sizeof h);
+    h.q_construct = -1;
+    snprintf(h.source, sizeof h.source, "bad addr");
+    snprintf(h.destination, sizeof h.destination, "APRS");
+    d.as.report.latitude = 100;
+    n = pdn_aprs_encode_tnc2(&h, &d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_ADDRESS);
 
     /* a data type with no writer, and a bare NULL, which is no refusal */
     d.type = PDN_APRS_TYPE_UNRECOGNIZED;

@@ -233,6 +233,9 @@ typedef struct pdn_aprs__ectx {
     pdn_aprs__buf *b;
     const char *reason;
     int refusal;
+    int deferred; /* a refusal noted and not yet raised (encode.c) */
+    const char *deferred_why;
+    const pdn_aprs_device_table *devices; /* the options' table, or NULL */
     char dest[PDN_APRS_ADDR_SIZE];
     int variant; /* 1: put a / before any comment, 2: a space */
 } pdn_aprs__ectx;

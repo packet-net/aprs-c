@@ -240,6 +240,9 @@ typedef struct pdn_aprs__ectx {
     pdn_aprs__buf *b;
     const char *reason;
     int refusal;
+    int deferred; /* a refusal noted and not yet raised (encode.c) */
+    const char *deferred_why;
+    const pdn_aprs_device_table *devices; /* the options' table, or NULL */
     char dest[PDN_APRS_ADDR_SIZE];
     int variant; /* 1: put a / before any comment, 2: a space */
 } pdn_aprs__ectx;
@@ -4794,6 +4797,86 @@ static int finite_number(double v)
     return v == v && v - v == 0.0;
 }
 
+/* Refusals about how fields relate (a field the report has no room for, two
+   things wanting one place, a symbol that disagrees, a missing companion) are
+   noted and the walk goes on, so that a fault in a field on its own, found
+   later, is the one named (DESIGN.md, ruling 1). The first of them in that
+   order is refused once the whole report has been walked. */
+static int defer_rank(int code)
+{
+    switch (code) {
+    case PDN_APRS_REFUSAL_EXTENSION_CONFLICT:
+        return 1;
+    case PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED:
+        return 2;
+    case PDN_APRS_REFUSAL_SYMBOL_MISMATCH:
+        return 3;
+    case PDN_APRS_REFUSAL_MISSING_FIELD:
+        return 4;
+    default:
+        return 5;
+    }
+}
+
+static void defer(pdn_aprs__ectx *e, int code, const char *why)
+{
+    if (!e->deferred || defer_rank(code) < defer_rank(e->deferred)) {
+        e->deferred = code;
+        e->deferred_why = why;
+    }
+}
+
+/* Decodes what was written and checks it reads back as the same data, with
+   no warnings or errors. */
+static int reads_back(const pdn_aprs_data *d, const uint8_t *info, size_t n, const char *dest,
+                      const pdn_aprs_device_table *devices)
+{
+    pdn_aprs_packet p;
+    pdn_aprs_header h;
+    pdn_aprs_decode_options o;
+    pdn_aprs_device_entry mice, legacy;
+    pdn_aprs_device_table table;
+    char legacy_key[4];
+    int i;
+    memset(&o, 0, sizeof o);
+    pdn_aprs__header_default(&h);
+    if (d->type == PDN_APRS_TYPE_MIC_E) {
+        const pdn_aprs_report *r = &d->as.report;
+        pdn_aprs__strlcpy(h.destination, dest, sizeof h.destination);
+        if (devices) {
+            o.devices = devices;
+        } else if (r->device_suffix[0]) {
+            memset(&mice, 0, sizeof mice);
+            memset(&legacy, 0, sizeof legacy);
+            mice.key = r->device_suffix;
+            legacy_key[0] = r->type_code;
+            pdn_aprs__strlcpy(legacy_key + 1, r->device_suffix, 3);
+            legacy.key = legacy_key;
+            memset(&table, 0, sizeof table);
+            table.mice = &mice;
+            table.mice_count = 1;
+            table.mice_legacy = &legacy;
+            table.mice_legacy_count = 1;
+            o.devices = &table;
+        }
+    }
+    if (pdn_aprs_decode_info_unbounded(&h, info, n, &o, &p) != PDN_APRS_OK)
+        return 0;
+    for (i = 0; i < p.diagnostic_count; i++)
+        if (p.diagnostics[i].severity != PDN_APRS_SEVERITY_INFO)
+            return 0;
+    return pdn_aprs__data_equal(&p.data, d, 1);
+}
+
+/* NaN or an infinity: refused before any range check sees it. */
+static int not_a_number(pdn_aprs__ectx *e, double v)
+{
+    if (finite_number(v))
+        return 0;
+    pdn_aprs__refuse(e, PDN_APRS_REFUSAL_NOT_A_NUMBER, "a number is NaN or infinite");
+    return 1;
+}
+
 /* ---- text checks ---- */
 
 static int has_line_break(const char *s, size_t n)
@@ -4881,6 +4964,32 @@ static int coord_mode(int dao_precision, int ambiguity)
     return COORD_HUNDREDTHS;
 }
 
+/* 1 if an ambiguous coordinate's reported point, the centre of the box left
+   by the blanked digits, is past limit (a pole, or 180): the decoder refuses
+   such a position, so it has no form (position.c, mice.c). */
+static int ambiguous_past(int deg, long hund, int amb, double limit)
+{
+    int min = (int)(hund / 100), h = (int)(hund % 100);
+    double minutes;
+    switch (amb) {
+    case 1:
+        minutes = min + (h - h % 10) / 100.0 + 0.05;
+        break;
+    case 2:
+        minutes = min + 0.5;
+        break;
+    case 3:
+        minutes = (min - min % 10) + 5.0;
+        break;
+    case 4:
+        minutes = 30.0;
+        break;
+    default:
+        return 0;
+    }
+    return deg + minutes / 60.0 > limit;
+}
+
 static void put_coord(pdn_aprs__buf *b, int deg, long hund, int deg_digits, int amb)
 {
     char digits[4];
@@ -4928,16 +5037,14 @@ static int put_uncompressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, char da
     int ldeg, gdeg, dao_prec = r->has_dao ? r->dao.precision : -1;
     long lh, gh, lx, gx;
     char a, o;
+    if (not_a_number(e, r->latitude) || not_a_number(e, r->longitude))
+        return 0;
     if (r->latitude < -90 || r->latitude > 90 || r->longitude < -180 || r->longitude > 180)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "position out of range");
-    if (!pdn_aprs__symbol_table_ok(r->symbol.table))
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_SYMBOL, "invalid symbol table");
-    if (!A_GRAPH(r->symbol.code))
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_SYMBOL, "invalid symbol code");
     if (r->ambiguity > 4)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "ambiguity out of range");
     if (r->has_dao && r->ambiguity)
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a !DAO! cannot add precision to an ambiguous position");
+        defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a !DAO! cannot add precision to an ambiguous position");
     /* with ambiguity the digits kept are those of the box the position is
        in (truncated); with a !DAO! the rest goes in its digits */
     split_coord(r->latitude, coord_mode(dao_prec, r->ambiguity), r->ambiguity, &ldeg, &lh, &lx);
@@ -4945,6 +5052,14 @@ static int put_uncompressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, char da
     dao_digits(dao_prec, lx, gx, &a, &o);
     if (ldeg > 90 || gdeg > 180)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "position out of range");
+    if (ambiguous_past(ldeg, lh, r->ambiguity, 90.0) || ambiguous_past(gdeg, gh, r->ambiguity, 180.0))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "an ambiguous position centred past a pole has no form");
+    if (r->has_dao && !dao_datum_ok(&r->dao))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, DAO_DATUM_REFUSAL);
+    if (!pdn_aprs__symbol_table_ok(r->symbol.table))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_SYMBOL, "invalid symbol table");
+    if (!A_GRAPH(r->symbol.code))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_SYMBOL, "invalid symbol code");
     put_coord(e->b, ldeg, lh, 2, r->ambiguity);
     pdn_aprs__putc(e->b, negative(r->latitude) ? 'S' : 'N');
     pdn_aprs__putc(e->b, r->symbol.table);
@@ -5032,16 +5147,22 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
     char table = r->symbol.table;
     *alt_in_cs = 0;
     *range_in_cs = 0;
+    if (not_a_number(e, r->latitude) || not_a_number(e, r->longitude))
+        return 0;
     if (r->latitude < -90 || r->latitude > 90 || r->longitude < -180 || r->longitude > 180)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "position out of range");
+    if (r->ambiguity > 4)
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "ambiguity out of range");
+    if (r->has_dao && !dao_datum_ok(&r->dao))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, DAO_DATUM_REFUSAL);
     if (!pdn_aprs__symbol_table_ok(table))
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_SYMBOL, "invalid symbol table");
     if (!A_GRAPH(r->symbol.code))
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_SYMBOL, "invalid symbol code");
     if (r->ambiguity)
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a compressed position cannot be ambiguous");
+        defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a compressed position cannot be ambiguous");
     if (r->has_phg || r->has_dfs || r->has_area || r->has_df_bearing || r->has_storm)
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a compressed position has no room for this data extension");
+        defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a compressed position has no room for this data extension");
     if (A_DIGIT(table))
         table = (char)(table - '0' + 'a');
     y = pdn_aprs__round(380926.0 * (90.0 - r->latitude));
@@ -5056,12 +5177,19 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
     pdn_aprs__putc(e->b, r->symbol.code);
     if (weather) {
         const pdn_aprs_weather *w = &r->weather;
-        if (w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] && w->has[PDN_APRS_WX_WIND_SPEED_MPH] &&
-            !(r->has_compression && r->compression.source == PDN_APRS_SOURCE_GGA)) {
+        int gga = r->has_compression && r->compression.source == PDN_APRS_SOURCE_GGA;
+        int wind = w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] && w->has[PDN_APRS_WX_WIND_SPEED_MPH];
+        /* the cs bytes hold the wind, so they cannot also hold a course and
+           speed, a range or a GGA altitude (rulings 12 and 13) */
+        if (r->has_course || r->has_speed || (r->has_range && wind) || (wind && gga && r->has_altitude))
+            defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed weather report has room for the wind alone in the cs bytes");
+        if (wind && !gga) {
             double dir = w->value[PDN_APRS_WX_WIND_DIRECTION_DEGREES], mph = w->value[PDN_APRS_WX_WIND_SPEED_MPH];
             long c, s;
             /* rounded to the nearest 4 degrees; 360 is north, c = 0 */
-            if (!finite_number(dir) || pdn_aprs__round(dir) < 0 || pdn_aprs__round(dir) > 360)
+            if (not_a_number(e, dir) || not_a_number(e, mph))
+                return 0;
+            if (pdn_aprs__round(dir) < 0 || pdn_aprs__round(dir) > 360)
                 return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "wind out of range for a compressed position");
             c = (long)pdn_aprs__round(dir / 4.0) % 90;
             s = cs_speed_step(mph / PDN_APRS__KNOTS_TO_MPH);
@@ -5080,39 +5208,53 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
             pdn_aprs__putc(e->b, t_byte(r));
             *range_in_cs = 1;
         } else if (r->has_compression) {
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MISSING_FIELD, "compression type without the data for it");
+            defer(e, PDN_APRS_REFUSAL_MISSING_FIELD, "compression type without the data for it");
         } else {
             pdn_aprs__puts(e->b, " sT");
         }
     } else if (r->has_compression && r->compression.source == PDN_APRS_SOURCE_GGA) {
         if (!r->has_altitude)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a GGA compressed position needs an altitude");
+            defer(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a GGA compressed position needs an altitude");
+        if (r->has_course || r->has_speed)
+            defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a GGA altitude and a course/speed both want the cs bytes");
         put_gga_altitude(e->b, r->altitude_feet, alt_in_cs);
         pdn_aprs__putc(e->b, t_byte(r));
     } else if (r->has_course || r->has_speed) {
-        long c, s;
-        double cr;
+        long c = 0, s = 0;
+        double cr = 1;
         /* the cs bytes hold a course and a speed together (ruling F5) */
         if (!r->has_course || !r->has_speed)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a compressed course/speed needs both a course and a speed");
+            defer(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a compressed course/speed needs both a course and a speed");
         if (r->has_range)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed position has room for a course/speed or a range, not both");
-        cr = pdn_aprs__round(r->course_degrees);
+            defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed position has room for a course/speed or a range, not both");
+        if (r->has_course) {
+            if (not_a_number(e, r->course_degrees))
+                return 0;
+            cr = pdn_aprs__round(r->course_degrees);
+        }
+        if (r->has_speed && not_a_number(e, r->speed_knots))
+            return 0;
+        if (r->has_course && cr > 360)
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "course out of range for a compressed position");
+        if (r->has_speed) {
+            s = cs_speed_step(r->speed_knots);
+            if (s < 0)
+                return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "speed out of range for a compressed position");
+        }
         /* a c of 0 reads back as 360, so a course that rounds to 0 has no
            form (rulings F1 and F2) */
-        if (!finite_number(r->course_degrees) || cr > 360)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "course out of range for a compressed position");
         if (cr <= 0)
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "a compressed course of 0 means no course");
-        c = (long)pdn_aprs__round(r->course_degrees / 4.0) % 90;
-        s = cs_speed_step(r->speed_knots);
-        if (s < 0)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "speed out of range for a compressed position");
+        if (r->has_course)
+            c = (long)pdn_aprs__round(r->course_degrees / 4.0) % 90;
         pdn_aprs__putc(e->b, (int)(33 + c));
         pdn_aprs__putc(e->b, (int)(33 + s));
         pdn_aprs__putc(e->b, t_byte(r));
     } else if (r->has_range) {
-        long s = cs_range_step(r->range_miles);
+        long s;
+        if (not_a_number(e, r->range_miles))
+            return 0;
+        s = cs_range_step(r->range_miles);
         if (s < 0)
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "range out of range for a compressed position");
         pdn_aprs__putc(e->b, '{');
@@ -5120,7 +5262,7 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         pdn_aprs__putc(e->b, t_byte(r));
         *range_in_cs = 1;
     } else if (r->has_compression) {
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MISSING_FIELD, "compression type without the data for it");
+        defer(e, PDN_APRS_REFUSAL_MISSING_FIELD, "compression type without the data for it");
     } else {
         pdn_aprs__puts(e->b, " sT");
     }
@@ -5131,8 +5273,6 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
         long hund, lx, gx;
         char a, o, dc = A_TOUPPER(r->dao.datum);
         int mode = coord_mode(r->dao.precision, 0);
-        if (!dao_datum_ok(&r->dao))
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, DAO_DATUM_REFUSAL);
         /* the position reported: what the compressed bytes decode to */
         split_coord(90.0 - y / 380926.0, mode, 0, &deg, &hund, &lx);
         split_coord(x / 190463.0 - 180.0, mode, 0, &deg, &hund, &gx);
@@ -5195,7 +5335,9 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_frequency(pdn_aprs__ectx *e, const pdn_ap
 {
     double mhz = f->mhz;
     long whole, frac;
-    if (!finite_number(mhz) || mhz < 0)
+    if (not_a_number(e, mhz))
+        return 0;
+    if (mhz < 0)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "frequency out of range");
     if (f->ten_khz_resolution) {
         long v = (long)pdn_aprs__round(mhz * 100);
@@ -5279,7 +5421,9 @@ static int put_altitude(pdn_aprs__ectx *e, double feet)
 {
     pdn_aprs__buf *b = e->b;
     long v;
-    if (!finite_number(feet) || pdn_aprs__round(feet) < -99999 || pdn_aprs__round(feet) > 999999)
+    if (not_a_number(e, feet))
+        return 0;
+    if (pdn_aprs__round(feet) < -99999 || pdn_aprs__round(feet) > 999999)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "altitude out of range");
     v = (long)pdn_aprs__round(feet);
     pdn_aprs__puts(b, "/A=");
@@ -5418,8 +5562,8 @@ static int put_wx_field(pdn_aprs__ectx *e, char letter, const pdn_aprs_weather *
         return 1;
     }
     v = w->value[idx];
-    if (!finite_number(v))
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "weather value out of range");
+    if (not_a_number(e, v))
+        return 0;
     switch (letter) {
     case 'r':
     case 'p':
@@ -5506,7 +5650,7 @@ static int put_wx_field(pdn_aprs__ectx *e, char letter, const pdn_aprs_weather *
         return 1;
     }
     {
-        long maxv = width == 2 ? 99 : width == 5 ? 99999 : 999;
+        long maxv = width == 2 ? 99 : width == 5 ? 99999 : letter == 'c' ? 360 : 999;
         if (iv < 0 || iv > maxv)
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "weather value out of range");
     }
@@ -5564,8 +5708,8 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const p
 static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
 {
     const pdn_aprs_report *r = &d->as.report;
-    int weather = r->symbol.code == '_';
-    char dao[5];
+    int weather = r->symbol.code == '_' && r->has_weather;
+    char dao[5] = {0, 0, 0, 0, 0};
     int alt_in_cs = 0, range_in_cs = 0, at_ext = 0, ext_counts = 0;
     size_t i, symbol_end;
     if (d->type == PDN_APRS_TYPE_POSITION) {
@@ -5606,8 +5750,9 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         pdn_aprs__puts(e->b, r->name);
         pdn_aprs__putc(e->b, r->killed ? '_' : '!');
     }
-    if (r->has_weather && !weather)
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_SYMBOL_MISMATCH, "weather needs the weather station symbol");
+    /* a report is a weather report only when it carries weather (ruling 10) */
+    if ((r->has_weather && r->symbol.code != '_') || (r->symbol.code == '_' && !r->has_weather))
+        defer(e, PDN_APRS_REFUSAL_SYMBOL_MISMATCH, "weather needs the weather station symbol");
     if (r->compressed) {
         if (!put_compressed(e, r, weather, &alt_in_cs, &range_in_cs, dao))
             return 0;
@@ -5623,19 +5768,30 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         /* a GGA altitude the cs bytes do not hold exactly has no /A= here,
            which has no comment: the nearest cs value alone (ruling F14) */
         int gga_in_cs = r->compressed && r->has_compression && r->compression.source == PDN_APRS_SOURCE_GGA;
-        if (r->comment_len)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report has no comment");
+        if (r->comment_len) {
+            if (!valid_text(r->comment, r->comment_len))
+                return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");
+            defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report has no comment");
+        }
         if (r->has_telemetry)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report cannot carry base-91 telemetry");
-        if ((!r->compressed && (r->has_course || r->has_speed)) || r->has_phg || r->has_dfs || r->has_area ||
-            r->has_df_bearing || r->has_storm || (r->has_range && !range_in_cs) ||
-            (r->has_altitude && !alt_in_cs && !gga_in_cs) || r->has_frequency || r->signpost[0])
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report has no room for this data");
+            defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report cannot carry base-91 telemetry");
+        /* uncompressed, the wind holds the data extension: any other is a
+           conflict for it (ruling 12); compressed, a 7-byte extension was
+           refused above */
+        if (!r->compressed && (r->has_course || r->has_speed || r->has_phg || r->has_dfs || r->has_area ||
+                               r->has_df_bearing || r->has_storm || r->has_range))
+            defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "the wind of a weather report holds the data extension");
+        if (r->compressed && r->has_range && !range_in_cs)
+            defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed weather report has room for the wind alone in the cs bytes");
+        if ((r->has_altitude && !alt_in_cs && !gga_in_cs) || r->has_frequency || r->signpost[0])
+            defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report has no room for this data");
         if (!r->compressed) {
             int dh = w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES], sh = w->has[PDN_APRS_WX_WIND_SPEED_MPH];
             double dv = w->value[PDN_APRS_WX_WIND_DIRECTION_DEGREES], sv = w->value[PDN_APRS_WX_WIND_SPEED_MPH];
-            if ((dh && (!finite_number(dv) || pdn_aprs__round(dv) < 0 || pdn_aprs__round(dv) > 360)) ||
-                (sh && (!finite_number(sv) || pdn_aprs__round(sv) < 0 || pdn_aprs__round(sv) > 999)))
+            if ((dh && not_a_number(e, dv)) || (sh && not_a_number(e, sv)))
+                return 0;
+            if ((dh && (pdn_aprs__round(dv) < 0 || pdn_aprs__round(dv) > 360)) ||
+                (sh && (pdn_aprs__round(sv) < 0 || pdn_aprs__round(sv) > 999)))
                 return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "wind out of range");
             if (dh)
                 pdn_aprs__putu(e->b, (unsigned long)pdn_aprs__round(dv), 3);
@@ -5648,7 +5804,7 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
                 pdn_aprs__puts(e->b, "...");
         } else if (!(w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] && w->has[PDN_APRS_WX_WIND_SPEED_MPH]) &&
                    (w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES] || w->has[PDN_APRS_WX_WIND_SPEED_MPH])) {
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a compressed weather report needs both wind direction and speed");
+            defer(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a compressed weather report needs both wind direction and speed");
         }
         if (!pdn_aprs__encode_weather_fields(e, w, 0))
             return 0;
@@ -5661,19 +5817,21 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
     if (!r->compressed) {
         int kinds = (r->has_course || r->has_speed) + r->has_phg + (r->has_range ? 1 : 0) + r->has_dfs + r->has_area;
         if (kinds > 1)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "only one data extension fits");
+            defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "only one data extension fits");
         if ((r->has_df_bearing || r->has_storm) && !(r->has_course || r->has_speed) && kinds)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "DF bearing and storm data follow a course/speed");
+            defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "DF bearing and storm data follow a course/speed");
         if (r->has_df_bearing && !(r->symbol.table == '/' && r->symbol.code == '\\'))
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_SYMBOL_MISMATCH, "a DF bearing needs the DF symbol");
+            defer(e, PDN_APRS_REFUSAL_SYMBOL_MISMATCH, "a DF bearing needs the DF symbol");
         if (r->has_storm && r->symbol.code != '@')
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_SYMBOL_MISMATCH, "storm data needs a hurricane symbol");
+            defer(e, PDN_APRS_REFUSAL_SYMBOL_MISMATCH, "storm data needs a hurricane symbol");
         if (r->has_course || r->has_speed || r->has_df_bearing || r->has_storm) {
             if (r->has_course) {
                 /* rounded, then checked; 0 is 000, which reads back as 0
                    (rulings F1 and F2) */
                 double cr = pdn_aprs__round(r->course_degrees);
-                if (!finite_number(r->course_degrees) || cr < 0 || cr > 360)
+                if (not_a_number(e, r->course_degrees))
+                    return 0;
+                if (cr < 0 || cr > 360)
                     return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "course out of range");
                 pdn_aprs__putu(e->b, (unsigned long)cr, 3);
             } else {
@@ -5682,7 +5840,9 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
             pdn_aprs__putc(e->b, '/');
             if (r->has_speed) {
                 double sr = pdn_aprs__round(r->speed_knots);
-                if (!finite_number(r->speed_knots) || sr < 0 || sr > 999)
+                if (not_a_number(e, r->speed_knots))
+                    return 0;
+                if (sr < 0 || sr > 999)
                     return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "speed out of range");
                 pdn_aprs__putu(e->b, (unsigned long)sr, 3);
             } else {
@@ -5743,8 +5903,9 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
             }
             ext_counts = 1;
         } else if (r->has_range) {
-            if (!finite_number(r->range_miles) || pdn_aprs__round(r->range_miles) < 0 ||
-                pdn_aprs__round(r->range_miles) > 9999)
+            if (not_a_number(e, r->range_miles))
+                return 0;
+            if (pdn_aprs__round(r->range_miles) < 0 || pdn_aprs__round(r->range_miles) > 9999)
                 return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "range out of range");
             pdn_aprs__puts(e->b, "RNG");
             pdn_aprs__putu(e->b, (unsigned long)pdn_aprs__round(r->range_miles), 4);
@@ -5764,7 +5925,7 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         } else if (r->has_area) {
             const pdn_aprs_area *a = &r->area;
             if (!(r->symbol.table == '\\' && r->symbol.code == 'l'))
-                return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_SYMBOL_MISMATCH, "an area needs the area symbol and codes in range");
+                defer(e, PDN_APRS_REFUSAL_SYMBOL_MISMATCH, "an area needs the area symbol and codes in range");
             if (a->shape > 9 || a->color > 15 || a->lat_offset > 99 || a->lon_offset > 99)
                 return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "an area needs the area symbol and codes in range");
             pdn_aprs__putc(e->b, '0' + a->shape);
@@ -5793,7 +5954,7 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
     if (r->signpost[0]) {
         size_t n = strlen(r->signpost);
         if (!(r->symbol.table == '\\' && r->symbol.code == 'm'))
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_SYMBOL_MISMATCH, "a signpost is 1-3 characters with the signpost symbol");
+            defer(e, PDN_APRS_REFUSAL_SYMBOL_MISMATCH, "a signpost is 1-3 characters with the signpost symbol");
         if (n < 1 || n > 3)
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a signpost is 1-3 characters with the signpost symbol");
         if (strchr(r->signpost, '{') || strchr(r->signpost, '}'))
@@ -5836,18 +5997,16 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     uint8_t info[9];
     long speed, course;
     int alt_written = 0;
+    if (not_a_number(e, r->latitude) || not_a_number(e, r->longitude))
+        return 0;
     if (r->latitude < -90 || r->latitude > 90 || r->longitude < -180 || r->longitude > 180)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "position out of range");
     if (amb > 4)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "ambiguity out of range");
-    if (r->has_dao && amb)
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a !DAO! cannot add precision to an ambiguous position");
-    if (!pdn_aprs__symbol_table_ok(r->symbol.table) || !A_GRAPH(r->symbol.code))
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_SYMBOL, "invalid symbol");
-    if (r->mic_e_message > PDN_APRS_MIC_E_EMERGENCY)
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, "a Mic-E message type mixing standard and custom bits has no meaning");
     if (r->destination_ssid > 15)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "destination SSID out of range");
+    if (r->has_dao && amb)
+        defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a !DAO! cannot add precision to an ambiguous position");
     split_coord(r->latitude, coord_mode(dao_prec, amb), amb, &ldeg, &lh, &lx);
     split_coord(r->longitude, coord_mode(dao_prec, amb), amb, &gdeg, &gh, &gx);
     dao_digits(dao_prec, lx, gx, &a, &o);
@@ -5859,8 +6018,14 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     }
     if (ldeg > 90)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "position out of range for Mic-E");
-    if (gdeg > 179)
+    if (gdeg > 179 || ambiguous_past(ldeg, lh, amb, 90.0))
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "position out of range for Mic-E");
+    if (r->mic_e_message > PDN_APRS_MIC_E_EMERGENCY)
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, "a Mic-E message type mixing standard and custom bits has no meaning");
+    if (r->has_dao && !dao_datum_ok(&r->dao))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, DAO_DATUM_REFUSAL);
+    if (!pdn_aprs__symbol_table_ok(r->symbol.table) || !A_GRAPH(r->symbol.code))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_SYMBOL, "invalid symbol");
     /* destination: six latitude digits carrying the message bits and flags */
     if (r->mic_e_message == PDN_APRS_MIC_E_EMERGENCY) {
         bits = 0;
@@ -5924,8 +6089,8 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
         info[2] = (uint8_t)(m < 10 ? m + 88 : m + 28);
         info[3] = (uint8_t)(h + 28);
     }
-    if ((r->has_speed && !finite_number(r->speed_knots)) || (r->has_course && !finite_number(r->course_degrees)))
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "course or speed out of range for Mic-E");
+    if ((r->has_speed && not_a_number(e, r->speed_knots)) || (r->has_course && not_a_number(e, r->course_degrees)))
+        return 0;
     speed = r->has_speed ? (long)pdn_aprs__round(r->speed_knots) : 0;
     course = r->has_course ? (long)pdn_aprs__round(r->course_degrees) : 0;
     if (speed < 0 || speed > 799 || course < 0 || course > 360)
@@ -5956,8 +6121,21 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, "invalid Mic-E type code");
         pdn_aprs__putc(e->b, r->type_code);
     }
-    if (r->device_suffix[0] && !(r->type_code && r->type_code != ' '))
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a device suffix needs a type code");
+    if (r->device_suffix[0] && !r->type_code) {
+        defer(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a device suffix needs a type code");
+    } else if (r->device_suffix[0]) {
+        /* a suffix is read back only when the device table knows it for the
+           type code (rulings 2 and 3) */
+        size_t sl = strlen(r->device_suffix);
+        int known;
+        if (e->devices)
+            known = pdn_aprs__mic_e_suffix_known(e->devices, r->type_code, (const uint8_t *)r->device_suffix, sl);
+        else
+            known = ((r->type_code == '`' || r->type_code == '\'') && sl == 2) ||
+                    ((r->type_code == '>' || r->type_code == ']') && sl == 1);
+        if (!known)
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, "the device suffix is not one the device table knows for this type code");
+    }
     {
         int alt_b91 = 0, at_ext = 0, ext_counts = 0;
         long v = 0;
@@ -5985,9 +6163,9 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
                 pdn_aprs__putc(e->b, ' ');
         }
         if (r->has_phg + (r->has_range ? 1 : 0) + r->has_dfs > 1)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "only one data extension fits");
+            defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "only one data extension fits");
         if (r->has_area || r->has_df_bearing || r->has_storm || r->has_weather || r->signpost[0] || r->compressed)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a Mic-E report has no room for this data");
+            defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a Mic-E report has no room for this data");
         if (r->has_phg) {
             const pdn_aprs_phg *p = &r->phg;
             if (p->power > 9 || p->height > 78 || p->gain > 9 || p->directivity > 9 || p->beacons_per_hour > 35)
@@ -6005,8 +6183,9 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
             }
             ext_counts = 1;
         } else if (r->has_range) {
-            if (!finite_number(r->range_miles) || pdn_aprs__round(r->range_miles) < 0 ||
-                pdn_aprs__round(r->range_miles) > 9999)
+            if (not_a_number(e, r->range_miles))
+                return 0;
+            if (pdn_aprs__round(r->range_miles) < 0 || pdn_aprs__round(r->range_miles) > 9999)
                 return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "range out of range");
             pdn_aprs__puts(e->b, "RNG");
             pdn_aprs__putu(e->b, (unsigned long)pdn_aprs__round(r->range_miles), 4);
@@ -6099,33 +6278,30 @@ static int encode_message(pdn_aprs__ectx *e, const pdn_aprs_data *d)
     size_t chars;
     if (!addressee_ok(m->addressee))
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "an addressee is 1-9 printable characters without spaces or colons");
-    if (!valid_text(m->text, m->text_len))
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the text has a line break or is not UTF-8");
-    if (memchr(m->text, '{', m->text_len))
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "message text cannot contain {");
-    chars = utf8_chars(m->text, m->text_len);
-    if (d->type != PDN_APRS_TYPE_MESSAGE && m->has_reply_ack)
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "bulletins are not acknowledged, so they take no reply-ack");
     if (d->type == PDN_APRS_TYPE_BULLETIN) {
         const char *a = m->addressee;
         size_t n = strlen(a);
         if (!(n >= 4 && memcmp(a, "BLN", 3) == 0 && (A_DIGIT(a[3]) || (A_UPPER(a[3]) && n == 4))))
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "a bulletin is addressed BLN and a digit (and group), or BLN and a letter");
-        if (chars > 67)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_TOO_LONG, "bulletin text is at most 67 characters");
     } else if (d->type == PDN_APRS_TYPE_NWS_BULLETIN) {
         if (!(memcmp(m->addressee, "NWS-", 4) == 0 || memcmp(m->addressee, "NWS_", 4) == 0))
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "an NWS bulletin is addressed NWS- or NWS_");
-    } else {
-        if (chars > 67)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_TOO_LONG, "message text is at most 67 characters");
     }
+    if (!valid_text(m->text, m->text_len))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the text has a line break or is not UTF-8");
+    if (memchr(m->text, '{', m->text_len))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "message text cannot contain {");
+    chars = utf8_chars(m->text, m->text_len);
+    if (d->type != PDN_APRS_TYPE_NWS_BULLETIN && chars > 67)
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_TOO_LONG, "message text is at most 67 characters");
     if (m->message_id[0] && !id_ok(m->message_id, 1))
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_MESSAGE_ID, "a message ID is 1-5 letters or digits");
+    if (m->has_reply_ack && !id_ok(m->reply_ack, 0))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_MESSAGE_ID, "a reply-ack is up to 5 letters or digits");
+    if (d->type != PDN_APRS_TYPE_MESSAGE && m->has_reply_ack)
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "bulletins are not acknowledged, so they take no reply-ack");
     if (m->has_reply_ack && !m->message_id[0])
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a reply-ack needs a message ID and is up to 5 letters or digits");
-    if (m->has_reply_ack && !id_ok(m->reply_ack, 0))
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_MESSAGE_ID, "a reply-ack needs a message ID and is up to 5 letters or digits");
     put_addressee(e->b, m->addressee);
     pdn_aprs__put(e->b, m->text, m->text_len);
     if (m->message_id[0]) {
@@ -6152,19 +6328,20 @@ static int encode_directed_query(pdn_aprs__ectx *e, const pdn_aprs_directed_quer
     for (i = 0; i < sizeof defined / sizeof defined[0]; i++)
         if (strcmp(q->query_type, defined[i]) == 0)
             known = 1;
-    if (!known) {
-        size_t n = strlen(q->query_type);
-        if (n == 0)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a query needs a type");
-        for (i = 0; i < n; i++)
-            if (!A_UPPER(q->query_type[i]))
-                return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, "a query type is upper-case letters");
-    }
+    /* the target is an addressee (ruling 9) */
     if (tl > 9)
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_TOO_LONG, "a query target is one callsign of 1-9 letters, digits or -");
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "a query target is one callsign of 1-9 letters, digits or -");
     for (i = 0; i < tl; i++)
         if (!(A_ALNUM(q->target[i]) || q->target[i] == '-'))
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "a query target is one callsign of 1-9 letters, digits or -");
+    if (!known) {
+        size_t n = strlen(q->query_type);
+        for (i = 0; i < n; i++)
+            if (!A_UPPER(q->query_type[i]))
+                return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, "a query type is upper-case letters");
+        if (n == 0)
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a query needs a type");
+    }
     put_addressee(e->b, q->addressee);
     pdn_aprs__putc(e->b, '?');
     pdn_aprs__puts(e->b, q->query_type);
@@ -6231,8 +6408,8 @@ static int encode_meta(pdn_aprs__ectx *e, const pdn_aprs_data *d)
             const pdn_aprs_number *c = &m->coefficient[i];
             if (c->is_null)
                 return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a coefficient is a number");
-            if (!finite_number(c->value))
-                return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "a coefficient is a number");
+            if (not_a_number(e, c->value))
+                return 0;
             if (i)
                 pdn_aprs__putc(e->b, ',');
             if (c->text[0] && pdn_aprs__parse_number((const uint8_t *)c->text, strlen(c->text), 1, &check) &&
@@ -6245,13 +6422,13 @@ static int encode_meta(pdn_aprs__ectx *e, const pdn_aprs_data *d)
     default: {
         size_t n = m->project_len;
         if (n >= sizeof m->text)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "project title too long");
-        if (strlen(m->bits) != 8 || strspn(m->bits, "01") != 8)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "bit sense is eight 0 or 1 characters");
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_TOO_LONG, "project title too long");
         if (!valid_text(m->text, n) || memchr(m->text, '{', n))
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the project title cannot contain { or a line break");
         if (utf8_chars(m->text, n) > 23)
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_TOO_LONG, "a project title is at most 23 characters");
+        if (strlen(m->bits) != 8 || strspn(m->bits, "01") != 8)
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "bit sense is eight 0 or 1 characters");
         pdn_aprs__puts(e->b, "BITS.");
         pdn_aprs__puts(e->b, m->bits);
         if (n) {
@@ -6289,18 +6466,25 @@ static int encode_telemetry(pdn_aprs__ectx *e, const pdn_aprs_telemetry *t)
     size_t sl = strlen(t->sequence), i;
     int k;
     if (sl == 0)
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a telemetry report needs a sequence");
-    for (i = 0; i < sl; i++)
-        if (!A_ALNUM(t->sequence[i]))
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_MESSAGE_ID, "a telemetry sequence is letters and digits");
-    if (t->analog_count != 5)
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a telemetry report has five analog values");
-    if (!t->has_bits)
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a telemetry report has eight bits");
-    if (strlen(t->bits) != 8 || strspn(t->bits, "01") != 8)
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a telemetry report has eight bits");
+        defer(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a telemetry report needs a sequence");
     if (!valid_text(t->comment, t->comment_len))
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");
+    for (k = 0; k < 5 && t->analog_count == 5; k++)
+        if (!t->analog[k].is_null && not_a_number(e, t->analog[k].value))
+            return 0;
+    /* T#MIC has no form without a first channel (a decoder reads it as
+       Mic-E telemetry only with one) */
+    if (strcmp(t->sequence, "MIC") == 0 && t->analog_count == 5 && t->analog[0].is_null)
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "T#MIC needs a first channel");
+    for (i = 0; i < sl; i++)
+        if (!A_ALNUM(t->sequence[i]))
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a telemetry sequence is letters and digits");
+    if (t->analog_count != 5)
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a telemetry report has five analog values");
+    if (t->has_bits && (strlen(t->bits) != 8 || strspn(t->bits, "01") != 8))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a telemetry report has eight bits");
+    if (!t->has_bits)
+        defer(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a telemetry report has eight bits");
     pdn_aprs__puts(e->b, "T#");
     pdn_aprs__puts(e->b, t->sequence);
     if (strcmp(t->sequence, "MIC") != 0)
@@ -6311,8 +6495,8 @@ static int encode_telemetry(pdn_aprs__ectx *e, const pdn_aprs_telemetry *t)
             pdn_aprs__putc(e->b, ',');
         if (v->is_null)
             continue;
-        if (!finite_number(v->value))
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "a telemetry value is a number");
+        if (not_a_number(e, v->value))
+            return 0;
         if (put_number_as_sent(e->b, v->text, v->value, 0))
             continue;
         /* a whole number 0-999 given as data is APRS12c ch. 13's three
@@ -6335,7 +6519,7 @@ static int encode_status(pdn_aprs__ectx *e, const pdn_aprs_status *s)
     pdn_aprs__putc(e->b, '>');
     if (s->timestamp[0]) {
         if (s->locator[0])
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a status report with a locator has no timestamp");
+            defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a status report with a locator has no timestamp");
         if (!timestamp_ok(s->timestamp, 1))
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "a status timestamp is DHM zulu");
         pdn_aprs__puts(e->b, s->timestamp);
@@ -6366,8 +6550,8 @@ static int encode_status(pdn_aprs__ectx *e, const pdn_aprs_status *s)
 static int encode_positionless_weather(pdn_aprs__ectx *e, const pdn_aprs_weather_report *w)
 {
     size_t i;
-    if (w->comment_len)
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report has no comment");
+    if (w->comment_len && !valid_text(w->comment, w->comment_len))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");
     if (strlen(w->timestamp) != 8)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "a positionless weather report has an MDHM timestamp");
     for (i = 0; i < 8; i++)
@@ -6382,7 +6566,11 @@ static int encode_positionless_weather(pdn_aprs__ectx *e, const pdn_aprs_weather
     }
     pdn_aprs__putc(e->b, '_');
     pdn_aprs__puts(e->b, w->timestamp);
-    return pdn_aprs__encode_weather_fields(e, &w->weather, 1);
+    if (!pdn_aprs__encode_weather_fields(e, &w->weather, 1))
+        return 0;
+    if (w->comment_len)
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report has no comment");
+    return 1;
 }
 
 static int encode_nmea(pdn_aprs__ectx *e, const pdn_aprs_nmea *m)
@@ -6414,6 +6602,21 @@ static int encode_nmea(pdn_aprs__ectx *e, const pdn_aprs_nmea *m)
         if (!valid_text(m->comment, m->comment_len))
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");
     }
+    {
+        /* a field given that disagrees with the sentence is read back
+           differently (ruling 17): the sentence alone, as it would be sent */
+        pdn_aprs_data t;
+        uint8_t tmp[PDN_APRS_MAX_INFO + 2];
+        memset(&t, 0, sizeof t);
+        t.type = PDN_APRS_TYPE_NMEA;
+        t.as.nmea = *m;
+        t.as.nmea.comment_len = 0;
+        t.as.nmea.comment[0] = 0;
+        tmp[0] = '$';
+        memcpy(tmp + 1, m->sentence, n);
+        if (!reads_back(&t, tmp, n + 1, "", NULL))
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_NMEA, "a field given with an NMEA sentence disagrees with it");
+    }
     pdn_aprs__putc(e->b, '$');
     pdn_aprs__put(e->b, m->sentence, n);
     pdn_aprs__put(e->b, m->comment, m->comment_len);
@@ -6430,10 +6633,10 @@ static int encode_capabilities(pdn_aprs__ectx *e, const pdn_aprs_capabilities *c
         const char *t = c->text + c->item[i].token_offset;
         size_t tl = c->item[i].token_length, k;
         if (tl == 0)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MISSING_FIELD, "an empty capability token");
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "an empty capability token");
         for (k = 0; k < tl; k++)
             if (t[k] == ',' || t[k] == '=' || t[k] == ' ' || (uint8_t)t[k] < 0x20 || t[k] == 0x7f)
-                return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "a capability token has no spaces, control characters, commas or =");
+                return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a capability token has no spaces, control characters, commas or =");
         if (i)
             pdn_aprs__putc(e->b, ',');
         pdn_aprs__put(e->b, t, tl);
@@ -6471,7 +6674,7 @@ static int third_party_header_clean(const pdn_aprs_third_party *t)
     return pdn_aprs__parse_tnc2_header(&c, t->packet, n, &p.header, 1) != 0 && p.diagnostic_count == 0;
 }
 
-PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_data *d)
+static int encode_data_inner(pdn_aprs__ectx *e, const pdn_aprs_data *d)
 {
     switch (d->type) {
     case PDN_APRS_TYPE_POSITION:
@@ -6541,8 +6744,9 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_da
         pdn_aprs__putc(e->b, '?');
         if (q->has_footprint) {
             double radius = pdn_aprs__round(q->radius_miles);
-            if (!finite_number(q->latitude) || !finite_number(q->longitude) || q->latitude < -90 || q->latitude > 90 ||
-                q->longitude < -180 || q->longitude > 180 || !finite_number(q->radius_miles) || radius < 0 ||
+            if (not_a_number(e, q->latitude) || not_a_number(e, q->longitude) || not_a_number(e, q->radius_miles))
+                return 0;
+            if (q->latitude < -90 || q->latitude > 90 || q->longitude < -180 || q->longitude > 180 || radius < 0 ||
                 radius > 9999)
                 return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "footprint out of range");
             /* the numbers as sent, like telemetry values; otherwise a value
@@ -6576,6 +6780,11 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_da
                                                                                  : sizeof d->as.third_party.packet);
         return 1;
     case PDN_APRS_TYPE_USER_DEFINED:
+        /* a field ends before a CR or LF, so data ending in one would lose it */
+        if (d->as.user_defined.data_len > 0 && d->as.user_defined.data_len <= PDN_APRS_MAX_INFO &&
+            (d->as.user_defined.data[d->as.user_defined.data_len - 1] == '\r' ||
+             d->as.user_defined.data[d->as.user_defined.data_len - 1] == '\n'))
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the data ends with a line break");
         pdn_aprs__putc(e->b, '{');
         pdn_aprs__putc(e->b, d->as.user_defined.user_id);
         pdn_aprs__putc(e->b, d->as.user_defined.packet_type);
@@ -6601,88 +6810,93 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_da
     }
 }
 
-/* ---- public ---- */
-
-/* Decodes what was written and checks it reads back as the same data, with
-   no warnings or errors. */
-static int reads_back(const pdn_aprs_data *d, const uint8_t *info, size_t n, const char *dest,
-                      const pdn_aprs_device_table *devices)
+PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_data *d)
 {
-    pdn_aprs_packet p;
-    pdn_aprs_header h;
-    pdn_aprs_decode_options o;
-    pdn_aprs_device_entry mice, legacy;
-    pdn_aprs_device_table table;
-    char legacy_key[4];
-    int i;
-    memset(&o, 0, sizeof o);
-    pdn_aprs__header_default(&h);
-    if (d->type == PDN_APRS_TYPE_MIC_E) {
-        const pdn_aprs_report *r = &d->as.report;
-        pdn_aprs__strlcpy(h.destination, dest, sizeof h.destination);
-        if (devices) {
-            o.devices = devices;
-        } else if (r->device_suffix[0]) {
-            memset(&mice, 0, sizeof mice);
-            memset(&legacy, 0, sizeof legacy);
-            mice.key = r->device_suffix;
-            legacy_key[0] = r->type_code;
-            pdn_aprs__strlcpy(legacy_key + 1, r->device_suffix, 3);
-            legacy.key = legacy_key;
-            memset(&table, 0, sizeof table);
-            table.mice = &mice;
-            table.mice_count = 1;
-            table.mice_legacy = &legacy;
-            table.mice_legacy_count = 1;
-            o.devices = &table;
-        }
-    }
-    if (pdn_aprs_decode_info_unbounded(&h, info, n, &o, &p) != PDN_APRS_OK)
-        return 0;
-    for (i = 0; i < p.diagnostic_count; i++)
-        if (p.diagnostics[i].severity != PDN_APRS_SEVERITY_INFO)
-            return 0;
-    return pdn_aprs__data_equal(&p.data, d, 1);
+    int ok = encode_data_inner(e, d);
+    if (ok && e->deferred)
+        return pdn_aprs__refuse(e, e->deferred, e->deferred_why);
+    return ok;
 }
 
-/* The code for a read-back failure that no rule named: free text in the data
-   that would read back as a structured element is text-reads-as-field, and
-   anything else is the fallback. */
-static int read_back_refusal(const pdn_aprs_data *d, const pdn_aprs_encode_options *options)
+/* ---- public ---- */
+
+
+/* Takes the free text out of a copy of the data: the 1 if there was any.
+   A weather report's software type, unit and extra fields count as free text
+   (ruling 16). */
+static int blank_free_text(pdn_aprs_data *d)
 {
-    int text = 0;
-    (void)options;
+    int had = 0;
     switch (d->type) {
     case PDN_APRS_TYPE_POSITION:
     case PDN_APRS_TYPE_MIC_E:
     case PDN_APRS_TYPE_OBJECT:
-    case PDN_APRS_TYPE_ITEM:
-        text = d->as.report.comment_len > 0;
+    case PDN_APRS_TYPE_ITEM: {
+        pdn_aprs_report *r = &d->as.report;
+        had = r->comment_len > 0 || (r->has_weather && (r->weather.software || r->weather.unit[0] || r->weather.extra_count));
+        r->comment_len = 0;
+        r->comment[0] = 0;
+        r->weather.software = 0;
+        r->weather.unit[0] = 0;
+        r->weather.extra_count = 0;
         break;
+    }
     case PDN_APRS_TYPE_MESSAGE:
     case PDN_APRS_TYPE_BULLETIN:
     case PDN_APRS_TYPE_NWS_BULLETIN:
-        text = d->as.message.text_len > 0;
+        had = d->as.message.text_len > 0;
+        d->as.message.text_len = 0;
+        d->as.message.text[0] = 0;
         break;
     case PDN_APRS_TYPE_STATUS:
-        text = d->as.status.text_len > 0;
+        had = d->as.status.text_len > 0;
+        d->as.status.text_len = 0;
+        d->as.status.text[0] = 0;
         break;
     case PDN_APRS_TYPE_TELEMETRY:
-        text = d->as.telemetry.comment_len > 0;
+        had = d->as.telemetry.comment_len > 0;
+        d->as.telemetry.comment_len = 0;
+        d->as.telemetry.comment[0] = 0;
         break;
-    case PDN_APRS_TYPE_WEATHER:
-        text = d->as.weather.comment_len > 0;
+    case PDN_APRS_TYPE_WEATHER: {
+        pdn_aprs_weather_report *w = &d->as.weather;
+        had = w->comment_len > 0 || w->weather.software || w->weather.unit[0] || w->weather.extra_count;
+        w->comment_len = 0;
+        w->comment[0] = 0;
+        w->weather.software = 0;
+        w->weather.unit[0] = 0;
+        w->weather.extra_count = 0;
         break;
+    }
     case PDN_APRS_TYPE_NMEA:
-        text = d->as.nmea.comment_len > 0;
+        had = d->as.nmea.comment_len > 0;
+        d->as.nmea.comment_len = 0;
+        d->as.nmea.comment[0] = 0;
         break;
     case PDN_APRS_TYPE_MAIDENHEAD_BEACON:
-        text = d->as.maidenhead.comment_len > 0;
+        had = d->as.maidenhead.comment_len > 0;
+        d->as.maidenhead.comment_len = 0;
+        d->as.maidenhead.comment[0] = 0;
         break;
     default:
         break;
     }
-    return text ? PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD : PDN_APRS_REFUSAL_DOES_NOT_READ_BACK;
+    return had;
+}
+
+/* The code for a read-back failure that no check named: free text in the data
+   that reads back changed is text-reads-as-field (rulings 16 and 18), a
+   message that reads back as a bulletin is an addressee the report cannot
+   have (ruling 15), and anything else is the fallback. */
+static int read_back_refusal(const pdn_aprs_data *d)
+{
+    pdn_aprs_data c;
+    if (d->type == PDN_APRS_TYPE_MESSAGE &&
+        (memcmp(d->as.message.addressee, "BLN", 3) == 0 || memcmp(d->as.message.addressee, "NWS-", 4) == 0 ||
+         memcmp(d->as.message.addressee, "NWS_", 4) == 0))
+        return PDN_APRS_REFUSAL_INVALID_ADDRESSEE;
+    c = *d;
+    return blank_free_text(&c) ? PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD : PDN_APRS_REFUSAL_DOES_NOT_READ_BACK;
 }
 
 static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf, size_t cap,
@@ -6707,6 +6921,7 @@ static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options 
         pdn_aprs__buf_init(&b, buf, cap);
         e.b = &b;
         e.variant = variant;
+        e.devices = options ? options->devices : NULL;
         ok = pdn_aprs__encode_data(&e, data);
         if (!ok)
             break;
@@ -6719,7 +6934,7 @@ static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options 
             break;
         ok = 0;
         e.reason = "what the encoder would write does not read back as the same data";
-        e.refusal = read_back_refusal(data, options);
+        e.refusal = read_back_refusal(data);
     }
     if (encoded) {
         encoded->reason = ok ? NULL : e.reason;
@@ -6762,6 +6977,21 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
     /* the information field first, at the start of buf, then moved along
        to make room for the header, which for Mic-E carries what the encoder
        computed */
+    /* the header comes before the data in what is refused (ruling 1): one that
+       needs no computed destination is checked first */
+    if (data->type != PDN_APRS_TYPE_MIC_E) {
+        pdn_aprs__buf_init(&hb, head, sizeof head);
+        rc = ax25 ? pdn_aprs__write_header_ax25(&hb, header, header->destination)
+                  : pdn_aprs__write_header_tnc2(&hb, header, header->destination);
+        if (rc == PDN_APRS_ERR_REFUSED) {
+            encoded->len = 0;
+            encoded->destination[0] = 0;
+            encoded->refusal = ax25 ? PDN_APRS_REFUSAL_AX25_CANNOT_CARRY : PDN_APRS_REFUSAL_INVALID_ADDRESS;
+            encoded->reason = ax25 ? "a header address or the path is more than an AX.25 frame can carry"
+                                   : "a header address is not 1-9 letters, digits or -";
+            return rc;
+        }
+    }
     n = encode_info(data, options, buf, cap, encoded);
     if (n < 0)
         return n;
@@ -7112,7 +7342,7 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
     pdn_aprs_data d;
     pdn_aprs_report *r = &d.as.report;
     size_t n = 0;
-    int rc;
+    int rc, twice = 0;
     begin(result);
     if (!m)
         return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
@@ -7131,8 +7361,7 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
     r->speed_knots = m->has_speed ? m->speed_knots : 0;
     /* feet go in a /A=; metres in the Mic-E altitude bytes, whose unit is
        the metre, rounded to it (ruling B2) */
-    if (m->has_altitude && m->has_altitude_m)
-        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, "give the altitude in feet or in metres, not both");
+    twice = m->has_altitude && m->has_altitude_m;
     r->has_altitude = (uint8_t)(m->has_altitude || m->has_altitude_m);
     r->altitude_feet = m->has_altitude_m ? pdn_aprs__round(m->altitude_m) / 0.3048 : m->altitude_feet;
     r->altitude_in_comment = (uint8_t)(m->has_altitude != 0);
@@ -7169,7 +7398,15 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
     if (rc != PDN_APRS_OK)
         return rc;
     r->comment_len = (uint16_t)n;
-    return pdn_aprs_build(station, &d, buf, cap, result);
+    rc = pdn_aprs_build(station, &d, buf, cap, result);
+    /* an altitude given in feet and in metres is refused, but any other
+       reason that outranks it is named first (DESIGN.md, ruling 1) */
+    if (twice && (rc >= 0 || (rc == PDN_APRS_ERR_REFUSED && result &&
+                              (result->refusal == PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD ||
+                               result->refusal == PDN_APRS_REFUSAL_DOES_NOT_READ_BACK))))
+        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE,
+                    "give the altitude in feet or in metres, not both");
+    return rc;
 }
 
 void pdn_aprs_weather_init(pdn_aprs_weather *weather)
@@ -7241,14 +7478,25 @@ static int build_message(const pdn_aprs_station *station, int type, const char *
     pdn_aprs_data d;
     size_t n = 0;
     int rc;
-    /* a message ID is 1-5 letters or digits: an empty one is refused, not
-       taken as none (ruling B8) */
-    if (message_id && !message_id[0])
-        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_MESSAGE_ID, "a message ID is 1 to 5 letters or digits");
     if (!addressee)
         return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     memset(&d, 0, sizeof d);
     d.type = (uint8_t)type;
+    /* text too long for the buffer is refused as too long, but a fault of
+       the addressee or the characters of the text is named before it
+       (DESIGN.md, ruling 1) */
+    if (text && strlen(text) > 4 * 67) {
+        size_t al = strlen(addressee), i;
+        int bad = al < 1 || al > 9;
+        for (i = 0; !bad && i < al; i++)
+            bad = !A_GRAPH(addressee[i]) || addressee[i] == ':';
+        if (bad)
+            return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESSEE,
+                        "an addressee is 1-9 printable characters without spaces or colons");
+        if (!pdn_aprs__utf8_valid((const uint8_t *)text, strlen(text)) || strpbrk(text, "\r\n{"))
+            return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_CHARACTER,
+                        "the text has a line break, a { or is not UTF-8");
+    }
     rc = too_long_for_aprs(result, text, 67, PDN_APRS_REFUSAL_TOO_LONG, "message text is at most 67 characters");
     if (rc != PDN_APRS_OK)
         return rc;
@@ -7261,6 +7509,11 @@ static int build_message(const pdn_aprs_station *station, int type, const char *
                  PDN_APRS_REFUSAL_INVALID_MESSAGE_ID, "the message ID is longer than an ID can be");
     if (rc != PDN_APRS_OK)
         return rc;
+    /* a message ID is 1-5 letters or digits: an empty one is refused, not
+       taken as none (ruling B8); a space has the encoder refuse it where
+       its fault ranks */
+    if (message_id && !message_id[0])
+        d.as.message.message_id[0] = ' ';
     d.as.message.text_len = (uint16_t)n;
     if (reply_ack) {
         rc = put(result, d.as.message.reply_ack, sizeof d.as.message.reply_ack, reply_ack, NULL,

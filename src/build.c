@@ -236,7 +236,7 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
     pdn_aprs_data d;
     pdn_aprs_report *r = &d.as.report;
     size_t n = 0;
-    int rc;
+    int rc, twice = 0;
     begin(result);
     if (!m)
         return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
@@ -255,8 +255,7 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
     r->speed_knots = m->has_speed ? m->speed_knots : 0;
     /* feet go in a /A=; metres in the Mic-E altitude bytes, whose unit is
        the metre, rounded to it (ruling B2) */
-    if (m->has_altitude && m->has_altitude_m)
-        return fail(result, PDN_APRS_ERR_ARGUMENT, 0, "give the altitude in feet or in metres, not both");
+    twice = m->has_altitude && m->has_altitude_m;
     r->has_altitude = (uint8_t)(m->has_altitude || m->has_altitude_m);
     r->altitude_feet = m->has_altitude_m ? pdn_aprs__round(m->altitude_m) / 0.3048 : m->altitude_feet;
     r->altitude_in_comment = (uint8_t)(m->has_altitude != 0);
@@ -293,7 +292,15 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
     if (rc != PDN_APRS_OK)
         return rc;
     r->comment_len = (uint16_t)n;
-    return pdn_aprs_build(station, &d, buf, cap, result);
+    rc = pdn_aprs_build(station, &d, buf, cap, result);
+    /* an altitude given in feet and in metres is refused, but any other
+       reason that outranks it is named first (DESIGN.md, ruling 1) */
+    if (twice && (rc >= 0 || (rc == PDN_APRS_ERR_REFUSED && result &&
+                              (result->refusal == PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD ||
+                               result->refusal == PDN_APRS_REFUSAL_DOES_NOT_READ_BACK))))
+        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE,
+                    "give the altitude in feet or in metres, not both");
+    return rc;
 }
 
 void pdn_aprs_weather_init(pdn_aprs_weather *weather)
@@ -365,14 +372,25 @@ static int build_message(const pdn_aprs_station *station, int type, const char *
     pdn_aprs_data d;
     size_t n = 0;
     int rc;
-    /* a message ID is 1-5 letters or digits: an empty one is refused, not
-       taken as none (ruling B8) */
-    if (message_id && !message_id[0])
-        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_MESSAGE_ID, "a message ID is 1 to 5 letters or digits");
     if (!addressee)
         return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     memset(&d, 0, sizeof d);
     d.type = (uint8_t)type;
+    /* text too long for the buffer is refused as too long, but a fault of
+       the addressee or the characters of the text is named before it
+       (DESIGN.md, ruling 1) */
+    if (text && strlen(text) > 4 * 67) {
+        size_t al = strlen(addressee), i;
+        int bad = al < 1 || al > 9;
+        for (i = 0; !bad && i < al; i++)
+            bad = !A_GRAPH(addressee[i]) || addressee[i] == ':';
+        if (bad)
+            return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESSEE,
+                        "an addressee is 1-9 printable characters without spaces or colons");
+        if (!pdn_aprs__utf8_valid((const uint8_t *)text, strlen(text)) || strpbrk(text, "\r\n{"))
+            return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_CHARACTER,
+                        "the text has a line break, a { or is not UTF-8");
+    }
     rc = too_long_for_aprs(result, text, 67, PDN_APRS_REFUSAL_TOO_LONG, "message text is at most 67 characters");
     if (rc != PDN_APRS_OK)
         return rc;
@@ -385,6 +403,11 @@ static int build_message(const pdn_aprs_station *station, int type, const char *
                  PDN_APRS_REFUSAL_INVALID_MESSAGE_ID, "the message ID is longer than an ID can be");
     if (rc != PDN_APRS_OK)
         return rc;
+    /* a message ID is 1-5 letters or digits: an empty one is refused, not
+       taken as none (ruling B8); a space has the encoder refuse it where
+       its fault ranks */
+    if (message_id && !message_id[0])
+        d.as.message.message_id[0] = ' ';
     d.as.message.text_len = (uint16_t)n;
     if (reply_ack) {
         rc = put(result, d.as.message.reply_ack, sizeof d.as.message.reply_ack, reply_ack, NULL,

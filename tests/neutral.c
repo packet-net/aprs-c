@@ -995,6 +995,13 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
     }
     if (!data)
         return cannot(cv, "has no data", "packet");
+    /* the inner header comes before the inner data in what is refused: a
+       header with no destination (Mic-E computes its own) is the fault */
+    if (!dst[0] && !(json_gets(data, "type") && strcmp(json_gets(data, "type"), "mic-e") == 0)) {
+        snprintf(cv->err, cv->errlen, "inner packet: the header has no destination");
+        last_refusal = PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER;
+        return -1;
+    }
     inner = (pdn_aprs_data *)malloc(sizeof *inner);
     if (json_gets(data, "type") && strcmp(json_gets(data, "type"), "unrecognized") == 0) {
         /* an empty field is written back empty; any other the data does not give */
