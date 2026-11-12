@@ -542,6 +542,7 @@ typedef struct conv {
     char *err;
     size_t errlen;
     int bad;
+    int short_legacy; /* Mic-E legacy telemetry of fewer than five values: refused */
 } conv;
 
 static int cannot(conv *cv, const char *what, const char *key)
@@ -905,7 +906,9 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
     str_in(cv, o, "locator", r->locator, sizeof r->locator, NULL);
     if ((v = json_get(o, "legacy_telemetry")) != NULL) {
         size_t k;
-        if (v->t != J_ARR || v->count != 5)
+        if (v->t == J_ARR && v->count < 5)
+            cv->short_legacy = 1;
+        else if (v->t != J_ARR || v->count != 5)
             cannot(cv, "is not the five channels the C data holds", "legacy_telemetry");
         for (k = 0; v->t == J_ARR && k < v->count && k < 5; k++) {
             if (v->items[k]->t != J_NUM || v->items[k]->num != floor(v->items[k]->num) || v->items[k]->num < 0 ||
@@ -955,6 +958,13 @@ static void meta_strings_in(conv *cv, const jval *a, const char *k, pdn_aprs_tel
     }
 }
 
+static int last_refusal;
+
+int neutral_refusal(void)
+{
+    return last_refusal;
+}
+
 /* A third-party packet's inner packet, written as its TNC2 form: the header,
    with * on the last used path entry, and the inner data encoded. Returns 1,
    0 when the C data cannot hold it, or -1 when the encoder refuses it. */
@@ -981,17 +991,27 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
            info is not a defect (ruling F10) */
         const jval *dg = json_get(p, "diagnostics");
         for (k = 0; dg && dg->t == J_ARR && k < dg->count; k++)
-            if (dg->items[k]->t != J_STR || strncmp(dg->items[k]->str, "info:", 5) != 0)
+            if (dg->items[k]->t != J_STR || strncmp(dg->items[k]->str, "info:", 5) != 0) {
+                last_refusal = PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER;
                 return -1;
+            }
     }
     if (!data)
         return cannot(cv, "has no data", "packet");
+    /* the inner header comes before the inner data in what is refused: a
+       header with no destination (Mic-E computes its own) is the fault */
+    if (!dst[0] && !(json_gets(data, "type") && strcmp(json_gets(data, "type"), "mic-e") == 0)) {
+        snprintf(cv->err, cv->errlen, "inner packet: the header has no destination");
+        last_refusal = PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER;
+        return -1;
+    }
     inner = (pdn_aprs_data *)malloc(sizeof *inner);
     if (json_gets(data, "type") && strcmp(json_gets(data, "type"), "unrecognized") == 0) {
         /* an empty field is written back empty; any other the data does not give */
         free(inner);
         if (!reason || strcmp(reason, "empty") != 0) {
             snprintf(cv->err, cv->errlen, "inner packet: unrecognized data has nothing to encode");
+            last_refusal = PDN_APRS_REFUSAL_NOT_ENCODABLE;
             return -1;
         }
         inner = NULL;
@@ -1009,6 +1029,7 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         if (i < 0) {
             free(inner);
             snprintf(cv->err, cv->errlen, "inner packet: %s", enc.reason ? enc.reason : pdn_aprs_strerror(i));
+            last_refusal = enc.refusal;
             return -1;
         }
     }
@@ -1047,7 +1068,9 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
     c.err = err;
     c.errlen = errlen;
     c.bad = 0;
+    c.short_legacy = 0;
     err[0] = 0;
+    last_refusal = 0;
     if (!type) {
         snprintf(err, errlen, "no type");
         return 0;
@@ -1092,6 +1115,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         if (!c.bad && json_get(j, "message_id")) {
             /* an ack does not carry its own message ID: make the encoder see it */
             snprintf(err, errlen, "ack with message_id");
+            last_refusal = PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED;
             return -1;
         }
         break;
@@ -1341,6 +1365,11 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         keys_only(cv, j, keys);
         break;
     }
+    }
+    if (c.short_legacy && !c.bad) {
+        snprintf(err, errlen, "legacy_telemetry has fewer than five values");
+        last_refusal = PDN_APRS_REFUSAL_MALFORMED;
+        return -1;
     }
     return c.bad ? 0 : 1;
 }

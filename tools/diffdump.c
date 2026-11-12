@@ -12,8 +12,8 @@
  *     destination it computed; api is the packet as the library's own API
  *     gives it.
  *   --encode: {"n", "data", "exact"} lines in (data in the neutral form);
- *     {"n", "result", "info", "destination", "again", "reason"} out.
- *   --build: builder recipes in; {"n", "result", "tnc2", "again", "reason"}
+ *     {"n", "result", "info", "destination", "again", "reason", "refusal"} out.
+ *   --build: builder recipes in; {"n", "result", "tnc2", "again", "reason", "refusal"}
  *     out.
  *
  *   zcat lines.hex.gz | pdn_aprs_diffdump [-n first-line-number] | gzip > c.jsonl.gz
@@ -138,6 +138,8 @@ static jval *decode_written_line(const uint8_t *line, size_t len)
 
 /* How the lenient data encodes again; *written is set to the bytes written
    (*n of them) and *dest to a Mic-E destination, when there are any. */
+static int reencode_refusal;
+
 static const char *reencode(const uint8_t *line, size_t len, const jval *lr, int *n, const char **dest)
 {
     static pdn_aprs_encoded enc;
@@ -147,12 +149,15 @@ static const char *reencode(const uint8_t *line, size_t len, const jval *lr, int
     const pdn_aprs_packet *p = &lenient_pkt;
     *n = -1;
     *dest = NULL;
+    reencode_refusal = 0;
     if (!p->header_ok || p->data.type == PDN_APRS_TYPE_UNRECOGNIZED)
         return "none";
     eo.devices = lenient.devices;
     *n = pdn_aprs_encode_info(&p->data, &eo, out_buf, sizeof out_buf, &enc);
-    if (*n == PDN_APRS_ERR_REFUSED)
+    if (*n == PDN_APRS_ERR_REFUSED) {
+        reencode_refusal = enc.refusal;
         return "refused";
+    }
     if (*n < 0)
         return "fails";
     if (p->data.type == PDN_APRS_TYPE_MIC_E)
@@ -228,8 +233,11 @@ static jval *api_view(const pdn_aprs_packet *p, int depth)
         w = pdn_aprs_write_ax25(p, wbuf, sizeof wbuf);
         if (w >= 0)
             json_set(a, "ax25", json_str(hex(wbuf, (size_t)w)));
-        else if (w == PDN_APRS_ERR_REFUSED)
+        else if (w == PDN_APRS_ERR_REFUSED) {
+            /* the one reason pdn_aprs_write_ax25 refuses */
             json_set(a, "ax25", json_str("refused"));
+            json_set(a, "ax25_refusal", json_str(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_AX25_CANNOT_CARRY)));
+        }
     }
     for (i = 0; i < h->path_count; i++) {
         char e[PDN_APRS_ADDR_SIZE + 2];
@@ -304,6 +312,8 @@ static void decode_line(long n, const char *text, size_t tl)
     out = json_obj();
     json_set(out, "n", json_int(n));
     json_set(out, "reencode", json_str(how));
+    if (reencode_refusal && pdn_aprs_refusal_name(reencode_refusal))
+        json_set(out, "reencode_refusal", json_str(pdn_aprs_refusal_name(reencode_refusal)));
     if (written >= 0)
         json_set(out, "written", json_str(hex(out_buf, (size_t)written)));
     if (dest)
@@ -341,6 +351,8 @@ static void encode_line(long fallback_n, const char *text, size_t tl)
     if (conv <= 0) {
         json_set(out, "result", json_str(conv == 0 ? "unsupported" : "refused"));
         json_set(out, "reason", json_str(err));
+        if (conv < 0 && neutral_refusal() && pdn_aprs_refusal_name(neutral_refusal()))
+            json_set(out, "refusal", json_str(pdn_aprs_refusal_name(neutral_refusal())));
         emit(out);
         return;
     }
@@ -349,6 +361,8 @@ static void encode_line(long fallback_n, const char *text, size_t tl)
     if (rc < 0) {
         json_set(out, "result", json_str("refused"));
         json_set(out, "reason", json_str(enc.reason ? enc.reason : pdn_aprs_strerror(rc)));
+        if (enc.refusal && pdn_aprs_refusal_name(enc.refusal))
+            json_set(out, "refusal", json_str(pdn_aprs_refusal_name(enc.refusal)));
     } else {
         const char *dest = d.type == PDN_APRS_TYPE_MIC_E ? enc.destination : "APZ001";
         pdn_aprs_header h;
@@ -919,6 +933,8 @@ static void build_line(long fallback_n, const char *text, size_t tl)
     } else if (rc < 0) {
         json_set(out, "result", json_str("refused"));
         json_set(out, "reason", json_str(built.reason ? built.reason : pdn_aprs_strerror(rc)));
+        if (built.refusal && pdn_aprs_refusal_name(built.refusal))
+            json_set(out, "refusal", json_str(pdn_aprs_refusal_name(built.refusal)));
     } else {
         json_set(out, "result", json_str("built"));
         json_set(out, "tnc2", json_str(hex(out_buf, (size_t)rc)));

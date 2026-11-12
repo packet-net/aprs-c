@@ -451,6 +451,14 @@ static void test_reading(void)
     CHECK(decode("WB4APR-00>APRS:>x") == PDN_APRS_OK &&
           pdn_aprs_write_ax25(&pkt, frame, sizeof frame) == PDN_APRS_ERR_REFUSED &&
           pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) > 0);
+    /* so has an SSID of -0, in the outer header and in a third-party inner header */
+    CHECK(decode("N0ZO-0>APRS:>x") == PDN_APRS_OK &&
+          pdn_aprs_write_ax25(&pkt, frame, sizeof frame) == PDN_APRS_ERR_REFUSED &&
+          pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) > 0);
+    CHECK(decode("N0ZO>APX220,TCPIP*,qAC,T2RDU:}N0ZO-0>APX220,WIDE-1,WIDE2-1:!3309.71N/08643.18W_035/002g002t063r000p000P000h098b10133") == PDN_APRS_OK &&
+          pdn_aprs_decode_third_party(&pkt.data, NULL, &back) == PDN_APRS_OK &&
+          pdn_aprs_write_ax25(&back, frame, sizeof frame) == PDN_APRS_ERR_REFUSED);
+    CHECK(decode("N0ZO-1>APRS:>x") == PDN_APRS_OK && pdn_aprs_write_ax25(&pkt, frame, sizeof frame) > 0);
     /* an empty destination, which the lenient decoder takes, is written back as received */
     {
         const char *e = "KB1EZZ-9>,W1IMD:>x";
@@ -598,7 +606,11 @@ static void test_batch2(void)
     CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line, NULL) > 0 && strstr(line, "/A=") == NULL &&
           decode(line) == PDN_APRS_OK && fabs(pkt.data.as.report.altitude_feet - 100 / 0.3048) < 1e-6);
     mic.has_altitude = 1;
-    CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line, NULL) == PDN_APRS_ERR_ARGUMENT);
+    {
+        pdn_aprs_encoded twice;
+        CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line, &twice) == PDN_APRS_ERR_REFUSED &&
+              twice.refusal == PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE);
+    }
     /* with ambiguity the longitude digits a decoder ignores hold the centre
        it reports: 07.74 minutes at two levels is 07.50 */
     mic.has_altitude = 0;
@@ -759,6 +771,311 @@ static void test_long_third_party(void)
     CHECK(pdn_aprs_decode_third_party(&d, NULL, &inner) == PDN_APRS_ERR_ARGUMENT);
 }
 
+/* Refusals carry a reason code: one from each group, and zero when nothing
+   is refused or the error is not a refusal. */
+static void test_refusal_codes(void)
+{
+    char line[600];
+    uint8_t frame[200];
+    int n;
+    pdn_aprs_station me = {"M0LTE-9", NULL, NULL, 0, NULL};
+    pdn_aprs_position_args pos;
+    pdn_aprs_message_args msg;
+    pdn_aprs_header h;
+    pdn_aprs_data d;
+    pdn_aprs_encoded enc;
+    CHECK(strcmp(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_INVALID_ADDRESS), "invalid-address") == 0);
+    CHECK(strcmp(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_DOES_NOT_READ_BACK), "does-not-read-back") == 0);
+    CHECK(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_NONE) == NULL && pdn_aprs_refusal_name(99) == NULL);
+
+    memset(&pos, 0, sizeof pos);
+    pos.latitude = 49.058333;
+    pos.longitude = -72.029167;
+    pos.symbol = pdn_aprs_symbol_make('/', '-');
+    memset(&enc, 0xff, sizeof enc);
+    n = pdn_aprs_build_position(&me, &pos, line, sizeof line, &enc);
+    CHECK(n > 0 && enc.refusal == 0 && enc.reason == NULL);
+    pos.latitude = 91;
+    n = pdn_aprs_build_position(&me, &pos, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE && enc.reason);
+    pos.latitude = 49;
+    pos.comment = "a\nb";
+    n = pdn_aprs_build_position(&me, &pos, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_CHARACTER);
+    pos.comment = NULL;
+    pos.timestamp = "9";
+    n = pdn_aprs_build_position(&me, &pos, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_TIMESTAMP);
+
+    memset(&msg, 0, sizeof msg);
+    msg.addressee = "TOOLONGADDRESSEE";
+    msg.text = "hello";
+    n = pdn_aprs_build_message(&me, &msg, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_ADDRESSEE);
+    msg.addressee = "M0LTE";
+    msg.message_id = "TOOLONGID";
+    n = pdn_aprs_build_message(&me, &msg, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_MESSAGE_ID);
+    msg.message_id = NULL;
+    msg.reply_ack = "1";
+    n = pdn_aprs_build_message(&me, &msg, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_MISSING_FIELD);
+
+    /* a bad station address is a refusal, a NULL station is not */
+    me.source = "WAYTOOLONGCALL";
+    n = pdn_aprs_build_message(&me, &msg, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_ADDRESS);
+    n = pdn_aprs_build_message(NULL, &msg, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_ARGUMENT && enc.refusal == 0);
+    me.source = "M0LTE-9";
+
+    /* header addresses the encoder cannot write are refused, not an argument error */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_STATUS;
+    d.as.status.text_len = 2;
+    memcpy(d.as.status.text, "hi", 3);
+    memset(&h, 0, sizeof h);
+    h.q_construct = -1;
+    snprintf(h.source, sizeof h.source, "bad addr");
+    snprintf(h.destination, sizeof h.destination, "APRS");
+    n = pdn_aprs_encode_tnc2(&h, &d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_ADDRESS);
+    snprintf(h.source, sizeof h.source, "m0lte");
+    n = pdn_aprs_encode_ax25(&h, &d, NULL, frame, sizeof frame, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_AX25_CANNOT_CARRY);
+    snprintf(h.source, sizeof h.source, "M0LTE");
+    n = pdn_aprs_encode_ax25(&h, &d, NULL, frame, sizeof frame, &enc);
+    CHECK(n > 0 && enc.refusal == 0);
+
+    /* the first rule by the shared order: a fault in a field on its own before
+       one about how fields relate, and NaN before a range */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 10;
+    d.as.report.longitude = 10;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '_');
+    d.as.report.has_course = 1;
+    d.as.report.has_phg = 1;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_EXTENSION_CONFLICT);
+    d.as.report.comment_len = 3;
+    memcpy(d.as.report.comment, "a\nb", 4);
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_CHARACTER);
+    d.as.report.comment_len = 0;
+    d.as.report.has_course = 0;
+    d.as.report.has_phg = 0;
+    d.as.report.latitude = NAN;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_NOT_A_NUMBER);
+    d.as.report.latitude = 10;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_SYMBOL_MISMATCH);
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '-');
+    d.as.report.ambiguity = 2;
+    d.as.report.latitude = 90;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM);
+    /* the header before the data */
+    memset(&h, 0, sizeof h);
+    h.q_construct = -1;
+    snprintf(h.source, sizeof h.source, "bad addr");
+    snprintf(h.destination, sizeof h.destination, "APRS");
+    d.as.report.latitude = 100;
+    n = pdn_aprs_encode_tnc2(&h, &d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_ADDRESS);
+
+    /* a list over its limit is too long; a compressed course below 0 is out of range */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_TELEMETRY_NAMES;
+    snprintf(d.as.meta.addressee, sizeof d.as.meta.addressee, "M0LTE");
+    d.as.meta.count = 14;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 10;
+    d.as.report.longitude = 10;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '-');
+    d.as.report.compressed = 1;
+    d.as.report.has_course = 1;
+    d.as.report.has_speed = 1;
+    d.as.report.course_degrees = -0.7;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE);
+    d.as.report.course_degrees = 0;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM);
+
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_TELEMETRY;
+    d.as.telemetry.analog_count = 5;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_MALFORMED);
+
+    /* a 1-character addressee with over-long text reads no further than it is */
+    {
+        static char longtext[400];
+        char one[2] = {'A', 0};
+        pdn_aprs_message_args big;
+        memset(longtext, 'x', sizeof longtext - 1);
+        memset(&big, 0, sizeof big);
+        big.addressee = one;
+        big.text = longtext;
+        n = pdn_aprs_build_message(&me, &big, line, sizeof line, &enc);
+        CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+    }
+    /* feet and metres together, with a buffer too small: still the refusal, nothing written */
+    {
+        pdn_aprs_mic_e_args mic2;
+        memset(&mic2, 0, sizeof mic2);
+        mic2.latitude = 10;
+        mic2.longitude = 10;
+        mic2.symbol = pdn_aprs_symbol_make('/', '>');
+        mic2.has_altitude = 1;
+        mic2.has_altitude_m = 1;
+        n = pdn_aprs_build_mic_e(&me, &mic2, line, 4, &enc);
+        CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE && enc.len == 0 &&
+              enc.destination[0] == 0);
+    }
+
+    /* round 3: a weather comment is not checked, a bulletin look-alike is a station, a short range is
+       range-checked before the cs bytes conflict, weather values before the symbol */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_WEATHER;
+    snprintf(d.as.weather.timestamp, sizeof d.as.weather.timestamp, "10090556");
+    d.as.weather.comment_len = 1;
+    d.as.weather.comment[0] = '\n';
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED);
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_MESSAGE;
+    snprintf(d.as.message.addressee, sizeof d.as.message.addressee, "BLNe");
+    d.as.message.text_len = 3;
+    memcpy(d.as.message.text, "?WX", 4);
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD);
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 10;
+    d.as.report.longitude = 10;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '-');
+    d.as.report.compressed = 1;
+    d.as.report.has_compression = 1;
+    d.as.report.compression.source = PDN_APRS_SOURCE_GGA;
+    d.as.report.has_altitude = 1;
+    d.as.report.altitude_feet = 100;
+    d.as.report.has_range = 1;
+    d.as.report.range_miles = 1;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE);
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 10;
+    d.as.report.longitude = 10;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '>');
+    d.as.report.has_weather = 1;
+    d.as.report.weather.has[PDN_APRS_WX_TEMPERATURE_F] = 1;
+    d.as.report.weather.value[PDN_APRS_WX_TEMPERATURE_F] = -999;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE);
+
+    /* round 4: wind speed past 999 before the symbol; wind and a GGA altitude both want the cs bytes */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 10;
+    d.as.report.longitude = 10;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '>');
+    d.as.report.has_weather = 1;
+    d.as.report.weather.has[PDN_APRS_WX_WIND_SPEED_MPH] = 1;
+    d.as.report.weather.value[PDN_APRS_WX_WIND_SPEED_MPH] = 1000;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE);
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '_');
+    d.as.report.compressed = 1;
+    d.as.report.has_compression = 1;
+    d.as.report.compression.source = PDN_APRS_SOURCE_GGA;
+    d.as.report.has_altitude = 1;
+    d.as.report.altitude_feet = 18;
+    d.as.report.weather.value[PDN_APRS_WX_WIND_SPEED_MPH] = 0;
+    d.as.report.has_telemetry = 1;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_EXTENSION_CONFLICT);
+
+    /* round 5: a speed alone on the area symbol is written; a course is a symbol mismatch */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 32.84108241758242;
+    d.as.report.longitude = -97.31199450549451;
+    d.as.report.symbol = pdn_aprs_symbol_make('\\', 'l');
+    d.as.report.has_speed = 1;
+    d.as.report.speed_knots = 12;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n > 4 && memcmp(line + n - 4, "/012", 4) == 0);
+    d.as.report.has_course = 1;
+    d.as.report.course_degrees = 1;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_SYMBOL_MISMATCH);
+    /* a Mic-E altitude past a /A= whose first byte reads as a type code has no form */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_MIC_E;
+    d.as.report.latitude = 47.2;
+    d.as.report.longitude = -122.5;
+    d.as.report.symbol = pdn_aprs_symbol_make('W', 'v');
+    d.as.report.has_altitude = 1;
+    d.as.report.altitude_feet = 1597896.9816272964;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM);
+
+    /* round 6: Mic-E legacy telemetry ending in CR would end the field in it */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_MIC_E;
+    d.as.report.latitude = 33.42733333333334;
+    d.as.report.longitude = -112.129;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', 'j');
+    d.as.report.has_legacy_telemetry = 1;
+    d.as.report.legacy_telemetry[4] = 13;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_CHARACTER);
+
+    /* round 7: a wind speed alone and a range both want the cs bytes; T#MIC with no values has no form */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 39.3;
+    d.as.report.longitude = -123.2;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '_');
+    d.as.report.compressed = 1;
+    d.as.report.has_weather = 1;
+    d.as.report.weather.has[PDN_APRS_WX_WIND_SPEED_MPH] = 1;
+    d.as.report.has_range = 1;
+    d.as.report.range_miles = 29.5;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_EXTENSION_CONFLICT);
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_TELEMETRY;
+    snprintf(d.as.telemetry.sequence, sizeof d.as.telemetry.sequence, "MIC");
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM);
+
+    /* a Mic-E altitude whose first byte reads as a type code: the status text reads as a field */
+    {
+        static const char line_in[] = "LA7DHA-8>U9UR55,LD1OE*,WIDE2-1,qAS,LB1HG-10:`&>]l#MPY/>\"3}";
+        pdn_aprs_encode_options opt;
+        memset(&opt, 0, sizeof opt);
+        opt.devices = pdn_aprs_devices();
+        CHECK(decode(line_in) == PDN_APRS_OK && pkt.data.type == PDN_APRS_TYPE_MIC_E);
+        n = pdn_aprs_encode_info(&pkt.data, &opt, line, sizeof line, &enc);
+        CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD);
+    }
+
+    /* a data type with no writer, and a bare NULL, which is no refusal */
+    d.type = PDN_APRS_TYPE_UNRECOGNIZED;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE);
+    n = pdn_aprs_encode_info(NULL, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_ARGUMENT && enc.refusal == 0);
+}
+
 int main(void)
 {
     test_basics();
@@ -773,6 +1090,7 @@ int main(void)
     test_legacy_mic_e();
     test_locale();
     test_long_third_party();
+    test_refusal_codes();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

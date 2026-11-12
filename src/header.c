@@ -141,13 +141,13 @@ PDN_APRS__PRIVATE int pdn_aprs__write_header_tnc2(pdn_aprs__buf *b, const pdn_ap
 {
     unsigned i;
     if (!header_address_ok(h->source) || !header_address_ok(dest))
-        return PDN_APRS_ERR_ARGUMENT;
+        return PDN_APRS_ERR_REFUSED;
     pdn_aprs__puts(b, h->source);
     pdn_aprs__putc(b, '>');
     pdn_aprs__puts(b, dest);
     for (i = 0; i < h->path_count && i < PDN_APRS_MAX_PATH; i++) {
         if (!header_address_ok(h->path[i].call))
-            return PDN_APRS_ERR_ARGUMENT;
+            return PDN_APRS_ERR_REFUSED;
         pdn_aprs__putc(b, ',');
         pdn_aprs__puts(b, h->path[i].call);
         if (h->path[i].marked)
@@ -157,7 +157,8 @@ PDN_APRS__PRIVATE int pdn_aprs__write_header_tnc2(pdn_aprs__buf *b, const pdn_ap
     return PDN_APRS_OK;
 }
 
-/* One AX.25 address: callsign of 1-6 upper-case letters or digits, SSID 0-15. */
+/* One AX.25 address: callsign of 1-6 upper-case letters or digits, SSID 0-15.
+   An SSID written with a leading zero, or -0, is refused: a frame gives it back as no SSID. */
 static int ax25_put_address(pdn_aprs__buf *b, const char *a, int last, int hbit, int cbit)
 {
     size_t n = 0, i;
@@ -174,7 +175,7 @@ static int ax25_put_address(pdn_aprs__buf *b, const char *a, int last, int hbit,
         const char *s = a + n + 1;
         size_t k = strlen(s);
         long v = pdn_aprs__digits((const uint8_t *)s, k);
-        if (v < 0 || v > 15 || k > 2 || (k == 2 && s[0] == '0'))
+        if (v < 0 || v > 15 || k > 2 || (k >= 1 && s[0] == '0' && (k == 2 || v == 0)))
             return 0;
         ssid = (int)v;
     }
@@ -189,15 +190,15 @@ PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_ap
 {
     unsigned i, count = h->path_count;
     if (count > 8)
-        return PDN_APRS_ERR_ARGUMENT;
+        return PDN_APRS_ERR_REFUSED;
     /* a command frame: C bit set in the destination, clear in the source */
     if (!ax25_put_address(b, dest, 0, 0, 1))
-        return PDN_APRS_ERR_ARGUMENT;
+        return PDN_APRS_ERR_REFUSED;
     if (!ax25_put_address(b, h->source, count == 0, 0, 0))
-        return PDN_APRS_ERR_ARGUMENT;
+        return PDN_APRS_ERR_REFUSED;
     for (i = 0; i < count; i++)
         if (!ax25_put_address(b, h->path[i].call, i + 1 == count, h->path[i].marked || h->path[i].used, 0))
-            return PDN_APRS_ERR_ARGUMENT;
+            return PDN_APRS_ERR_REFUSED;
     pdn_aprs__putc(b, 0x03);
     pdn_aprs__putc(b, 0xF0);
     return PDN_APRS_OK;

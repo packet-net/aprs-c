@@ -172,6 +172,40 @@ static const uint8_t code_tolerable[PDN_APRS_CODE_COUNT] = {
     1, 1, 1, 1,                   /* brace-in-message-text .. free-text-capabilities */
 };
 
+const char *pdn_aprs_refusal_name(int refusal)
+{
+    static const char *const names[] = {
+        "invalid-address",
+        "ax25-cannot-carry",
+        "tnc2-cannot-carry",
+        "invalid-third-party-header",
+        "invalid-addressee",
+        "invalid-name",
+        "invalid-message-id",
+        "padding-space",
+        "too-long",
+        "malformed",
+        "invalid-character",
+        "text-reads-as-field",
+        "not-a-number",
+        "value-out-of-range",
+        "value-has-no-form",
+        "value-given-twice",
+        "invalid-timestamp",
+        "missing-field",
+        "invalid-symbol",
+        "symbol-mismatch",
+        "extension-conflict",
+        "field-not-allowed",
+        "invalid-code",
+        "invalid-nmea",
+        "not-encodable",
+        "does-not-read-back"};
+    if (refusal < 1 || refusal > (int)(sizeof names / sizeof names[0]))
+        return NULL;
+    return names[refusal - 1];
+}
+
 const char *pdn_aprs_code_name(int code)
 {
     if (code <= 0 || code >= PDN_APRS_CODE_COUNT)
