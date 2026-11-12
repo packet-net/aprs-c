@@ -451,6 +451,14 @@ static void test_reading(void)
     CHECK(decode("WB4APR-00>APRS:>x") == PDN_APRS_OK &&
           pdn_aprs_write_ax25(&pkt, frame, sizeof frame) == PDN_APRS_ERR_REFUSED &&
           pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) > 0);
+    /* so has an SSID of -0, in the outer header and in a third-party inner header */
+    CHECK(decode("N0ZO-0>APRS:>x") == PDN_APRS_OK &&
+          pdn_aprs_write_ax25(&pkt, frame, sizeof frame) == PDN_APRS_ERR_REFUSED &&
+          pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) > 0);
+    CHECK(decode("N0ZO>APX220,TCPIP*,qAC,T2RDU:}N0ZO-0>APX220,WIDE-1,WIDE2-1:!3309.71N/08643.18W_035/002g002t063r000p000P000h098b10133") == PDN_APRS_OK &&
+          pdn_aprs_decode_third_party(&pkt.data, NULL, &back) == PDN_APRS_OK &&
+          pdn_aprs_write_ax25(&back, frame, sizeof frame) == PDN_APRS_ERR_REFUSED);
+    CHECK(decode("N0ZO-1>APRS:>x") == PDN_APRS_OK && pdn_aprs_write_ax25(&pkt, frame, sizeof frame) > 0);
     /* an empty destination, which the lenient decoder takes, is written back as received */
     {
         const char *e = "KB1EZZ-9>,W1IMD:>x";

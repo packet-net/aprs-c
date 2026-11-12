@@ -1445,7 +1445,8 @@ PDN_APRS__PRIVATE int pdn_aprs__write_header_tnc2(pdn_aprs__buf *b, const pdn_ap
     return PDN_APRS_OK;
 }
 
-/* One AX.25 address: callsign of 1-6 upper-case letters or digits, SSID 0-15. */
+/* One AX.25 address: callsign of 1-6 upper-case letters or digits, SSID 0-15.
+   An SSID written with a leading zero, or -0, is refused: a frame gives it back as no SSID. */
 static int ax25_put_address(pdn_aprs__buf *b, const char *a, int last, int hbit, int cbit)
 {
     size_t n = 0, i;
@@ -1462,7 +1463,7 @@ static int ax25_put_address(pdn_aprs__buf *b, const char *a, int last, int hbit,
         const char *s = a + n + 1;
         size_t k = strlen(s);
         long v = pdn_aprs__digits((const uint8_t *)s, k);
-        if (v < 0 || v > 15 || k > 2 || (k == 2 && s[0] == '0'))
+        if (v < 0 || v > 15 || k > 2 || (k >= 1 && s[0] == '0' && (k == 2 || v == 0)))
             return 0;
         ssid = (int)v;
     }
