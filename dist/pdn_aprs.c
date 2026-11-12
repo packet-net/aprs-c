@@ -7005,6 +7005,11 @@ static int read_back_refusal(const pdn_aprs_data *d)
     pdn_aprs_data c;
     if (d->type == PDN_APRS_TYPE_MESSAGE && bulletin_form(d->as.message.addressee))
         return PDN_APRS_REFUSAL_INVALID_ADDRESSEE;
+    /* a Mic-E report's status text is all that follows its nine bytes
+       (altitude, extension and comment), so one that reads back changed is
+       the text reading as a field */
+    if (d->type == PDN_APRS_TYPE_MIC_E)
+        return PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD;
     c = *d;
     return blank_free_text(&c) ? PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD : PDN_APRS_REFUSAL_DOES_NOT_READ_BACK;
 }

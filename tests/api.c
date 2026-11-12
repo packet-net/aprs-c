@@ -1049,6 +1049,17 @@ static void test_refusal_codes(void)
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
     CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM);
 
+    /* a Mic-E altitude whose first byte reads as a type code: the status text reads as a field */
+    {
+        static const char line_in[] = "LA7DHA-8>U9UR55,LD1OE*,WIDE2-1,qAS,LB1HG-10:`&>]l#MPY/>\"3}";
+        pdn_aprs_encode_options opt;
+        memset(&opt, 0, sizeof opt);
+        opt.devices = pdn_aprs_devices();
+        CHECK(decode(line_in) == PDN_APRS_OK && pkt.data.type == PDN_APRS_TYPE_MIC_E);
+        n = pdn_aprs_encode_info(&pkt.data, &opt, line, sizeof line, &enc);
+        CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD);
+    }
+
     /* a data type with no writer, and a bare NULL, which is no refusal */
     d.type = PDN_APRS_TYPE_UNRECOGNIZED;
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
