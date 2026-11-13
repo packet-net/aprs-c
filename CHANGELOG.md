@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+The round 3 rulings of the shared vectors (aprs-vectors `round-3`, pinned at cb5dcc0).
+
+- Refusal reasons follow the vectors' order whichever check runs first. The encoder now goes on past a fault in a field on its own, writing bytes it throws away, and names the code that comes first in the README's Refusal reasons order. So a PHG digit of 10 beside a course is `value-out-of-range`, not `extension-conflict`; a Mic-E course of 0 with an altitude past every form is `value-out-of-range`; a query with a bad type and a radius past 9999 miles is `value-out-of-range`; a comment with a line break beside a bad NMEA checksum is `invalid-character`.
+- A field whose place is wanted twice keeps its own checks: the PHG, RNG, DFS, area, DF bearing, storm data and course/speed beside an uncompressed weather report's wind, a course or speed beside compressed wind or a GGA altitude (judged by the cs bytes, so a course of 0 there is `value-has-no-form`), and a compressed wind with only one half given.
+- More analog values than a telemetry report or base-91 telemetry holds is `too-long`, fewer is `malformed` (`T#MIC` with no values included; an empty first channel is still `value-has-no-form`). Base-91 telemetry with an `analog_count` over `PDN_APRS_MAX_ANALOG` is refused as `too-long`, as a telemetry report's already was.
+- A locator must be in the fixed form a decoder reads back: 4 or 6 characters, upper case. A lower-case or 5-character locator in a status, a Mic-E report or a Maidenhead beacon is `malformed`. A status locator with no symbol is `missing-field`.
+- A status beam heading code outside 0-9 and A-Z, or power code outside 1-9, `:`-`@` and A-K, is `invalid-code`.
+- A query with no type is `invalid-code` (it was `missing-field`), for general and directed queries.
+- Telemetry metadata builders leave too many names, units or coefficients, and a project title over 23 characters, to the encoder, so a bad addressee is named first.
+- A positionless weather report's comment no longer hides a fault in its fields.
+- Mic-E data with no speed is written with a speed of 0, which a decoder reads back as 0 (an ambiguous Mic-E position a rounding step under 90 or 180 degrees is now written).
+- Decoder: third-party packets nest at most four deep. `pdn_aprs_third_party` gains `uint8_t depth` at the end, set by the decoder, and `pdn_aprs_decode_third_party()` reads a fifth `}` as unrecognized with `invalid-third-party`. New `PDN_APRS_MAX_THIRD_PARTY_DEPTH` (4).
+- Decoder: an AX.25 address is upper-case letters and digits padded with spaces. A lower-case letter stays tolerated (`invalid-ax25-address-characters`); any other character, a space before the last character included, is now `invalid-address`. A call of spaces only is empty: a destination is `empty-destination` and a digipeater `empty-path-entry` (left out of the path), both tolerated.
+- Tests: the vectors runner compares refusal codes (`refusal`, `reencode_refusal`) and reads `precedence.json`. The neutral converter refuses a third-party path entry before a used one that is not marked used as `invalid-third-party-header`, before the inner data, and lets the encoder's own checks run beside a fault the C data cannot carry (a message ID on an ack). `third-party/nested-2000-deep` is a known difference: its line is 10,017 bytes, past the 512 the decoder takes.
+
 ## 1.0.1 (2026-11-12)
 
 Refusals carry a reason code.

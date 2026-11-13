@@ -1038,7 +1038,7 @@ static void test_refusal_codes(void)
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
     CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_CHARACTER);
 
-    /* round 7: a wind speed alone and a range both want the cs bytes; T#MIC with no values has no form */
+    /* round 7: a wind speed alone and a range both want the cs bytes; T#MIC with an empty first channel has no form */
     memset(&d, 0, sizeof d);
     d.type = PDN_APRS_TYPE_POSITION;
     d.as.report.latitude = 39.3;
@@ -1054,6 +1054,13 @@ static void test_refusal_codes(void)
     memset(&d, 0, sizeof d);
     d.type = PDN_APRS_TYPE_TELEMETRY;
     snprintf(d.as.telemetry.sequence, sizeof d.as.telemetry.sequence, "MIC");
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    /* round 3: no values at all is fewer than five, malformed */
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_MALFORMED);
+    d.as.telemetry.analog_count = 5;
+    d.as.telemetry.analog[0].is_null = 1;
+    snprintf(d.as.telemetry.bits, sizeof d.as.telemetry.bits, "00000000");
+    d.as.telemetry.has_bits = 1;
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
     CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM);
 

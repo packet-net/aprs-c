@@ -468,6 +468,24 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
             if (sh && cs_speed_step(mph / PDN_APRS__KNOTS_TO_MPH) < 0)
                 return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "wind out of range for a compressed position");
         }
+        /* a course or speed wanted where the wind is keeps the checks of the
+           cs bytes, before the conflict (vectors RULED item 6) */
+        if (r->has_course) {
+            double cr;
+            if (not_a_number(e, r->course_degrees))
+                return 0;
+            cr = pdn_aprs__round(r->course_degrees);
+            if (cr < 0 || cr > 360)
+                pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "course out of range for a compressed position");
+            else if (cr == 0)
+                pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "a compressed course of 0 means no course");
+        }
+        if (r->has_speed) {
+            if (not_a_number(e, r->speed_knots))
+                return 0;
+            if (cs_speed_step(r->speed_knots) < 0)
+                pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "speed out of range for a compressed position");
+        }
         if (wind && !gga) {
             double dir = w->value[PDN_APRS_WX_WIND_DIRECTION_DEGREES], mph = w->value[PDN_APRS_WX_WIND_SPEED_MPH];
             long c, s;
@@ -496,6 +514,19 @@ static int put_compressed(pdn_aprs__ectx *e, const pdn_aprs_report *r, int weath
             defer(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a GGA compressed position needs an altitude");
         if (r->has_course || r->has_speed)
             defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a GGA altitude and a course/speed both want the cs bytes");
+        /* a course or speed wanted where the altitude is keeps the checks of
+           the cs bytes (vectors RULED items 5 and 6) */
+        if (r->has_course && finite_number(r->course_degrees)) {
+            double cr = pdn_aprs__round(r->course_degrees);
+            if (cr < 0 || cr > 360)
+                pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "course out of range for a compressed position");
+            else if (cr == 0)
+                pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "a compressed course of 0 means no course");
+        } else if (r->has_course) {
+            not_a_number(e, r->course_degrees);
+        }
+        if (r->has_speed && !not_a_number(e, r->speed_knots) && cs_speed_step(r->speed_knots) < 0)
+            pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "speed out of range for a compressed position");
         put_gga_altitude(e->b, r->altitude_feet, alt_in_cs);
         pdn_aprs__putc(e->b, t_byte(r));
     } else if (r->has_course || r->has_speed) {
@@ -956,30 +987,28 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const p
 {
     int i;
     if (positionless) {
-        if (!put_wx_field(e, 'c', w, PDN_APRS_WX_WIND_DIRECTION_DEGREES, 1) ||
-            !put_wx_field(e, 's', w, PDN_APRS_WX_WIND_SPEED_MPH, 1))
-            return 0;
+        put_wx_field(e, 'c', w, PDN_APRS_WX_WIND_DIRECTION_DEGREES, 1);
+        put_wx_field(e, 's', w, PDN_APRS_WX_WIND_SPEED_MPH, 1);
     }
-    if (!put_wx_field(e, 'g', w, PDN_APRS_WX_WIND_GUST_MPH, 1) || !put_wx_field(e, 't', w, PDN_APRS_WX_TEMPERATURE_F, 1) ||
-        !put_wx_field(e, 'r', w, PDN_APRS_WX_RAIN_1H_IN, 0) || !put_wx_field(e, 'p', w, PDN_APRS_WX_RAIN_24H_IN, 0) ||
-        !put_wx_field(e, 'P', w, PDN_APRS_WX_RAIN_MIDNIGHT_IN, 0) || !put_wx_field(e, 'h', w, PDN_APRS_WX_HUMIDITY_PERCENT, 0) ||
-        !put_wx_field(e, 'b', w, PDN_APRS_WX_PRESSURE_MBAR, 0))
-        return 0;
+    put_wx_field(e, 'g', w, PDN_APRS_WX_WIND_GUST_MPH, 1);
+    put_wx_field(e, 't', w, PDN_APRS_WX_TEMPERATURE_F, 1);
+    put_wx_field(e, 'r', w, PDN_APRS_WX_RAIN_1H_IN, 0);
+    put_wx_field(e, 'p', w, PDN_APRS_WX_RAIN_24H_IN, 0);
+    put_wx_field(e, 'P', w, PDN_APRS_WX_RAIN_MIDNIGHT_IN, 0);
+    put_wx_field(e, 'h', w, PDN_APRS_WX_HUMIDITY_PERCENT, 0);
+    put_wx_field(e, 'b', w, PDN_APRS_WX_PRESSURE_MBAR, 0);
     if (w->has[PDN_APRS_WX_LUMINOSITY_W_M2]) {
         if (pdn_aprs__round(w->value[PDN_APRS_WX_LUMINOSITY_W_M2]) >= 1000) {
-            if (!put_wx_field(e, 'l', w, PDN_APRS_WX_LUMINOSITY_W_M2, 0))
-                return 0;
-        } else if (!put_wx_field(e, 'L', w, PDN_APRS_WX_LUMINOSITY_W_M2, 0)) {
-            return 0;
+            put_wx_field(e, 'l', w, PDN_APRS_WX_LUMINOSITY_W_M2, 0);
+        } else {
+            put_wx_field(e, 'L', w, PDN_APRS_WX_LUMINOSITY_W_M2, 0);
         }
     }
     if (w->has[PDN_APRS_WX_SNOW_24H_IN]) {
         /* after the wind speed, which is always written, s is snowfall */
-        if (!put_wx_field(e, 's', w, PDN_APRS_WX_SNOW_24H_IN, 0))
-            return 0;
+        put_wx_field(e, 's', w, PDN_APRS_WX_SNOW_24H_IN, 0);
     }
-    if (!put_wx_field(e, '#', w, PDN_APRS_WX_RAIN_RAW, 0))
-        return 0;
+    put_wx_field(e, '#', w, PDN_APRS_WX_RAIN_RAW, 0);
     for (i = 0; i < w->extra_count && i < PDN_APRS_MAX_WEATHER_EXTRA; i++) {
         pdn_aprs__putc(e->b, w->extra[i].letter);
         pdn_aprs__puts(e->b, w->extra[i].value);
@@ -987,13 +1016,13 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const p
     if (w->software || w->unit[0]) {
         size_t ul = strlen(w->unit);
         if (!A_ALPHA(w->software))
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, "invalid weather software type or unit");
+            pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, "invalid weather software type or unit");
         if (ul < 2 || ul > 4)
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_TOO_LONG, "invalid weather software type or unit");
+            pdn_aprs__refuse(e, PDN_APRS_REFUSAL_TOO_LONG, "invalid weather software type or unit");
         pdn_aprs__putc(e->b, w->software);
         pdn_aprs__puts(e->b, w->unit);
     }
-    return 1;
+    return !e->reason;
 }
 
 /* ---- reports ---- */
@@ -1023,6 +1052,31 @@ static int extension_values_ok(pdn_aprs__ectx *e, const pdn_aprs_report *r)
     return ok;
 }
 
+/* The own checks of everything that wants an uncompressed report's data
+   extension, for a weather report, whose wind holds it: each keeps its own
+   checks before the conflict (README Refusal reasons). */
+static void extension_own_checks(pdn_aprs__ectx *e, const pdn_aprs_report *r)
+{
+    extension_values_ok(e, r);
+    if (r->has_course && !not_a_number(e, r->course_degrees) &&
+        (pdn_aprs__round(r->course_degrees) < 0 || pdn_aprs__round(r->course_degrees) > 360))
+        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "course out of range");
+    if (r->has_speed && !not_a_number(e, r->speed_knots) &&
+        (pdn_aprs__round(r->speed_knots) < 0 || pdn_aprs__round(r->speed_knots) > 999))
+        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "speed out of range");
+    if (r->has_area && (r->area.shape > 9 || r->area.color > 15 || r->area.lat_offset > 99 || r->area.lon_offset > 99))
+        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "an area needs the area symbol and codes in range");
+    if (r->has_df_bearing && (r->df_bearing.bearing_degrees > 360 || r->df_bearing.number > 9 ||
+                              r->df_bearing.range > 9 || r->df_bearing.quality > 9))
+        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "a DF bearing is 0-360 degrees, and N, R and Q one digit each");
+    if (r->has_storm) {
+        const pdn_aprs_storm *s = &r->storm;
+        if (s->type > 2 || s->sustained_wind_knots > 999 || s->gust_knots > 999 || s->central_pressure_mbar > 9999 ||
+            s->hurricane_radius_nm > 999 || s->tropical_storm_radius_nm > 999 || s->whole_gale_radius_nm > 999)
+            pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "storm data out of range");
+    }
+}
+
 /* What a weather report has no room for (rulings 10, 12 and 13); they apply
    to any report that carries weather, whatever its symbol. */
 static int weather_rules(pdn_aprs__ectx *e, const pdn_aprs_report *r, int range_in_cs, int alt_in_cs, int gga_in_cs)
@@ -1040,6 +1094,8 @@ static int weather_rules(pdn_aprs__ectx *e, const pdn_aprs_report *r, int range_
     if (!r->compressed && (r->has_course || r->has_speed || r->has_phg || r->has_dfs || r->has_area ||
                            r->has_df_bearing || r->has_storm || r->has_range))
         defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "the wind of a weather report holds the data extension");
+    if (r->compressed && (r->has_course || r->has_speed))
+        defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed weather report has room for the wind alone in the cs bytes");
     if (r->compressed && r->has_range && (!range_in_cs || wind))
         defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed weather report has room for the wind alone in the cs bytes");
     if ((r->has_altitude && !alt_in_cs && !gga_in_cs) || r->has_frequency || r->signpost[0])
@@ -1111,7 +1167,15 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         if (!weather_rules(e, r, range_in_cs, alt_in_cs, gga_in_cs))
             return 0;
         /* the values are checked all the same, before the symbol (ruling 1) */
-        if (!r->compressed) {
+        if (r->compressed) {
+            int dh = r->weather.has[PDN_APRS_WX_WIND_DIRECTION_DEGREES], sh = r->weather.has[PDN_APRS_WX_WIND_SPEED_MPH];
+            double dv = r->weather.value[PDN_APRS_WX_WIND_DIRECTION_DEGREES], sv = r->weather.value[PDN_APRS_WX_WIND_SPEED_MPH];
+            if ((dh && not_a_number(e, dv)) || (sh && not_a_number(e, sv)))
+                return 0;
+            if ((dh && (pdn_aprs__round(dv) < 0 || pdn_aprs__round(dv) > 360)) ||
+                (sh && cs_speed_step(sv / PDN_APRS__KNOTS_TO_MPH) < 0))
+                pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "wind out of range for a compressed position");
+        } else {
             int dh = r->weather.has[PDN_APRS_WX_WIND_DIRECTION_DEGREES], sh = r->weather.has[PDN_APRS_WX_WIND_SPEED_MPH];
             double dv = r->weather.value[PDN_APRS_WX_WIND_DIRECTION_DEGREES], sv = r->weather.value[PDN_APRS_WX_WIND_SPEED_MPH];
             if ((dh && not_a_number(e, dv)) || (sh && not_a_number(e, sv)))
@@ -1137,6 +1201,8 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         int gga_in_cs = r->compressed && r->has_compression && r->compression.source == PDN_APRS_SOURCE_GGA;
         if (!weather_rules(e, r, range_in_cs, alt_in_cs, gga_in_cs))
             return 0;
+        if (!r->compressed)
+            extension_own_checks(e, r);
         if (!r->compressed) {
             int dh = w->has[PDN_APRS_WX_WIND_DIRECTION_DEGREES], sh = w->has[PDN_APRS_WX_WIND_SPEED_MPH];
             double dv = w->value[PDN_APRS_WX_WIND_DIRECTION_DEGREES], sv = w->value[PDN_APRS_WX_WIND_SPEED_MPH];
@@ -1751,7 +1817,7 @@ static int encode_directed_query(pdn_aprs__ectx *e, const pdn_aprs_directed_quer
             if (!A_UPPER(q->query_type[i]))
                 pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, "a query type is upper-case letters");
         if (n == 0)
-            pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a query needs a type");
+            pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, "a query type is one or more upper-case letters");
     }
     put_addressee(e->b, q->addressee);
     pdn_aprs__putc(e->b, '?');
@@ -1883,7 +1949,7 @@ static int encode_telemetry(pdn_aprs__ectx *e, const pdn_aprs_telemetry *t)
             return 0;
     /* T#MIC has no form without a first channel (a decoder reads it as
        Mic-E telemetry only with one) */
-    if (strcmp(t->sequence, "MIC") == 0 && (t->analog_count == 0 || t->analog[0].is_null))
+    if (strcmp(t->sequence, "MIC") == 0 && t->analog_count > 0 && t->analog[0].is_null)
         pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "T#MIC needs a first channel");
     if (!valid_text(t->comment, t->comment_len))
         pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");
@@ -1993,11 +2059,10 @@ static int encode_positionless_weather(pdn_aprs__ectx *e, const pdn_aprs_weather
     }
     pdn_aprs__putc(e->b, '_');
     pdn_aprs__puts(e->b, w->timestamp);
-    if (!pdn_aprs__encode_weather_fields(e, &w->weather, 1))
-        return 0;
+    pdn_aprs__encode_weather_fields(e, &w->weather, 1);
     if (w->comment_len)
-        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report has no comment");
-    return 1;
+        defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report has no comment");
+    return !e->reason;
 }
 
 static int encode_nmea(pdn_aprs__ectx *e, const pdn_aprs_nmea *m)
@@ -2182,7 +2247,7 @@ static int encode_data_inner(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         const pdn_aprs_query *q = &d->as.query;
         size_t i, n = strlen(q->query_type);
         if (n == 0)
-            defer(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a query needs a type");
+            pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, "a query type is one or more upper-case letters");
         for (i = 0; i < n; i++)
             if (!A_UPPER(q->query_type[i]))
                 pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, "a query type is upper-case letters");

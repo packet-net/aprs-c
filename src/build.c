@@ -588,9 +588,9 @@ static int build_list(const pdn_aprs_station *station, int type, const char *add
              PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "the addressee is longer than an addressee can be");
     if (rc != PDN_APRS_OK)
         return rc;
-    if (count > 13)
-        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_TOO_LONG, "telemetry metadata names at most 13 channels");
-    for (i = 0; i < count; i++) {
+    /* more than 13 is the encoder's to refuse, in the README's order with
+       the rest: the data keeps the count and the first items it holds */
+    for (i = 0; i < count && i < PDN_APRS_MAX_META_ITEMS; i++) {
         size_t n = items[i] ? strlen(items[i]) : 0;
         if (out + n + 1 > sizeof m->text)
             return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_TOO_LONG, "a telemetry name or unit is longer than APRS allows");
@@ -601,7 +601,7 @@ static int build_list(const pdn_aprs_station *station, int type, const char *add
         m->length[i] = (uint16_t)n;
         out += n + 1;
     }
-    m->count = (uint8_t)count;
+    m->count = (uint8_t)(count < 255 ? count : 255);
     return pdn_aprs_build(station, &d, buf, cap, result);
 }
 
@@ -634,11 +634,10 @@ int pdn_aprs_build_telemetry_coefficients(const pdn_aprs_station *station, const
              PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "the addressee is longer than an addressee can be");
     if (rc != PDN_APRS_OK)
         return rc;
-    if (count > 15)
-        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_TOO_LONG, "telemetry metadata gives at most 15 coefficients");
-    for (i = 0; i < count; i++)
+    /* more than 15 is the encoder's to refuse, in order with the rest */
+    for (i = 0; i < count && i < PDN_APRS_MAX_META_ITEMS; i++)
         d.as.meta.coefficient[i].value = coefficients[i];
-    d.as.meta.count = (uint8_t)count;
+    d.as.meta.count = (uint8_t)(count < 255 ? count : 255);
     return pdn_aprs_build(station, &d, buf, cap, result);
 }
 
@@ -654,9 +653,7 @@ int pdn_aprs_build_telemetry_bits(const pdn_aprs_station *station, const char *a
         return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     memset(&d, 0, sizeof d);
     d.type = PDN_APRS_TYPE_TELEMETRY_BITS;
-    rc = too_long_for_aprs(result, project, 23, PDN_APRS_REFUSAL_TOO_LONG, "a project title is at most 23 characters");
-    if (rc != PDN_APRS_OK)
-        return rc;
+    /* a title over 23 characters is the encoder's to refuse, in order */
     rc = put(result, d.as.meta.addressee, sizeof d.as.meta.addressee, addressee, NULL,
              PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "the addressee is longer than an addressee can be");
     if (rc == PDN_APRS_OK)
