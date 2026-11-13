@@ -101,6 +101,50 @@ static int too_long_for_aprs(pdn_aprs_encoded *result, const char *text, size_t 
     return PDN_APRS_OK;
 }
 
+/* Text the data cannot hold for a field APRS limits anyway (a 14th name, a
+   name past the buffer, a long project title) is too-long, but an earlier
+   code the encoder finds comes first: the builder notes it and folds it into
+   the encoder's result by the README's order. */
+typedef struct {
+    int code;
+    const char *why;
+} pending;
+
+static void note(pending *p, int code, const char *why)
+{
+    if (!p->code || pdn_aprs__refusal_rank(code) < pdn_aprs__refusal_rank(p->code)) {
+        p->code = code;
+        p->why = why;
+    }
+}
+
+/* What the encoder would say of a name, unit or title it never sees. */
+static void note_text(pending *p, const char *s, int list)
+{
+    size_t n = s ? strlen(s) : 0;
+    if (!n)
+        return;
+    if (!pdn_aprs__utf8_valid((const uint8_t *)s, n) || (n && (strpbrk(s, "\r\n{") || (list && strchr(s, ',')))))
+        note(p, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the text cannot contain , or { or a line break");
+}
+
+static int build_with(const pdn_aprs_station *station, const pdn_aprs_data *d, void *buf, size_t cap,
+                      pdn_aprs_encoded *result, const pending *p)
+{
+    pdn_aprs_encoded local;
+    int rc;
+    if (!result)
+        result = &local;
+    rc = pdn_aprs_build(station, d, buf, cap, result);
+    if (!p->code || (rc < 0 && rc != PDN_APRS_ERR_REFUSED && rc != PDN_APRS_ERR_BUFFER))
+        return rc;
+    if (rc == PDN_APRS_ERR_REFUSED && pdn_aprs__refusal_rank(result->refusal) <= pdn_aprs__refusal_rank(p->code))
+        return rc;
+    result->len = 0;
+    result->destination[0] = 0;
+    return fail(result, PDN_APRS_ERR_REFUSED, p->code, p->why);
+}
+
 static int put(pdn_aprs_encoded *result, char *dst, size_t cap, const char *src, size_t *len, int refusal,
                const char *what)
 {
@@ -578,6 +622,7 @@ static int build_list(const pdn_aprs_station *station, int type, const char *add
     pdn_aprs_telemetry_meta *m = &d.as.meta;
     size_t i, out = 0;
     int rc;
+    pending pend = {0, NULL};
     begin(result);
     addressee = meta_addressee(station, addressee);
     if (!addressee || (count && !items))
@@ -590,10 +635,16 @@ static int build_list(const pdn_aprs_station *station, int type, const char *add
         return rc;
     /* more than 13 is the encoder's to refuse, in the README's order with
        the rest: the data keeps the count and the first items it holds */
-    for (i = 0; i < count && i < PDN_APRS_MAX_META_ITEMS; i++) {
+    for (i = 0; i < count; i++) {
         size_t n = items[i] ? strlen(items[i]) : 0;
-        if (out + n + 1 > sizeof m->text)
-            return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_TOO_LONG, "a telemetry name or unit is longer than APRS allows");
+        if (i >= PDN_APRS_MAX_META_ITEMS || out + n + 1 > sizeof m->text) {
+            /* past what the data holds: too-long, after its own characters */
+            note_text(&pend, items[i], 1);
+            note(&pend, PDN_APRS_REFUSAL_TOO_LONG, "a telemetry name or unit list is longer than APRS allows");
+            n = 0;
+            if (i >= PDN_APRS_MAX_META_ITEMS || out + 1 > sizeof m->text)
+                continue;
+        }
         if (n)
             memcpy(m->text + out, items[i], n);
         m->text[out + n] = 0;
@@ -602,7 +653,7 @@ static int build_list(const pdn_aprs_station *station, int type, const char *add
         out += n + 1;
     }
     m->count = (uint8_t)(count < 255 ? count : 255);
-    return pdn_aprs_build(station, &d, buf, cap, result);
+    return build_with(station, &d, buf, cap, result, &pend);
 }
 
 int pdn_aprs_build_telemetry_names(const pdn_aprs_station *station, const char *addressee, const char *const *names,
@@ -647,6 +698,7 @@ int pdn_aprs_build_telemetry_bits(const pdn_aprs_station *station, const char *a
     pdn_aprs_data d;
     size_t n = 0;
     int rc;
+    pending pend = {0, NULL};
     begin(result);
     addressee = meta_addressee(station, addressee);
     if (!addressee || !bits)
@@ -656,12 +708,22 @@ int pdn_aprs_build_telemetry_bits(const pdn_aprs_station *station, const char *a
     /* a title over 23 characters is the encoder's to refuse, in order */
     rc = put(result, d.as.meta.addressee, sizeof d.as.meta.addressee, addressee, NULL,
              PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "the addressee is longer than an addressee can be");
-    if (rc == PDN_APRS_OK)
-        rc = put(result, d.as.meta.bits, sizeof d.as.meta.bits, bits, NULL, PDN_APRS_REFUSAL_MALFORMED, "the bits are eight 0 or 1 characters");
-    if (rc == PDN_APRS_OK)
-        rc = put(result, d.as.meta.text, sizeof d.as.meta.text, project, &n, PDN_APRS_REFUSAL_TOO_LONG, "the project title is too long");
     if (rc != PDN_APRS_OK)
         return rc;
+    if (strlen(bits) >= sizeof d.as.meta.bits)
+        note(&pend, PDN_APRS_REFUSAL_MALFORMED, "the bits are eight 0 or 1 characters");
+    else
+        memcpy(d.as.meta.bits, bits, strlen(bits) + 1);
+    if (project && strlen(project) >= sizeof d.as.meta.text) {
+        /* past what the data holds: too-long, after its own characters */
+        note_text(&pend, project, 0);
+        note(&pend, PDN_APRS_REFUSAL_TOO_LONG, "a project title is at most 23 characters");
+    } else {
+        rc = put(result, d.as.meta.text, sizeof d.as.meta.text, project, &n, PDN_APRS_REFUSAL_TOO_LONG,
+                 "the project title is too long");
+        if (rc != PDN_APRS_OK)
+            return rc;
+    }
     d.as.meta.project_len = (uint16_t)n;
-    return pdn_aprs_build(station, &d, buf, cap, result);
+    return build_with(station, &d, buf, cap, result, &pend);
 }

@@ -1075,7 +1075,10 @@ PDN_APRS_API int pdn_aprs_decode_info_unbounded(const pdn_aprs_header *header, c
 /*
  * Decodes the packet inside a third-party packet (data.type
  * PDN_APRS_TYPE_THIRD_PARTY) into inner, which has its own header, data and
- * diagnostics.
+ * diagnostics. Third-party packets nest at most PDN_APRS_MAX_THIRD_PARTY_DEPTH
+ * (4) deep: the inner packet is one deeper than outer (its depth field), and
+ * one whose field starts a fifth } is unrecognized (malformed) with
+ * invalid-third-party, so a chain of calls ends there.
  */
 PDN_APRS_API int pdn_aprs_decode_third_party(const pdn_aprs_data *outer, const pdn_aprs_decode_options *options,
                                              pdn_aprs_packet *inner);

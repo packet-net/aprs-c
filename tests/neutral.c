@@ -1389,6 +1389,26 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         static const char *const keys[] = {"type", "packet", NULL};
         keys_only(cv, j, keys);
         if (!c.bad) {
+            /* nested more than four deep is refused before anything inside
+               is looked at, counted by walking, so a chain thousands deep
+               never recurses */
+            const jval *x = j;
+            int levels = 1;
+            for (;;) {
+                const jval *xd = json_get(json_get(x, "packet"), "data");
+                const char *xt = json_gets(xd, "type");
+                if (!xt || strcmp(xt, "third-party") != 0)
+                    break;
+                x = xd;
+                levels++;
+            }
+            if (levels > PDN_APRS_MAX_THIRD_PARTY_DEPTH) {
+                snprintf(err, errlen, "third-party packets nest at most four deep");
+                last_refusal = PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER;
+                return -1;
+            }
+        }
+        if (!c.bad) {
             if (!json_get(j, "packet"))
                 cannot(cv, "is missing", "packet");
             else {

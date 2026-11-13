@@ -254,6 +254,8 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
                                               pdn_aprs_encoded *encoded, int ax25);
 
 PDN_APRS__PRIVATE int pdn_aprs__refuse(pdn_aprs__ectx *e, int code, const char *why);
+/* Where a refusal code comes in the README's Refusal reasons order. */
+PDN_APRS__PRIVATE int pdn_aprs__refusal_rank(int code);
 PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_data *d);
 PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_report *r);
 PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const pdn_aprs_weather *w, int positionless);
@@ -4811,7 +4813,7 @@ PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_apr
 
 
 /* Where a code comes in the README's Refusal reasons order. */
-static int refusal_rank(int code)
+PDN_APRS__PRIVATE int pdn_aprs__refusal_rank(int code)
 {
     static const int order[] = {
         PDN_APRS_REFUSAL_NOT_ENCODABLE,      PDN_APRS_REFUSAL_INVALID_ADDRESS,
@@ -4840,7 +4842,7 @@ static int refusal_rank(int code)
    "which refusal a record with two faults gets"). Returns 0. */
 PDN_APRS__PRIVATE int pdn_aprs__refuse(pdn_aprs__ectx *e, int code, const char *why)
 {
-    if (!e->reason || refusal_rank(code) < refusal_rank(e->refusal)) {
+    if (!e->reason || pdn_aprs__refusal_rank(code) < pdn_aprs__refusal_rank(e->refusal)) {
         e->reason = why;
         e->refusal = code;
     }
@@ -5168,10 +5170,12 @@ static int t_byte(const pdn_aprs_report *r)
 static void put_gga_altitude(pdn_aprs__buf *b, double feet, int *exact)
 {
     long cs = 0;
-    if (feet >= 1)
-        cs = (long)pdn_aprs__round(log(feet) / log(1.002));
-    if (cs > 8280)
-        cs = 8280;
+    /* past the top step (or infinite) is the top step, clamped before the
+       cast so it never overflows */
+    if (feet >= 1) {
+        double v = pdn_aprs__round(log(feet) / log(1.002));
+        cs = v > 8280 ? 8280 : (long)v;
+    }
     put_b91(b, cs, 2);
     *exact = feet >= 1 && fabs(pow(1.002, (double)cs) - feet) <= 1e-9 * feet;
 }
@@ -6347,8 +6351,9 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     }
     if ((r->has_speed && not_a_number(e, r->speed_knots)) || (r->has_course && not_a_number(e, r->course_degrees)))
         return 0;
-    speed = r->has_speed ? (long)pdn_aprs__round(r->speed_knots) : 0;
-    course = r->has_course ? (long)pdn_aprs__round(r->course_degrees) : 0;
+    /* clamped before the cast: anything past these is out of range anyway */
+    speed = r->has_speed ? (long)pdn_aprs__round(fmax(-1.0, fmin(r->speed_knots, 1e6))) : 0;
+    course = r->has_course ? (long)pdn_aprs__round(fmax(-1.0, fmin(r->course_degrees, 1e6))) : 0;
     if (speed < 0 || speed > 799 || course < 0 || course > 360) {
         pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "course or speed out of range for Mic-E");
         speed = course = 0;
@@ -7297,10 +7302,12 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
        computed */
     /* the header comes before the data in what is refused (ruling 1): one that
        needs no computed destination is checked first */
-    if (data->type != PDN_APRS_TYPE_MIC_E) {
+    {
+        /* Mic-E computes only its destination, so the source and path are
+           checked with a placeholder for it */
+        const char *first = data->type == PDN_APRS_TYPE_MIC_E ? "APZ001" : header->destination;
         pdn_aprs__buf_init(&hb, head, sizeof head);
-        rc = ax25 ? pdn_aprs__write_header_ax25(&hb, header, header->destination)
-                  : pdn_aprs__write_header_tnc2(&hb, header, header->destination);
+        rc = ax25 ? pdn_aprs__write_header_ax25(&hb, header, first) : pdn_aprs__write_header_tnc2(&hb, header, first);
         if (rc == PDN_APRS_ERR_REFUSED) {
             encoded->len = 0;
             encoded->destination[0] = 0;
@@ -7523,6 +7530,50 @@ static int too_long_for_aprs(pdn_aprs_encoded *result, const char *text, size_t 
     if (text && strlen(text) > 4 * max_chars)
         return fail(result, PDN_APRS_ERR_REFUSED, refusal, what);
     return PDN_APRS_OK;
+}
+
+/* Text the data cannot hold for a field APRS limits anyway (a 14th name, a
+   name past the buffer, a long project title) is too-long, but an earlier
+   code the encoder finds comes first: the builder notes it and folds it into
+   the encoder's result by the README's order. */
+typedef struct {
+    int code;
+    const char *why;
+} pending;
+
+static void note(pending *p, int code, const char *why)
+{
+    if (!p->code || pdn_aprs__refusal_rank(code) < pdn_aprs__refusal_rank(p->code)) {
+        p->code = code;
+        p->why = why;
+    }
+}
+
+/* What the encoder would say of a name, unit or title it never sees. */
+static void note_text(pending *p, const char *s, int list)
+{
+    size_t n = s ? strlen(s) : 0;
+    if (!n)
+        return;
+    if (!pdn_aprs__utf8_valid((const uint8_t *)s, n) || (n && (strpbrk(s, "\r\n{") || (list && strchr(s, ',')))))
+        note(p, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the text cannot contain , or { or a line break");
+}
+
+static int build_with(const pdn_aprs_station *station, const pdn_aprs_data *d, void *buf, size_t cap,
+                      pdn_aprs_encoded *result, const pending *p)
+{
+    pdn_aprs_encoded local;
+    int rc;
+    if (!result)
+        result = &local;
+    rc = pdn_aprs_build(station, d, buf, cap, result);
+    if (!p->code || (rc < 0 && rc != PDN_APRS_ERR_REFUSED && rc != PDN_APRS_ERR_BUFFER))
+        return rc;
+    if (rc == PDN_APRS_ERR_REFUSED && pdn_aprs__refusal_rank(result->refusal) <= pdn_aprs__refusal_rank(p->code))
+        return rc;
+    result->len = 0;
+    result->destination[0] = 0;
+    return fail(result, PDN_APRS_ERR_REFUSED, p->code, p->why);
 }
 
 static int put(pdn_aprs_encoded *result, char *dst, size_t cap, const char *src, size_t *len, int refusal,
@@ -8002,6 +8053,7 @@ static int build_list(const pdn_aprs_station *station, int type, const char *add
     pdn_aprs_telemetry_meta *m = &d.as.meta;
     size_t i, out = 0;
     int rc;
+    pending pend = {0, NULL};
     begin(result);
     addressee = meta_addressee(station, addressee);
     if (!addressee || (count && !items))
@@ -8014,10 +8066,16 @@ static int build_list(const pdn_aprs_station *station, int type, const char *add
         return rc;
     /* more than 13 is the encoder's to refuse, in the README's order with
        the rest: the data keeps the count and the first items it holds */
-    for (i = 0; i < count && i < PDN_APRS_MAX_META_ITEMS; i++) {
+    for (i = 0; i < count; i++) {
         size_t n = items[i] ? strlen(items[i]) : 0;
-        if (out + n + 1 > sizeof m->text)
-            return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_TOO_LONG, "a telemetry name or unit is longer than APRS allows");
+        if (i >= PDN_APRS_MAX_META_ITEMS || out + n + 1 > sizeof m->text) {
+            /* past what the data holds: too-long, after its own characters */
+            note_text(&pend, items[i], 1);
+            note(&pend, PDN_APRS_REFUSAL_TOO_LONG, "a telemetry name or unit list is longer than APRS allows");
+            n = 0;
+            if (i >= PDN_APRS_MAX_META_ITEMS || out + 1 > sizeof m->text)
+                continue;
+        }
         if (n)
             memcpy(m->text + out, items[i], n);
         m->text[out + n] = 0;
@@ -8026,7 +8084,7 @@ static int build_list(const pdn_aprs_station *station, int type, const char *add
         out += n + 1;
     }
     m->count = (uint8_t)(count < 255 ? count : 255);
-    return pdn_aprs_build(station, &d, buf, cap, result);
+    return build_with(station, &d, buf, cap, result, &pend);
 }
 
 int pdn_aprs_build_telemetry_names(const pdn_aprs_station *station, const char *addressee, const char *const *names,
@@ -8071,6 +8129,7 @@ int pdn_aprs_build_telemetry_bits(const pdn_aprs_station *station, const char *a
     pdn_aprs_data d;
     size_t n = 0;
     int rc;
+    pending pend = {0, NULL};
     begin(result);
     addressee = meta_addressee(station, addressee);
     if (!addressee || !bits)
@@ -8080,14 +8139,24 @@ int pdn_aprs_build_telemetry_bits(const pdn_aprs_station *station, const char *a
     /* a title over 23 characters is the encoder's to refuse, in order */
     rc = put(result, d.as.meta.addressee, sizeof d.as.meta.addressee, addressee, NULL,
              PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "the addressee is longer than an addressee can be");
-    if (rc == PDN_APRS_OK)
-        rc = put(result, d.as.meta.bits, sizeof d.as.meta.bits, bits, NULL, PDN_APRS_REFUSAL_MALFORMED, "the bits are eight 0 or 1 characters");
-    if (rc == PDN_APRS_OK)
-        rc = put(result, d.as.meta.text, sizeof d.as.meta.text, project, &n, PDN_APRS_REFUSAL_TOO_LONG, "the project title is too long");
     if (rc != PDN_APRS_OK)
         return rc;
+    if (strlen(bits) >= sizeof d.as.meta.bits)
+        note(&pend, PDN_APRS_REFUSAL_MALFORMED, "the bits are eight 0 or 1 characters");
+    else
+        memcpy(d.as.meta.bits, bits, strlen(bits) + 1);
+    if (project && strlen(project) >= sizeof d.as.meta.text) {
+        /* past what the data holds: too-long, after its own characters */
+        note_text(&pend, project, 0);
+        note(&pend, PDN_APRS_REFUSAL_TOO_LONG, "a project title is at most 23 characters");
+    } else {
+        rc = put(result, d.as.meta.text, sizeof d.as.meta.text, project, &n, PDN_APRS_REFUSAL_TOO_LONG,
+                 "the project title is too long");
+        if (rc != PDN_APRS_OK)
+            return rc;
+    }
     d.as.meta.project_len = (uint16_t)n;
-    return pdn_aprs_build(station, &d, buf, cap, result);
+    return build_with(station, &d, buf, cap, result, &pend);
 }
 
 /* ==== src/symbols.c ==== */

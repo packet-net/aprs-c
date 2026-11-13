@@ -771,6 +771,65 @@ static void test_long_third_party(void)
     CHECK(pdn_aprs_decode_third_party(&d, NULL, &inner) == PDN_APRS_ERR_ARGUMENT);
 }
 
+/* Round 3: a third-party chain as long as the data holds (two hundred
+   levels and more in 1,024 bytes) is walked one level at a time, never
+   recursed; the fifth level is unrecognized, and the chain writes back as
+   received. Builders and the Mic-E header rank faults in the README order. */
+static void test_round3(void)
+{
+    static pdn_aprs_data d;
+    static pdn_aprs_packet inner;
+    static char line[4096];
+    pdn_aprs_station me = {"G9RXG", NULL, NULL, 0, NULL};
+    pdn_aprs_station bad = {"BAD!!", NULL, NULL, 0, NULL};
+    pdn_aprs_mic_e_args mic;
+    pdn_aprs_encoded enc;
+    const char *names[16];
+    size_t n = 0, k;
+    int w, levels = 1;
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_THIRD_PARTY;
+    while (n + 5 + 3 <= sizeof d.as.third_party.packet) {
+        memcpy(d.as.third_party.packet + n, n ? "}A>B:" : "A>B:", n ? 5 : 4);
+        n += n ? 5 : 4;
+    }
+    memcpy(d.as.third_party.packet + n, ">hi", 3);
+    d.as.third_party.len = (uint16_t)(n + 3);
+    w = pdn_aprs_build(&me, &d, line, sizeof line, NULL);
+    CHECK(w > 0);
+    /* decode the chain level by level, as a caller would */
+    while (pdn_aprs_decode_third_party(&d, NULL, &inner) == PDN_APRS_OK && inner.data.type == PDN_APRS_TYPE_THIRD_PARTY &&
+           levels < 1000) {
+        d = inner.data;
+        levels++;
+    }
+    CHECK(levels == PDN_APRS_MAX_THIRD_PARTY_DEPTH && inner.data.type == PDN_APRS_TYPE_UNRECOGNIZED &&
+          pdn_aprs_has_diagnostic(&inner, PDN_APRS_CODE_INVALID_THIRD_PARTY, PDN_APRS_SEVERITY_ERROR));
+
+    /* a bad source comes before a Mic-E course out of range */
+    memset(&mic, 0, sizeof mic);
+    mic.latitude = 49.0;
+    mic.longitude = -72.0;
+    mic.symbol = pdn_aprs_symbol_make('/', '>');
+    mic.has_course = 1;
+    mic.course_degrees = 999;
+    w = pdn_aprs_build_mic_e(&bad, &mic, line, sizeof line, &enc);
+    CHECK(w == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_ADDRESS);
+
+    /* sixteen names: a comma in the sixteenth comes before too-long, and a
+       bad addressee before both */
+    for (k = 0; k < 16; k++)
+        names[k] = "N";
+    names[15] = "a,b";
+    w = pdn_aprs_build_telemetry_names(&me, NULL, names, 16, line, sizeof line, &enc);
+    CHECK(w == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_CHARACTER);
+    w = pdn_aprs_build_telemetry_names(&me, "ABCDEFGHIJ", names, 16, line, sizeof line, &enc);
+    CHECK(w == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_ADDRESSEE);
+    names[15] = "N";
+    w = pdn_aprs_build_telemetry_names(&me, NULL, names, 16, line, sizeof line, &enc);
+    CHECK(w == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+}
+
 /* Refusals carry a reason code: one from each group, and zero when nothing
    is refused or the error is not a refusal. */
 static void test_refusal_codes(void)
@@ -1098,6 +1157,7 @@ int main(void)
     test_locale();
     test_long_third_party();
     test_refusal_codes();
+    test_round3();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

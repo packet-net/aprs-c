@@ -2,7 +2,18 @@
 
 ## Unreleased
 
-The round 3 rulings of the shared vectors (aprs-vectors `round-3`, pinned at cb5dcc0).
+The round 3 rulings of the shared vectors (aprs-vectors `round-3`, pinned at f2f6ab5).
+
+### Behaviour changes for 1.x callers
+
+- A lower-case or 5-character locator (status, Mic-E, Maidenhead beacon) is now refused as `malformed`; the status builder still upper-cases one for you.
+- AX.25 frames: punctuation, control characters or a space inside an address are now `invalid-address` (an error), where they were the tolerated `invalid-ax25-address-characters`. Lower case is still tolerated.
+- Telemetry: more than five analog values is `too-long`, fewer `malformed` (`T#MIC` with none too), where some of these were other codes.
+- Third-party packets are read at most four deep; a fifth `}` is unrecognized with `invalid-third-party`.
+- When data has several faults the refusal code may differ from 1.0.x: it is now the first in the README's order.
+
+### Changes
+
 
 - Refusal reasons follow the vectors' order whichever check runs first. The encoder now goes on past a fault in a field on its own, writing bytes it throws away, and names the code that comes first in the README's Refusal reasons order. So a PHG digit of 10 beside a course is `value-out-of-range`, not `extension-conflict`; a Mic-E course of 0 with an altitude past every form is `value-out-of-range`; a query with a bad type and a radius past 9999 miles is `value-out-of-range`; a comment with a line break beside a bad NMEA checksum is `invalid-character`.
 - A field whose place is wanted twice keeps its own checks: the PHG, RNG, DFS, area, DF bearing, storm data and course/speed beside an uncompressed weather report's wind, a course or speed beside compressed wind or a GGA altitude (judged by the cs bytes, so a course of 0 there is `value-has-no-form`), and a compressed wind with only one half given.
@@ -13,6 +24,10 @@ The round 3 rulings of the shared vectors (aprs-vectors `round-3`, pinned at cb5
 - Telemetry metadata builders leave too many names, units or coefficients, and a project title over 23 characters, to the encoder, so a bad addressee is named first.
 - A positionless weather report's comment no longer hides a fault in its fields.
 - Mic-E data with no speed is written with a speed of 0, which a decoder reads back as 0 (an ambiguous Mic-E position a rounding step under 90 or 180 degrees is now written).
+- A Mic-E report's source and path are checked before its data, as any other report's are (only its destination is computed), so a bad source is `invalid-address` whatever else is wrong.
+- Builders: telemetry names, units, bits and a project title the data cannot hold (a 14th name, a name past the buffer, an over-long title or bits) are noted as `too-long` or `malformed` and ranked with what the encoder finds, so a bad addressee or a comma in a 16th name is named first.
+- No float-to-integer cast overflows on huge or infinite values (a Mic-E speed or course, a GGA altitude).
+- Third-party data nested more than four deep is refused as `invalid-third-party-header` by the neutral conversion, which counts the levels by walking before it converts any. The C data holds a third-party packet as its raw text, so a chain in it is the received form of four levels whose innermost data is unrecognized, and it is written back as received; the decoder reads it one level at a time and stops at the fifth.
 - Decoder: third-party packets nest at most four deep. `pdn_aprs_third_party` gains `uint8_t depth` at the end, set by the decoder, and `pdn_aprs_decode_third_party()` reads a fifth `}` as unrecognized with `invalid-third-party`. New `PDN_APRS_MAX_THIRD_PARTY_DEPTH` (4).
 - Decoder: an AX.25 address is upper-case letters and digits padded with spaces. A lower-case letter stays tolerated (`invalid-ax25-address-characters`); any other character, a space before the last character included, is now `invalid-address`. A call of spaces only is empty: a destination is `empty-destination` and a digipeater `empty-path-entry` (left out of the path), both tolerated.
 - Tests: the vectors runner compares refusal codes (`refusal`, `reencode_refusal`) and reads `precedence.json`. The neutral converter refuses a third-party path entry before a used one that is not marked used as `invalid-third-party-header`, before the inner data, and lets the encoder's own checks run beside a fault the C data cannot carry (a message ID on an ack). `third-party/nested-2000-deep` is a known difference: its line is 10,017 bytes, past the 512 the decoder takes.

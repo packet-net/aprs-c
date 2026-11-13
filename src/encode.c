@@ -8,7 +8,7 @@
 #include "internal.h"
 
 /* Where a code comes in the README's Refusal reasons order. */
-static int refusal_rank(int code)
+PDN_APRS__PRIVATE int pdn_aprs__refusal_rank(int code)
 {
     static const int order[] = {
         PDN_APRS_REFUSAL_NOT_ENCODABLE,      PDN_APRS_REFUSAL_INVALID_ADDRESS,
@@ -37,7 +37,7 @@ static int refusal_rank(int code)
    "which refusal a record with two faults gets"). Returns 0. */
 PDN_APRS__PRIVATE int pdn_aprs__refuse(pdn_aprs__ectx *e, int code, const char *why)
 {
-    if (!e->reason || refusal_rank(code) < refusal_rank(e->refusal)) {
+    if (!e->reason || pdn_aprs__refusal_rank(code) < pdn_aprs__refusal_rank(e->refusal)) {
         e->reason = why;
         e->refusal = code;
     }
@@ -365,10 +365,12 @@ static int t_byte(const pdn_aprs_report *r)
 static void put_gga_altitude(pdn_aprs__buf *b, double feet, int *exact)
 {
     long cs = 0;
-    if (feet >= 1)
-        cs = (long)pdn_aprs__round(log(feet) / log(1.002));
-    if (cs > 8280)
-        cs = 8280;
+    /* past the top step (or infinite) is the top step, clamped before the
+       cast so it never overflows */
+    if (feet >= 1) {
+        double v = pdn_aprs__round(log(feet) / log(1.002));
+        cs = v > 8280 ? 8280 : (long)v;
+    }
     put_b91(b, cs, 2);
     *exact = feet >= 1 && fabs(pow(1.002, (double)cs) - feet) <= 1e-9 * feet;
 }
@@ -1544,8 +1546,9 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     }
     if ((r->has_speed && not_a_number(e, r->speed_knots)) || (r->has_course && not_a_number(e, r->course_degrees)))
         return 0;
-    speed = r->has_speed ? (long)pdn_aprs__round(r->speed_knots) : 0;
-    course = r->has_course ? (long)pdn_aprs__round(r->course_degrees) : 0;
+    /* clamped before the cast: anything past these is out of range anyway */
+    speed = r->has_speed ? (long)pdn_aprs__round(fmax(-1.0, fmin(r->speed_knots, 1e6))) : 0;
+    course = r->has_course ? (long)pdn_aprs__round(fmax(-1.0, fmin(r->course_degrees, 1e6))) : 0;
     if (speed < 0 || speed > 799 || course < 0 || course > 360) {
         pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "course or speed out of range for Mic-E");
         speed = course = 0;
@@ -2494,10 +2497,12 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
        computed */
     /* the header comes before the data in what is refused (ruling 1): one that
        needs no computed destination is checked first */
-    if (data->type != PDN_APRS_TYPE_MIC_E) {
+    {
+        /* Mic-E computes only its destination, so the source and path are
+           checked with a placeholder for it */
+        const char *first = data->type == PDN_APRS_TYPE_MIC_E ? "APZ001" : header->destination;
         pdn_aprs__buf_init(&hb, head, sizeof head);
-        rc = ax25 ? pdn_aprs__write_header_ax25(&hb, header, header->destination)
-                  : pdn_aprs__write_header_tnc2(&hb, header, header->destination);
+        rc = ax25 ? pdn_aprs__write_header_ax25(&hb, header, first) : pdn_aprs__write_header_tnc2(&hb, header, first);
         if (rc == PDN_APRS_ERR_REFUSED) {
             encoded->len = 0;
             encoded->destination[0] = 0;
