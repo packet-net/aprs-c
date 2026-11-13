@@ -138,7 +138,7 @@ static size_t unhex(const char *h, uint8_t *out, size_t cap)
 
 typedef struct {
     int ax25;
-    uint8_t bytes[4096];
+    uint8_t bytes[16384];
     size_t len;
     size_t info_at; /* offset of the information field (TNC2) */
 } input_t;
@@ -150,6 +150,8 @@ static int build_input(const jval *in, input_t *out)
     memset(out, 0, sizeof *out);
     if ((s = json_gets(in, "tnc2")) != NULL) {
         v = json_get(in, "tnc2");
+        if (v->len > sizeof out->bytes)
+            return 0;
         memcpy(out->bytes, v->str, v->len);
         out->len = v->len;
     } else if ((s = json_gets(in, "tnc2_hex")) != NULL) {
@@ -366,7 +368,14 @@ static void check_decode_case(const jval *c, const char *id)
         char check[32];
         snprintf(check, sizeof check, "reencode %s", reenc);
         if (strcmp(reenc, "refused") == 0) {
-            report(id, check, n == PDN_APRS_ERR_REFUSED, "the encoder did not refuse", NULL, NULL);
+            const char *wcode = json_gets(c, "reencode_refusal");
+            const char *gcode = n == PDN_APRS_ERR_REFUSED ? pdn_aprs_refusal_name(enc.refusal) : NULL;
+            if (n != PDN_APRS_ERR_REFUSED)
+                snprintf(why, sizeof why, "the encoder did not refuse");
+            else
+                snprintf(why, sizeof why, "refused as %s, want %s", gcode ? gcode : "(none)", wcode ? wcode : "-");
+            report(id, check, n == PDN_APRS_ERR_REFUSED && (!wcode || (gcode && strcmp(gcode, wcode) == 0)), why,
+                   NULL, NULL);
         } else if (n < 0) {
             snprintf(why, sizeof why, "encoder returned %d (%s)", n, enc.reason ? enc.reason : "");
             report(id, check, 0, why, NULL, NULL);
@@ -475,10 +484,19 @@ static void check_encode_case(const jval *c, const char *id)
         report(id, "encode", 0, err, NULL, NULL);
         return;
     }
-    n = conv < 0 ? PDN_APRS_ERR_REFUSED : pdn_aprs_encode_info(&d, NULL, buf, sizeof buf, &enc);
+    n = conv < 0 ? PDN_APRS_ERR_REFUSED : neutral_encode(&d, NULL, buf, sizeof buf, &enc);
     if (json_get(expect, "refused")) {
-        snprintf(why, sizeof why, "wrote %s", ascii(buf, n > 0 ? n : 0));
-        report(id, "encode", n == PDN_APRS_ERR_REFUSED, why, NULL, NULL);
+        const char *wcode = json_gets(expect, "refusal");
+        const char *gcode = NULL;
+        if (n == PDN_APRS_ERR_REFUSED)
+            gcode = pdn_aprs_refusal_name(conv < 0 ? neutral_refusal() : enc.refusal);
+        if (n != PDN_APRS_ERR_REFUSED)
+            snprintf(why, sizeof why, "wrote %s", ascii(buf, n > 0 ? n : 0));
+        else
+            snprintf(why, sizeof why, "refused as %s, want %s%s%s", gcode ? gcode : "(none)", wcode ? wcode : "-",
+                     conv < 0 ? ": " : "", conv < 0 ? err : "");
+        report(id, "encode", n == PDN_APRS_ERR_REFUSED && (!wcode || (gcode && strcmp(gcode, wcode) == 0)), why,
+               NULL, NULL);
         return;
     }
     {
@@ -500,7 +518,8 @@ int main(int argc, char **argv)
 {
     static const char *const files[] = {"envelope",  "position",          "mic-e",       "object-item",
                                         "message",   "weather-telemetry", "status-other", "deviations",
-                                        "encode",    "corpus-findings",   "differential", "corpus"};
+                                        "encode",    "corpus-findings",   "differential", "corpus",
+                                        "precedence"};
     const char *dir = NULL;
     size_t f;
     int i;

@@ -586,6 +586,12 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_third_party(pdn_aprs__dctx *c)
     size_t at;
     int mark, k, rejected = 0;
     c->data->type = PDN_APRS_TYPE_THIRD_PARTY;
+    /* Third-party packets nest at most four deep: a fifth } is not read
+       (vectors interpretation "third-party packets nest at most four deep"). */
+    if (c->depth >= PDN_APRS_MAX_THIRD_PARTY_DEPTH) {
+        pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_THIRD_PARTY);
+        return;
+    }
     /* The inner header's own diagnostics belong to the inner packet, which
        is read leniently. A defect there that the options in force reject
        (all of them, when strict) makes the packet invalid-third-party. */
@@ -607,6 +613,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_third_party(pdn_aprs__dctx *c)
     }
     t->len = (uint16_t)(c->len - 1);
     memcpy(t->packet, c->info + 1, c->len - 1);
+    t->depth = (uint8_t)c->depth;
 }
 
 /* ---- user-defined, test, Agrelo, Maidenhead ---- */

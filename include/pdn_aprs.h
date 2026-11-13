@@ -98,6 +98,9 @@ PDN_APRS_API const char *pdn_aprs_version(void);
    equation coefficients. */
 #define PDN_APRS_MAX_ANALOG 5
 #define PDN_APRS_MAX_META_ITEMS 15
+/* Third-party packets nest at most this many deep (vectors interpretation
+   "third-party packets nest at most four deep"). */
+#define PDN_APRS_MAX_THIRD_PARTY_DEPTH 4
 /* Station capabilities kept for one report; more is invalid-capabilities. */
 #define PDN_APRS_MAX_CAPABILITIES 64
 /* Unrecognised weather fields ("extra") kept for one report. */
@@ -926,6 +929,12 @@ PDN_APRS_API const char *pdn_aprs_capability_value(const pdn_aprs_capabilities *
 typedef struct pdn_aprs_third_party {
     uint16_t len;
     uint8_t packet[2 * PDN_APRS_MAX_INFO]; /* the encoder takes twice what the decoder does, as for text */
+    /* Third-party packets this one is inside: 0 for one read from a frame or
+       line, set by the decoder. pdn_aprs_decode_third_party reads the inner
+       packet one deeper; a third-party packet at depth
+       PDN_APRS_MAX_THIRD_PARTY_DEPTH (a fifth level) is not read and is
+       unrecognized with invalid-third-party. The encoder ignores it. */
+    uint8_t depth;
 } pdn_aprs_third_party;
 
 /* User-defined data {UX... (APRS12c ch. 19): bytes as sent. */

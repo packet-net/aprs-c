@@ -357,7 +357,7 @@ static void encode_line(long fallback_n, const char *text, size_t tl)
         return;
     }
     eo.devices = lenient.devices;
-    rc = pdn_aprs_encode_info(&d, &eo, out_buf, sizeof out_buf, &enc);
+    rc = neutral_encode(&d, &eo, out_buf, sizeof out_buf, &enc);
     if (rc < 0) {
         json_set(out, "result", json_str("refused"));
         json_set(out, "reason", json_str(enc.reason ? enc.reason : pdn_aprs_strerror(rc)));

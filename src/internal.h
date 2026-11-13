@@ -102,6 +102,7 @@ typedef struct pdn_aprs__dctx {
     int failed;          /* an error stopped decoding */
     int too_long;        /* a part of the field is longer than the packet holds */
     const char *dest;    /* the destination address, for Mic-E */
+    int depth;           /* third-party packets the field is inside */
 } pdn_aprs__dctx;
 
 /* Records a diagnostic. */
