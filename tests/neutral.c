@@ -1039,6 +1039,7 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
     size_t n = 0, k, last = 0;
     int rc, i;
     const char *header_fault = NULL;
+    memset(&enc, 0, sizeof enc);
     keys_only(cv, p, keys);
     if (cv->bad)
         return 0;
