@@ -96,21 +96,11 @@ PDN_APRS__PRIVATE void pdn_aprs__find_telemetry_dao(const pdn_aprs__cbuf *cb, pd
 
 PDN_APRS__PRIVATE int pdn_aprs__lifted_run_to_end(const pdn_aprs__cbuf *cb, size_t at)
 {
+    /* the weather text ends at the end of the field or where the first
+       lifted element starts; what follows an element is not weather text */
     pdn_aprs__lifted f;
     pdn_aprs__find_telemetry_dao(cb, &f);
-    for (;;) {
-        if (at == cb->n)
-            return 1;
-        if (f.have_tlm && at == f.tstart) {
-            at = f.tend;
-            f.have_tlm = 0;
-        } else if (f.have_dao && at == f.dao_pos) {
-            at += 5;
-            f.have_dao = 0;
-        } else {
-            return 0;
-        }
-    }
+    return at == cb->n || (f.have_tlm && at == f.tstart) || (f.have_dao && at == f.dao_pos);
 }
 
 PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs_report *r, uint8_t dao[5])

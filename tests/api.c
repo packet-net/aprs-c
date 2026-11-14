@@ -1831,6 +1831,67 @@ static void test_round4(void)
     }
 }
 
+/* Run 5: a Mic-E comment that would read back as the device suffix takes a /
+   where nothing follows it; with telemetry or a !DAO! after it, it needs none.
+   A run-on weather value before a lifted element ends the weather text there,
+   and the text after the element is comment text on its own. */
+static void test_round5(void)
+{
+    static char line[2048];
+    pdn_aprs_encode_options eo;
+    pdn_aprs_encoded enc;
+    unsigned i;
+    /* each is written back as read */
+    static const char *const mice[] = {
+        "N0CALL>U95U3Q:`@Ikl+\x7f" "j/`IO91/G 145.500MHz toff +000 /X",
+        "N0CALL>U95U3Q:`@Ikl+\x7f" "j/`IO91/G /X",
+        "N0CALL>U95U3Q:`@Ikl+\x7f" "j/`IO91/G PHG5132/ /X",
+        "N0CALL>U95U3Q:`@Ikl+\x7f" "j/`PHG5132/ /X",
+        "N0CALL>U95U3Q:`@Ikl+\x7f" "j/`IO91/G 145.500MHz toff +000 X|!!!!|",
+        "N0CALL>U95U3Q:`@Ikl+\x7f" "j/`IO91/G 145.500MHz toff +000 X!w12!",
+        "N0CALL>U95U3Q:`@Ikl+\x7f" "j/`IO91/G X|!!!!|",
+        "N0CALL>U95U3Q:`@Ikl+\x7f" "j/`IO91/G 145.500MHz toff +000 X",
+        "N0CALL>U95U3Q:`@Ikl+\x7f" "j/>IO91/G 145.500MHz toff +000=",
+    };
+    memset(&eo, 0, sizeof eo);
+    eo.devices = pdn_aprs_devices();
+    for (i = 0; i < sizeof mice / sizeof mice[0]; i++) {
+        const char *tnc2 = mice[i];
+        int n;
+        CHECK(decode(tnc2) == PDN_APRS_OK && pkt.data.type == PDN_APRS_TYPE_MIC_E);
+        n = pdn_aprs_encode_info(&pkt.data, &eo, line, sizeof line, &enc);
+        CHECK(n > 0 && (size_t)n == strlen(tnc2) - 14 && memcmp(line, tnc2 + 14, (size_t)n) == 0);
+    }
+    /* the comment X after a frequency or a locator is not the suffix; a decode reads it as text */
+    CHECK(decode(mice[0]) == PDN_APRS_OK && pkt.data.as.report.device_suffix[0] == 0 &&
+          pkt.data.as.report.comment_len == 1 && pkt.data.as.report.comment[0] == 'X');
+    CHECK(decode(mice[7]) == PDN_APRS_OK && strcmp(pkt.data.as.report.device_suffix, " X") == 0);
+    {
+        /* weather text ends where a lifted element starts, in each kind of report */
+        static const char *const wx[] = {
+            "N0CALL>APZ001:!4903.50N/07201.75W_220/100g005t2147483647|!!!!|7k SvxLink",
+            "N0CALL>APZ001:!4903.50N/07201.75W_220/100g005t2147483647!w12!7k SvxLink",
+            "N0CALL>APZ001:!4903.50N/07201.75W_220/100g005t077r2147483647|!!!!|!w12!7k Sv",
+            "N0CALL>APZ001:=/5L!!<*e7_7P[g005t2147483647|!!!!|7k SvxLink",
+            "N0CALL>APZ001:;OBJECT   *092345z4903.50N/07201.75W_220/100g005t2147483647|!!!!|7k SvxLink",
+            "N0CALL>APZ001:)ITEM!4903.50N/07201.75W_220/100g005t2147483647!w12!7k SvxLink",
+        };
+        for (i = 0; i < sizeof wx / sizeof wx[0]; i++) {
+            const pdn_aprs_report *r;
+            CHECK(decode(wx[i]) == PDN_APRS_OK);
+            r = &pkt.data.as.report;
+            if (pkt.data.type == PDN_APRS_TYPE_WEATHER)
+                continue;
+            CHECK(pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_OUT_OF_RANGE_VALUE, PDN_APRS_SEVERITY_WARNING));
+            CHECK(r->comment_len >= 5 && memcmp(r->comment, "7k Sv", 5) == 0);
+        }
+    }
+    /* a run of two or more digits that stops short of the element is not dropped by the rule */
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W_220/100g005t099|!!!!|7k Sv") == PDN_APRS_OK &&
+          pkt.data.as.report.weather.has[PDN_APRS_WX_TEMPERATURE_F] &&
+          !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_OUT_OF_RANGE_VALUE, -1));
+}
+
 int main(void)
 {
     test_basics();
@@ -1854,6 +1915,7 @@ int main(void)
     test_unbounded_too_long();
     test_capability_without_value();
     test_round4();
+    test_round5();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

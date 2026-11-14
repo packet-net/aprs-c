@@ -614,14 +614,17 @@ static void check_encode_case(const jval *c, const char *id)
     char err[128], why[512];
     uint8_t buf[2048];
     pdn_aprs_encoded enc;
+    pdn_aprs_encode_options eo;
     int n, conv;
     memset(&enc, 0, sizeof enc);
+    /* the dump tool encodes with the device table, as a decoder reads with it */
+    eo.devices = devices();
     conv = neutral_to_data(json_get(in, "encode"), &d, err, sizeof err);
     if (conv == 0) {
         report(id, "encode", 0, err, NULL, NULL);
         return;
     }
-    n = conv < 0 ? PDN_APRS_ERR_REFUSED : neutral_encode(&d, NULL, buf, sizeof buf, &enc);
+    n = conv < 0 ? PDN_APRS_ERR_REFUSED : neutral_encode(&d, &eo, buf, sizeof buf, &enc);
     if (json_get(expect, "refused")) {
         const char *wcode = json_gets(expect, "refusal");
         const char *gcode = NULL;

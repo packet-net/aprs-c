@@ -862,6 +862,27 @@ static int put_comment_part(pdn_aprs__ectx *e, const pdn_aprs_report *r, int at_
             pdn_aprs__putc(e->b, ' ');
         }
     }
+    /* Mic-E status text that ends with the comment: a comment whose last
+       bytes, with the space or text before them, would read back as the
+       device suffix takes a / (with telemetry or a !DAO! after it, or a
+       suffix written, it ends elsewhere and reads as itself) */
+    if (mic_e && !slash && n > 0 && r->type_code && !r->has_telemetry && !r->has_dao && !r->device_suffix[0] &&
+        !e->b->overflow) {
+        char tail[PDN_APRS_TEXT_SIZE + 4];
+        size_t tl = 0, want = (r->type_code == '>' || r->type_code == ']') ? 1 : 2;
+        size_t have = e->b->len < 2 ? e->b->len : 2;
+        if (have)
+            memcpy(tail, e->b->p + e->b->len - have, have);
+        tl = have;
+        if (space)
+            tail[tl++] = ' ';
+        if (n < PDN_APRS_TEXT_SIZE) {
+            memcpy(tail + tl, c, n);
+            tl += n;
+        }
+        if (tl >= want && pdn_aprs__mic_e_suffix_known(e->devices, r->type_code, (const uint8_t *)tail + tl - want, want))
+            slash = 1;
+    }
     if (slash)
         pdn_aprs__putc(e->b, '/');
     else if (space)
