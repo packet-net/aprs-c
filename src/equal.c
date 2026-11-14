@@ -85,11 +85,23 @@ static int report_eq(const pdn_aprs_report *a, const pdn_aprs_report *b, int typ
         if (!near(ca, cb, 2.01, 0, loose))
             return 0;
     }
-    if (!a->has_speed != !b->has_speed || (a->has_speed && !near(a->speed_knots, b->speed_knots, 0.51, 0.041, loose)))
+    /* loose: Mic-E always carries a speed, so one given with none is
+       written as 0 and reads back as 0 */
+    if (loose && type == PDN_APRS_TYPE_MIC_E && a->has_speed && !b->has_speed && a->speed_knots == 0) {
+        /* the same data */
+    } else if (!a->has_speed != !b->has_speed ||
+               (a->has_speed && !near(a->speed_knots, b->speed_knots, 0.51, 0.041, loose))) {
         return 0;
-    if (!a->has_altitude != !b->has_altitude ||
-        (a->has_altitude && !near(a->altitude_feet, b->altitude_feet, 1.65, 0.0011, loose)))
+    }
+    /* loose: a compressed weather report's GGA altitude of 1 foot or less is
+       written as the nearest cs value, 1 foot, alone (README Encoding rule) */
+    if (loose && b->compressed && b->has_weather && a->has_altitude && b->has_altitude && a->altitude_feet == 1.0 &&
+        b->altitude_feet <= 1.0) {
+        /* the same data, rounded */
+    } else if (!a->has_altitude != !b->has_altitude ||
+               (a->has_altitude && !near(a->altitude_feet, b->altitude_feet, 1.65, 0.0011, loose))) {
         return 0;
+    }
     if (!a->has_phg != !b->has_phg ||
         (a->has_phg && memcmp(&a->phg, &b->phg, sizeof a->phg) != 0))
         return 0;

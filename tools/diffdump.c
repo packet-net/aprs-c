@@ -357,7 +357,7 @@ static void encode_line(long fallback_n, const char *text, size_t tl)
         return;
     }
     eo.devices = lenient.devices;
-    rc = pdn_aprs_encode_info(&d, &eo, out_buf, sizeof out_buf, &enc);
+    rc = neutral_encode(&d, &eo, out_buf, sizeof out_buf, &enc);
     if (rc < 0) {
         json_set(out, "result", json_str("refused"));
         json_set(out, "reason", json_str(enc.reason ? enc.reason : pdn_aprs_strerror(rc)));
@@ -505,6 +505,36 @@ static int symbol(const jval *o, pdn_aprs_symbol *s)
     return 1;
 }
 
+/* A recipe giving one quantity in two units is built once with each unit
+   (README Builder rules): 0 takes the first unit of each pair, 1 the
+   second. */
+static int unit_pick;
+
+/* The pairs a recipe may give one quantity in. */
+static const char *const unit_pairs[][2] = {
+    {"speed_knots", "speed_kmh"},       {"altitude_feet", "altitude_m"},  {"temperature_f", "temperature_c"},
+    {"rain_1h_in", "rain_1h_mm"},       {"rain_24h_in", "rain_24h_mm"},   {"rain_midnight_in", "rain_midnight_mm"}};
+
+static int two_units(const jval *a)
+{
+    size_t k;
+    for (k = 0; k < sizeof unit_pairs / sizeof unit_pairs[0]; k++)
+        if (json_get(a, unit_pairs[k][0]) && json_get(a, unit_pairs[k][1]))
+            return 1;
+    return 0;
+}
+
+/* 1 if the key is the unit of a pair given twice that this build leaves out. */
+static int left_out(const jval *a, const char *key)
+{
+    size_t k;
+    for (k = 0; k < sizeof unit_pairs / sizeof unit_pairs[0]; k++)
+        if (json_get(a, unit_pairs[k][0]) && json_get(a, unit_pairs[k][1]) &&
+            strcmp(key, unit_pairs[k][unit_pick ? 0 : 1]) == 0)
+            return 1;
+    return 0;
+}
+
 /* The positioned options, into the builder's structs. */
 typedef struct positioned {
     pdn_aprs_position_args pos;
@@ -537,14 +567,14 @@ static void options(const jval *a, positioned *p)
     }
     /* the builder takes knots and feet, the units APRS sends, so a program
        with km/h or metres converts them */
-    if (num(a, "speed_knots", &x)) {
+    if (!left_out(a, "speed_knots") && num(a, "speed_knots", &x)) {
         p->pos.has_speed = 1;
         p->pos.speed_knots = x;
     } else if (num(a, "speed_kmh", &x)) {
         p->pos.has_speed = 1;
         p->pos.speed_knots = x / 1.852;
     }
-    if (num(a, "altitude_feet", &x)) {
+    if (!left_out(a, "altitude_feet") && num(a, "altitude_feet", &x)) {
         p->pos.has_altitude = 1;
         p->pos.altitude_feet = x;
     } else if (num(a, "altitude_m", &x)) {
@@ -693,7 +723,7 @@ static int build_positioned(const char *report, const jval *a, const pdn_aprs_st
         m.speed_knots = p.pos.speed_knots;
         /* the Mic-E builder takes metres, for the Mic-E altitude bytes, and
            feet, for a /A= */
-        if (num(a, "altitude_m", &m.altitude_m))
+        if (!left_out(a, "altitude_m") && num(a, "altitude_m", &m.altitude_m))
             m.has_altitude_m = 1;
         else if (p.pos.has_altitude) {
             m.has_altitude = 1;
@@ -730,7 +760,7 @@ static int build_weather(const jval *a, const pdn_aprs_station *station, uint8_t
     for (i = 0; keys[i]; i++) {
         double x;
         size_t kl = strlen(keys[i]);
-        if (!num(a, keys[i], &x))
+        if (left_out(a, keys[i]) || !num(a, keys[i], &x))
             continue;
         /* the builder takes the units APRS sends: degrees F and inches */
         if (strcmp(keys[i], "temperature_c") == 0)
@@ -920,8 +950,32 @@ static void build_line(long fallback_n, const char *text, size_t tl)
     int rc;
     why[0] = 0;
     memset(&built, 0, sizeof built);
+    unit_pick = 0;
     json_set(out, "n", json_int(nv && nv->t == J_NUM ? (long)nv->num : fallback_n));
     rc = in ? build(in, out_buf, sizeof out_buf - 1) : cannot("recipe", "not JSON");
+    if (in && !why[0] && two_units(json_get(in, "args"))) {
+        /* one quantity in two units: refused, value-given-twice, unless a
+           build with either unit names a code earlier in the order */
+        int code = PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE, pick;
+        const char *reason = "a quantity is given in two units";
+        for (pick = 0; pick < 2; pick++) {
+            if (pick) {
+                unit_pick = 1;
+                memset(&built, 0, sizeof built);
+                rc = build(in, out_buf, sizeof out_buf - 1);
+            }
+            if (rc == PDN_APRS_ERR_REFUSED && built.refusal &&
+                neutral_refusal_rank(built.refusal) < neutral_refusal_rank(code)) {
+                code = built.refusal;
+                reason = built.reason;
+            }
+        }
+        unit_pick = 0;
+        memset(&built, 0, sizeof built);
+        built.refusal = code;
+        built.reason = reason;
+        rc = why[0] ? rc : PDN_APRS_ERR_REFUSED;
+    }
     json_free(in);
     if (why[0]) {
         json_set(out, "result", json_str("unsupported"));

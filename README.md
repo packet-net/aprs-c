@@ -91,7 +91,7 @@ The shape of the API:
 - Optional fields have a `has_` flag, or are an empty string. Numbers are in the units APRS sends (`speed_knots`, `altitude_feet`, `temperature_f`), as the vectors' neutral form names them.
 - Text is UTF-8 in bounded, NUL-terminated arrays with an explicit length (text can hold a NUL). Text that was not valid UTF-8 is read as Latin-1, converted, and flagged with a `non-utf8-text` warning. The packet keeps no pointer into your input, so you can reuse the input buffer and copy the packet.
 - `packet.diagnostics` lists each diagnostic as a severity (info, warning, error) and a code. `pdn_aprs_code_name()` gives the vectors' name for a code, such as `trailing-line-break`.
-- A third-party packet (`}`) keeps the encapsulated packet as received; `pdn_aprs_decode_third_party()` decodes it into a packet of its own.
+- A third-party packet (`}`) keeps the encapsulated packet as received; `pdn_aprs_decode_third_party()` decodes it into a packet of its own. Third-party packets nest at most four deep (`PDN_APRS_MAX_THIRD_PARTY_DEPTH`): a fifth `}` is read as unrecognized with `invalid-third-party`.
 - `pdn_aprs_identify_device()` names the sending radio or program, from a Mic-E report's type code and suffix or from the destination address.
 - `pdn_aprs_has_diagnostic(&p, -1, PDN_APRS_SEVERITY_ERROR)` says whether the packet has errors (code `-1` is any code; severity `-1` any severity). `pdn_aprs_write_tnc2()` and `pdn_aprs_write_ax25()` write a decoded packet back as it was received, for forwarding it, and `pdn_aprs_phg_values()` turns a PHG's codes into watts, feet, dB and degrees.
 

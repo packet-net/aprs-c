@@ -460,7 +460,7 @@ static void packet_reset(pdn_aprs_packet *p)
 /* Decodes the information field into the packet, keeping a copy of it
    (keep), or not, in which case it may be longer than PDN_APRS_MAX_INFO. */
 static int decode_info_into(pdn_aprs_packet *packet, const pdn_aprs_decode_options *options, const uint8_t *info,
-                            size_t len, int keep)
+                            size_t len, int keep, int depth)
 {
     pdn_aprs__dctx c;
     uint8_t mark = packet->diagnostic_count;
@@ -480,6 +480,7 @@ static int decode_info_into(pdn_aprs_packet *packet, const pdn_aprs_decode_optio
     c.info = keep ? packet->info : info;
     c.len = len;
     c.dest = packet->header.destination;
+    c.depth = depth;
     pdn_aprs__decode_field(&c);
     if (c.too_long) {
         memset(&packet->data, 0, sizeof packet->data);
@@ -511,7 +512,7 @@ int pdn_aprs_decode_tnc2(const void *line, size_t len, const pdn_aprs_decode_opt
         return PDN_APRS_ERR_HEADER;
     }
     packet->header_ok = 1;
-    return decode_info_into(packet, options, s + at, len - at, 1);
+    return decode_info_into(packet, options, s + at, len - at, 1, 0);
 }
 
 static int decode_field_with(const pdn_aprs_header *header, const void *info, size_t len,
@@ -536,7 +537,7 @@ static int decode_field_with(const pdn_aprs_header *header, const void *info, si
     if (packet->header.q_construct >= (int)packet->header.path_count)
         packet->header.q_construct = -1;
     packet->header_ok = 1;
-    return decode_info_into(packet, options, (const uint8_t *)info, len, keep);
+    return decode_info_into(packet, options, (const uint8_t *)info, len, keep, 0);
 }
 
 int pdn_aprs_decode_info(const pdn_aprs_header *header, const void *info, size_t len,
@@ -575,11 +576,17 @@ int pdn_aprs_decode_third_party(const pdn_aprs_data *outer, const pdn_aprs_decod
     }
     inner->header_ok = 1;
     /* the inner field may be longer than a field off the air: then the packet keeps no copy of it */
-    return decode_info_into(inner, options, t->packet + at, t->len - at, t->len - at <= PDN_APRS_MAX_INFO);
+    return decode_info_into(inner, options, t->packet + at, t->len - at, t->len - at <= PDN_APRS_MAX_INFO,
+                            t->depth + 1);
 }
 
 /* ---- AX.25 ---- */
 
+/* An AX.25 address: upper-case letters and digits, then spaces (or NULs) to
+   the end (AX.25 2.2 section 3.12). A lower-case letter is tolerated
+   (bad_chars); any other character, a space before the last character
+   included, makes the address unusable (-1). A call of padding only is
+   empty (0), read as an empty TNC2 address is. */
 static int ax25_address(pdn_aprs__dctx *c, const uint8_t *a, char *out, int *nul_padded, int *bad_chars)
 {
     char call[7];
@@ -592,16 +599,17 @@ static int ax25_address(pdn_aprs__dctx *c, const uint8_t *a, char *out, int *nul
             ended = 1;
             continue;
         }
-        if (ended) {
-            /* a character after padding */
+        if (ended)
+            return -1; /* a character after padding */
+        if (A_LOWER(ch))
             *bad_chars = 1;
-        }
-        if (!(A_UPPER(ch) || A_DIGIT(ch)))
-            *bad_chars = 1;
+        else if (!(A_UPPER(ch) || A_DIGIT(ch)))
+            return -1;
         call[n++] = (char)ch;
     }
     call[n] = 0;
     PDN_APRS__UNUSED(c);
+    out[0] = 0;
     if (n == 0)
         return 0;
     ssid = (a[6] >> 1) & 0x0F;
@@ -622,7 +630,7 @@ int pdn_aprs_decode_ax25(const void *frame, size_t len, const pdn_aprs_decode_op
     const uint8_t *f = (const uint8_t *)frame;
     pdn_aprs__dctx c;
     size_t naddr = 0, i, at;
-    int nul_padded = 0, bad_chars = 0, last_marked = -1;
+    int nul_padded = 0, bad_chars = 0, last_marked = -1, k, empty_destination, empty_path = 0;
     pdn_aprs_header *h;
     if (!packet || (!frame && len))
         return PDN_APRS_ERR_ARGUMENT;
@@ -653,16 +661,23 @@ int pdn_aprs_decode_ax25(const void *frame, size_t len, const pdn_aprs_decode_op
         pdn_aprs__fail(&c, PDN_APRS_CODE_TOO_MANY_DIGIPEATERS);
         return PDN_APRS_ERR_HEADER;
     }
-    if (!ax25_address(&c, f + 7, h->source, &nul_padded, &bad_chars) ||
-        !ax25_address(&c, f, h->destination, &nul_padded, &bad_chars)) {
+    if (ax25_address(&c, f + 7, h->source, &nul_padded, &bad_chars) != 1 ||
+        (k = ax25_address(&c, f, h->destination, &nul_padded, &bad_chars)) < 0) {
         pdn_aprs__fail(&c, PDN_APRS_CODE_INVALID_ADDRESS);
         return PDN_APRS_ERR_HEADER;
     }
+    empty_destination = k == 0;
     for (i = 2; i < naddr; i++) {
         pdn_aprs_path_entry *e = &h->path[h->path_count];
-        if (!ax25_address(&c, f + 7 * i, e->call, &nul_padded, &bad_chars)) {
+        k = ax25_address(&c, f + 7 * i, e->call, &nul_padded, &bad_chars);
+        if (k < 0) {
             pdn_aprs__fail(&c, PDN_APRS_CODE_INVALID_ADDRESS);
             return PDN_APRS_ERR_HEADER;
+        }
+        if (k == 0) {
+            /* an empty digipeater is left out of the path, as in TNC2 */
+            empty_path = 1;
+            continue;
         }
         if (f[7 * i + 6] & 0x80) {
             e->marked = 1;
@@ -676,7 +691,11 @@ int pdn_aprs_decode_ax25(const void *frame, size_t len, const pdn_aprs_decode_op
         return PDN_APRS_ERR_HEADER;
     if (bad_chars && !pdn_aprs__tolerate(&c, PDN_APRS_CODE_INVALID_AX25_ADDRESS_CHARACTERS))
         return PDN_APRS_ERR_HEADER;
+    if (empty_destination && !pdn_aprs__tolerate(&c, PDN_APRS_CODE_EMPTY_DESTINATION))
+        return PDN_APRS_ERR_HEADER;
+    if (empty_path && !pdn_aprs__tolerate(&c, PDN_APRS_CODE_EMPTY_PATH_ENTRY))
+        return PDN_APRS_ERR_HEADER;
     packet->header_ok = 1;
     packet->data.reason = 0;
-    return decode_info_into(packet, options, f + at + 2, len - at - 2, 1);
+    return decode_info_into(packet, options, f + at + 2, len - at - 2, 1, 0);
 }

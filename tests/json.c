@@ -117,7 +117,13 @@ void json_free(jval *v)
 typedef struct {
     const char *s;
     size_t n, i;
+    int depth; /* objects and arrays open; past JSON_MAX_DEPTH the text is not parsed */
 } reader;
+
+/* Deep enough for any record the tools read; a deeper one (a third-party
+   chain thousands of levels deep) is refused as unparsable rather than
+   recursed into until the stack runs out. */
+#define JSON_MAX_DEPTH 256
 
 static void ws(reader *r)
 {
@@ -243,7 +249,20 @@ static char *parse_string(reader *r, size_t *len)
     return buf;
 }
 
+static jval *parse_value_in(reader *r);
+
 static jval *parse_value(reader *r)
+{
+    jval *v;
+    if (r->depth >= JSON_MAX_DEPTH)
+        return NULL;
+    r->depth++;
+    v = parse_value_in(r);
+    r->depth--;
+    return v;
+}
+
+static jval *parse_value_in(reader *r)
 {
     ws(r);
     if (r->i >= r->n)
@@ -380,6 +399,7 @@ jval *json_parse(const char *text, size_t len)
     r.s = text;
     r.n = len;
     r.i = 0;
+    r.depth = 0;
     v = parse_value(&r);
     if (!v)
         return NULL;

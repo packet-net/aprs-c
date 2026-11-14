@@ -856,9 +856,13 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
         r->telemetry.sequence = (uint16_t)n;
         if (a) {
             size_t k;
-            if (a->t != J_ARR || a->count > PDN_APRS_MAX_ANALOG)
-                cannot(cv, "has more channels than the C data holds", "telemetry.analog");
-            for (k = 0; a->t == J_ARR && k < a->count && k < PDN_APRS_MAX_ANALOG; k++) {
+            if (a->t != J_ARR)
+                cannot(cv, "is not a list", "telemetry.analog");
+            for (k = 0; a->t == J_ARR && k < a->count; k++) {
+                if (k >= PDN_APRS_MAX_ANALOG) {
+                    r->telemetry.analog_count = PDN_APRS_MAX_ANALOG + 1; /* the encoder refuses over five */
+                    break;
+                }
                 const jval *x = a->items[k];
                 if (x->t != J_NUM || x->num != floor(x->num) || x->num < 0 || x->num > 65535)
                     cannot(cv, "does not fit the C field (a whole number of limited size)", "telemetry.analog");
@@ -959,10 +963,73 @@ static void meta_strings_in(conv *cv, const jval *a, const char *k, pdn_aprs_tel
 }
 
 static int last_refusal;
+/* A fault the C data has no field to carry, noted while the conversion went
+   on, so the encoder's own faults are still found: the refusal names the one
+   first in the README's order. */
+static int pending_refusal;
+static const char *pending_why;
 
 int neutral_refusal(void)
 {
     return last_refusal;
+}
+
+int neutral_refusal_rank(int code)
+{
+    static const int order[] = {
+        PDN_APRS_REFUSAL_NOT_ENCODABLE,       PDN_APRS_REFUSAL_INVALID_ADDRESS,
+        PDN_APRS_REFUSAL_AX25_CANNOT_CARRY,   PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY,
+        PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER, PDN_APRS_REFUSAL_INVALID_ADDRESSEE,
+        PDN_APRS_REFUSAL_INVALID_NAME,        PDN_APRS_REFUSAL_INVALID_TIMESTAMP,
+        PDN_APRS_REFUSAL_NOT_A_NUMBER,        PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE,
+        PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM,   PDN_APRS_REFUSAL_INVALID_CODE,
+        PDN_APRS_REFUSAL_INVALID_SYMBOL,      PDN_APRS_REFUSAL_INVALID_CHARACTER,
+        PDN_APRS_REFUSAL_TOO_LONG,            PDN_APRS_REFUSAL_PADDING_SPACE,
+        PDN_APRS_REFUSAL_MALFORMED,           PDN_APRS_REFUSAL_INVALID_MESSAGE_ID,
+        PDN_APRS_REFUSAL_INVALID_NMEA,        PDN_APRS_REFUSAL_EXTENSION_CONFLICT,
+        PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED,   PDN_APRS_REFUSAL_SYMBOL_MISMATCH,
+        PDN_APRS_REFUSAL_MISSING_FIELD,       PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE,
+        PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD, PDN_APRS_REFUSAL_DOES_NOT_READ_BACK};
+    int i;
+    for (i = 0; i < (int)(sizeof order / sizeof order[0]); i++)
+        if (order[i] == code)
+            return i;
+    return (int)(sizeof order / sizeof order[0]);
+}
+
+static void note_pending(int code, const char *why)
+{
+    if (!pending_refusal || neutral_refusal_rank(code) < neutral_refusal_rank(pending_refusal)) {
+        pending_refusal = code;
+        pending_why = why;
+    }
+}
+
+int neutral_encode(const pdn_aprs_data *d, const pdn_aprs_encode_options *o, void *buf, size_t cap,
+                   pdn_aprs_encoded *enc)
+{
+    int code = pending_refusal, rc = pdn_aprs_encode_info(d, o, buf, cap, enc);
+    const char *why = pending_why;
+    pending_refusal = 0;
+    if (!code)
+        return rc;
+    if (rc != PDN_APRS_ERR_REFUSED || neutral_refusal_rank(code) < neutral_refusal_rank(enc->refusal)) {
+        enc->refusal = code;
+        enc->reason = why;
+    }
+    return PDN_APRS_ERR_REFUSED;
+}
+
+static int tnc2_address_ok(const char *a, size_t n)
+{
+    size_t q;
+    if (n < 1 || n > 9)
+        return 0;
+    for (q = 0; q < n; q++)
+        if (!((a[q] >= 'A' && a[q] <= 'Z') || (a[q] >= 'a' && a[q] <= 'z') || (a[q] >= '0' && a[q] <= '9') ||
+              a[q] == '-'))
+            return 0;
+    return 1;
 }
 
 /* A third-party packet's inner packet, written as its TNC2 form: the header,
@@ -983,31 +1050,54 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
     const char *reason = json_gets(data, "reason");
     size_t n = 0, k, last = 0;
     int rc, i;
+    const char *header_fault = NULL;
+    memset(&enc, 0, sizeof enc);
     keys_only(cv, p, keys);
     if (cv->bad)
         return 0;
+    if (!data)
+        return cannot(cv, "has no data", "packet");
     {
         /* a tolerated defect in the inner packet is part of its data, but an
            info is not a defect (ruling F10) */
         const jval *dg = json_get(p, "diagnostics");
         for (k = 0; dg && dg->t == J_ARR && k < dg->count; k++)
-            if (dg->items[k]->t != J_STR || strncmp(dg->items[k]->str, "info:", 5) != 0) {
-                last_refusal = PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER;
-                return -1;
-            }
+            if (dg->items[k]->t != J_STR || strncmp(dg->items[k]->str, "info:", 5) != 0)
+                header_fault = "inner packet: a tolerated defect is part of its data";
     }
-    if (!data)
-        return cannot(cv, "has no data", "packet");
-    /* the inner header comes before the inner data in what is refused: a
-       header with no destination (Mic-E computes its own) is the fault */
-    if (!dst[0] && !(json_gets(data, "type") && strcmp(json_gets(data, "type"), "mic-e") == 0)) {
-        snprintf(cv->err, cv->errlen, "inner packet: the header has no destination");
-        last_refusal = PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER;
-        return -1;
+    /* a header with no destination (Mic-E computes its own) */
+    if (!dst[0] && !(json_gets(data, "type") && strcmp(json_gets(data, "type"), "mic-e") == 0))
+        header_fault = "inner packet: the header has no destination";
+    /* the addresses (README Addresses rule): a source of 1-9 printable
+       characters other than > and :, a destination and path entries of 1-9
+       letters, digits or - */
+    {
+        size_t sl = strlen(src), q;
+        int ok = sl >= 1 && sl <= 9;
+        for (q = 0; ok && q < sl; q++)
+            ok = src[q] >= 0x20 && src[q] <= 0x7E && src[q] != '>' && src[q] != ':';
+        if (!ok || (dst[0] && !tnc2_address_ok(dst, strlen(dst))))
+            header_fault = "inner packet: the header has an address that is not one";
+        for (k = 0; path && path->t == J_ARR && k < path->count; k++) {
+            const jval *e = path->items[k];
+            size_t el = e->t == J_STR && e->len && e->str[e->len - 1] == '*' ? e->len - 1 : e->len;
+            if (e->t != J_STR || !tnc2_address_ok(e->str, el))
+                header_fault = "inner packet: a path entry is not an address";
+        }
     }
+    /* a path entry before a used one reads back used, so one not marked
+       cannot be written as given (README Refusal reasons) */
+    for (k = 0; path && path->t == J_ARR && k < path->count; k++)
+        if (path->items[k]->len && path->items[k]->str[path->items[k]->len - 1] == '*')
+            last = k + 1;
+    for (k = 0; k + 1 < last; k++)
+        if (!path->items[k]->len || path->items[k]->str[path->items[k]->len - 1] != '*')
+            header_fault = "inner packet: a path entry before a used one is not marked used";
+    last = 0;
     inner = (pdn_aprs_data *)malloc(sizeof *inner);
     if (json_gets(data, "type") && strcmp(json_gets(data, "type"), "unrecognized") == 0) {
-        /* an empty field is written back empty; any other the data does not give */
+        /* an empty field is written back empty; any other the data does not
+           give, which comes before anything else in the order */
         free(inner);
         if (!reason || strcmp(reason, "empty") != 0) {
             snprintf(cv->err, cv->errlen, "inner packet: unrecognized data has nothing to encode");
@@ -1019,19 +1109,30 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         memset(&enc, 0, sizeof enc);
     } else {
         rc = neutral_to_data(data, inner, cv->err, cv->errlen);
-        if (rc != 1) {
+        if (rc == -1 && last_refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE) {
+            free(inner);
+            return -1;
+        }
+        if (rc != 1 && !(rc == -1 && header_fault)) {
             free(inner);
             if (rc == 0)
                 cv->bad = 1;
             return rc;
         }
-        i = pdn_aprs_encode_info(inner, NULL, line + 2 * PDN_APRS_MAX_INFO, 2 * PDN_APRS_MAX_INFO, &enc);
-        if (i < 0) {
+        i = rc == 1 ? neutral_encode(inner, NULL, line + 2 * PDN_APRS_MAX_INFO, 2 * PDN_APRS_MAX_INFO, &enc)
+                    : PDN_APRS_ERR_REFUSED;
+        if (rc == 1 && i < 0 && !header_fault) {
             free(inner);
             snprintf(cv->err, cv->errlen, "inner packet: %s", enc.reason ? enc.reason : pdn_aprs_strerror(i));
             last_refusal = enc.refusal;
             return -1;
         }
+    }
+    if (header_fault) {
+        free(inner);
+        snprintf(cv->err, cv->errlen, "%s", header_fault);
+        last_refusal = PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER;
+        return -1;
     }
     for (k = 0; path && path->t == J_ARR && k < path->count; k++)
         if (path->items[k]->len && path->items[k]->str[path->items[k]->len - 1] == '*')
@@ -1071,6 +1172,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
     c.short_legacy = 0;
     err[0] = 0;
     last_refusal = 0;
+    pending_refusal = 0;
     if (!type) {
         snprintf(err, errlen, "no type");
         return 0;
@@ -1113,10 +1215,10 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
             cannot(cv, "is not a field the C data has here", t == PDN_APRS_TYPE_ACK ? "rejected_id" : "acked_id");
         a->has_reply_ack = (uint8_t)str_in(cv, j, "reply_ack", a->reply_ack, sizeof a->reply_ack, NULL);
         if (!c.bad && json_get(j, "message_id")) {
-            /* an ack does not carry its own message ID: make the encoder see it */
+            /* an ack does not carry its own message ID: the encoder's own
+               checks still run */
             snprintf(err, errlen, "ack with message_id");
-            last_refusal = PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED;
-            return -1;
+            note_pending(PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "an ack or reject takes no message ID");
         }
         break;
     }
@@ -1316,6 +1418,26 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         static const char *const keys[] = {"type", "packet", NULL};
         keys_only(cv, j, keys);
         if (!c.bad) {
+            /* nested more than four deep is refused before anything inside
+               is looked at, counted by walking, so a chain thousands deep
+               never recurses */
+            const jval *x = j;
+            int levels = 1;
+            for (;;) {
+                const jval *xd = json_get(json_get(x, "packet"), "data");
+                const char *xt = json_gets(xd, "type");
+                if (!xt || strcmp(xt, "third-party") != 0)
+                    break;
+                x = xd;
+                levels++;
+            }
+            if (levels > PDN_APRS_MAX_THIRD_PARTY_DEPTH) {
+                snprintf(err, errlen, "third-party packets nest at most four deep");
+                last_refusal = PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER;
+                return -1;
+            }
+        }
+        if (!c.bad) {
             if (!json_get(j, "packet"))
                 cannot(cv, "is missing", "packet");
             else {
@@ -1368,8 +1490,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
     }
     if (c.short_legacy && !c.bad) {
         snprintf(err, errlen, "legacy_telemetry has fewer than five values");
-        last_refusal = PDN_APRS_REFUSAL_MALFORMED;
-        return -1;
+        note_pending(PDN_APRS_REFUSAL_MALFORMED, "obsolete Mic-E telemetry has five values");
     }
     return c.bad ? 0 : 1;
 }
