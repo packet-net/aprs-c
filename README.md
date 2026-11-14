@@ -296,4 +296,4 @@ build-fuzz/pdn_aprs_fuzz corpus
 
 ## Licence
 
-MIT: see [LICENSE](LICENSE). The optional device table in `pdn_aprs_deviceid.c` is data from aprs-deviceid under CC BY-SA 2.0: see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). The conformance vectors in the `vectors/` submodule are AGPL-3.0-or-later; they are only used by the tests and are not part of the library.
+MIT: see [LICENSE](LICENSE). The optional device table in `pdn_aprs_deviceid.c` is data from aprs-deviceid under CC BY-SA 2.0: see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). The conformance vectors in the `vectors/` submodule are CC0 (their tools MIT); they are only used by the tests and are not part of the library.
