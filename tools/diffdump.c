@@ -360,6 +360,8 @@ static void encode_line(long fallback_n, const char *text, size_t tl)
         json_set(out, "reason", json_str(err));
         if (conv < 0 && neutral_refusal() && pdn_aprs_refusal_name(neutral_refusal()))
             json_set(out, "refusal", json_str(pdn_aprs_refusal_name(neutral_refusal())));
+        if (conv < 0 && neutral_via_tool())
+            json_set(out, "via", json_str("tool"));
         emit(out);
         return;
     }
@@ -370,6 +372,8 @@ static void encode_line(long fallback_n, const char *text, size_t tl)
         json_set(out, "reason", json_str(enc.reason ? enc.reason : pdn_aprs_strerror(rc)));
         if (enc.refusal && pdn_aprs_refusal_name(enc.refusal))
             json_set(out, "refusal", json_str(pdn_aprs_refusal_name(enc.refusal)));
+        if (neutral_via_tool())
+            json_set(out, "via", json_str("tool"));
     } else {
         const char *dest = d.type == PDN_APRS_TYPE_MIC_E ? enc.destination : "APZ001";
         pdn_aprs_header h;
@@ -409,6 +413,8 @@ static void build_line(long fallback_n, const char *text, size_t tl)
         json_set(out, "reason", json_str(res.reason));
         if (res.refusal)
             json_set(out, "refusal", json_str(res.refusal));
+        if (res.via_tool)
+            json_set(out, "via", json_str("tool"));
     } else {
         json_set(out, "result", json_str("built"));
         json_set(out, "tnc2", json_str(hex(out_buf, res.len)));

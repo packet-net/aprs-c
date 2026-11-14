@@ -512,8 +512,13 @@ static int build_other(const char *report, const jval *a, const pdn_aprs_station
            builder refuses (invalid-addressee), and more than one the builder
            has no way to say */
         id = text_arg(a, "id");
-        if (id && strlen(id) > 1)
-            return cannot("id", "the builder takes one character");
+        if (id && strlen(id) > 1) {
+            /* an id of the wrong length is invalid-addressee by its length
+               alone: built with a valid stand-in, and the refusal is that of
+               the build if earlier in the order, this one otherwise */
+            extra(PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "a bulletin id is one character, 0-9 or A-Z");
+            id = "A";
+        }
         return pdn_aprs_build_bulletin(station, id && id[0] ? id[0] : 0, text_arg(a, "group"), text_arg(a, "text"), buf, cap, &built);
     }
     if (strcmp(report, "status") == 0) {
@@ -673,7 +678,11 @@ int recipe_build(const jval *in, uint8_t *buf, size_t cap, recipe_result *res)
                 memset(&built, 0, sizeof built);
                 rc = build(in, buf, cap);
             }
-            if (rc == PDN_APRS_ERR_REFUSED && built.refusal &&
+            /* a result refused only for the information field's 256 bytes
+               counts after value-given-twice */
+            int size = rc == PDN_APRS_ERR_REFUSED && built.refusal == PDN_APRS_REFUSAL_TOO_LONG && built.reason &&
+                       strcmp(built.reason, "an information field is at most 256 bytes") == 0;
+            if (rc == PDN_APRS_ERR_REFUSED && built.refusal && !size &&
                 neutral_refusal_rank(built.refusal) < neutral_refusal_rank(code)) {
                 code = built.refusal;
                 reason = built.reason;
@@ -683,6 +692,7 @@ int recipe_build(const jval *in, uint8_t *buf, size_t cap, recipe_result *res)
         memset(&built, 0, sizeof built);
         built.refusal = code;
         built.reason = reason;
+        res->via_tool = code == PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE;
         rc = why[0] ? rc : PDN_APRS_ERR_REFUSED;
     }
     if (extra_code && !why[0]) {
@@ -697,6 +707,7 @@ int recipe_build(const jval *in, uint8_t *buf, size_t cap, recipe_result *res)
             built.refusal = extra_code;
             built.reason = extra_why;
             rc = PDN_APRS_ERR_REFUSED;
+            res->via_tool = 1;
         }
     }
     if (why[0]) {

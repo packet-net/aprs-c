@@ -614,11 +614,43 @@ static int int_ranged(conv *cv, const jval *o, const char *k, double lo, double 
 {
     jval *v = json_get(o, k);
     *out = 0;
+    if (v && v->t == J_NUM && !(v->num - v->num == 0.0)) {
+        note_pending(PDN_APRS_REFUSAL_NOT_A_NUMBER, "NaN or an infinity");
+        return 1;
+    }
     if (v && v->t == J_NUM && v->num == floor(v->num) && (v->num < lo || v->num > hi)) {
         note_pending(PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "out of range");
         return 1;
     }
     return int_in(cv, o, k, lo, hi, out);
+}
+
+/* An Agrelo bearing: degrees, rounded to the nearest degree like a course
+   (half away from zero) and then range-checked, so 12.5 is 13 and 360.5 is
+   361, past 360. The C field is whole degrees: a rounded value it cannot
+   hold is noted for the refusal its value alone decides (value-out-of-range),
+   and NaN or an infinity is not-a-number. */
+static void bearing_in(conv *cv, const jval *o, const char *k, long *out)
+{
+    jval *v = json_get(o, k);
+    double r;
+    *out = 0;
+    if (!v)
+        return;
+    if (v->t != J_NUM) {
+        cannot(cv, "is not a number", k);
+        return;
+    }
+    if (!(v->num - v->num == 0.0)) {
+        note_pending(PDN_APRS_REFUSAL_NOT_A_NUMBER, "an Agrelo bearing is not a number");
+        return;
+    }
+    r = round(v->num);
+    if (r < 0 || r > 65535) {
+        note_pending(PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "an Agrelo bearing is 0 to 360 degrees");
+        return;
+    }
+    *out = (long)r;
 }
 
 /* A whole number the C field's type holds, lo to hi. */
@@ -1032,6 +1064,14 @@ static int last_refusal;
 static int pending_refusal;
 static const char *pending_why;
 
+/* 1 if the last refusal was made by this reader, not the library. */
+static int last_via_tool;
+
+int neutral_via_tool(void)
+{
+    return last_via_tool;
+}
+
 int neutral_refusal(void)
 {
     return last_refusal;
@@ -1074,6 +1114,7 @@ int neutral_encode(const pdn_aprs_data *d, const pdn_aprs_encode_options *o, voi
     int code = pending_refusal, rc = pdn_aprs_encode_info(d, o, buf, cap, enc);
     const char *why = pending_why;
     pending_refusal = 0;
+    last_via_tool = 0;
     if (!code)
         return rc;
     /* the 256 bytes of the field are judged only for a record with no other
@@ -1083,6 +1124,7 @@ int neutral_encode(const pdn_aprs_data *d, const pdn_aprs_encode_options *o, voi
          strcmp(enc->reason, "an information field is at most 256 bytes") == 0)) {
         enc->refusal = code;
         enc->reason = why;
+        last_via_tool = 1;
     }
     return PDN_APRS_ERR_REFUSED;
 }
@@ -1169,6 +1211,7 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         if (!reason || strcmp(reason, "empty") != 0) {
             snprintf(cv->err, cv->errlen, "inner packet: unrecognized data has nothing to encode");
             last_refusal = PDN_APRS_REFUSAL_NOT_ENCODABLE;
+            last_via_tool = 1;
             return -1;
         }
         inner = NULL;
@@ -1202,6 +1245,7 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         free(inner);
         snprintf(cv->err, cv->errlen, "%s", header_fault);
         last_refusal = PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER;
+        last_via_tool = 1;
         return -1;
     }
     for (k = 0; path && path->t == J_ARR && k < path->count; k++)
@@ -1244,6 +1288,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
     err[0] = 0;
     last_limit = 0;
     last_refusal = 0;
+    last_via_tool = 0;
     pending_refusal = 0;
     if (!type) {
         snprintf(err, errlen, "no type");
@@ -1509,6 +1554,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
             if (levels > PDN_APRS_MAX_THIRD_PARTY_DEPTH) {
                 snprintf(err, errlen, "third-party packets nest at most four deep");
                 last_refusal = PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER;
+                last_via_tool = 1;
                 return -1;
             }
         }
@@ -1556,7 +1602,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
     case PDN_APRS_TYPE_AGRELO_DF: {
         static const char *const keys[] = {"type", "bearing_degrees", "quality", NULL};
         keys_only(cv, j, keys);
-        int_ranged(cv, j, "bearing_degrees", 0, 65535, &n);
+        bearing_in(cv, j, "bearing_degrees", &n);
         d->as.agrelo.bearing_degrees = (uint16_t)n;
         int_ranged(cv, j, "quality", 0, 255, &n);
         d->as.agrelo.quality = (uint8_t)n;

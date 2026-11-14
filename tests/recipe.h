@@ -18,6 +18,7 @@ typedef struct recipe_result {
     size_t len;          /* RECIPE_BUILT: the TNC2 line is buf[0..len) */
     const char *reason;  /* REFUSED, UNSUPPORTED, LIMIT: valid until the next call */
     const char *refusal; /* REFUSED: the reason code's id, or NULL */
+    int via_tool;        /* REFUSED: the refusal was made by this reader, not the library */
 } recipe_result;
 
 /* Builds the recipe {"station", "report", "args"} into buf (cap bytes). The

@@ -1179,6 +1179,14 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         not_a_number(e, r->speed_knots);
     if (r->has_range)
         not_a_number(e, r->range_miles);
+    /* every weather number has a place (the cs bytes, DDD/SSS, or its own
+       letter), so none is judged for range before this */
+    if (r->has_weather) {
+        int wi;
+        for (wi = 0; wi < PDN_APRS_WX_COUNT; wi++)
+            if (r->weather.has[wi])
+                not_a_number(e, r->weather.value[wi]);
+    }
     /* an altitude has no place on a weather report but in a compressed GGA
        one (its cs bytes) */
     if (r->has_altitude && (!r->has_weather || (r->compressed && r->has_compression &&

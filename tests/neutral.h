@@ -24,6 +24,10 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen);
 int neutral_limit(void);
 /* After neutral_to_data returned -1: the pdn_aprs_refusal code for it. */
 int neutral_refusal(void);
+/* After a refusal (neutral_to_data returned -1, or neutral_encode refused): 1
+   if this reader made it rather than the library, which a dump marks
+   "via": "tool". */
+int neutral_via_tool(void);
 /* Where a pdn_aprs_refusal code comes in the README's Refusal reasons order. */
 int neutral_refusal_rank(int code);
 /* After neutral_to_data returned 1: pdn_aprs_encode_info, with any fault the

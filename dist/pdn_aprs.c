@@ -2791,6 +2791,24 @@ static int field_follows(const uint8_t *s, size_t n, size_t at, int mode, int wi
         return 0;
     s += at + 1;
     width = field_width(L);
+    if (snow) {
+        /* snowfall's value is the same three characters the field reads: a
+           number (one decimal point allowed), a run of dots when no digit
+           is in the three, or three spaces; `s..6` is not a field */
+        size_t k = 0;
+        int digit = 0;
+        double sv;
+        while (k < avail && k < 3 && (A_DIGIT(s[k]) || s[k] == '.')) {
+            if (A_DIGIT(s[k]))
+                digit = 1;
+            k++;
+        }
+        if (k == 3 && digit)
+            return pdn_aprs__parse_number(s, 3, 0, &sv);
+        if (k >= 1 && !digit)
+            return 1;
+        return avail >= 3 && s[0] == ' ' && s[1] == ' ' && s[2] == ' ';
+    }
     if (A_DIGIT(s[0]) || s[0] == '.')
         return 1;
     if (L == 't' && s[0] == '-')
@@ -6169,6 +6187,14 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         not_a_number(e, r->speed_knots);
     if (r->has_range)
         not_a_number(e, r->range_miles);
+    /* every weather number has a place (the cs bytes, DDD/SSS, or its own
+       letter), so none is judged for range before this */
+    if (r->has_weather) {
+        int wi;
+        for (wi = 0; wi < PDN_APRS_WX_COUNT; wi++)
+            if (r->weather.has[wi])
+                not_a_number(e, r->weather.value[wi]);
+    }
     /* an altitude has no place on a weather report but in a compressed GGA
        one (its cs bytes) */
     if (r->has_altitude && (!r->has_weather || (r->compressed && r->has_compression &&
