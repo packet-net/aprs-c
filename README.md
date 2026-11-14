@@ -2,9 +2,9 @@
 
 An APRS encoder and decoder in C99. It reads TNC2 / APRS-IS lines and AX.25 UI frames, tells you what each packet means and what is wrong with it, and writes packets back out. It is two files, `pdn_aprs.h` and `pdn_aprs.c`, plus an optional third holding the device identification table, and it is meant to be dropped into an existing C program such as a packet node, an IGate or a digipeater.
 
-Conforms to [aprs-vectors](https://github.com/packet-net/aprs-vectors) 1.1: every case passes.
+Conforms to [aprs-vectors](https://github.com/packet-net/aprs-vectors) 1.1: every case passes, except three checks of `third-party/nested-2000-deep` that the runner skips on purpose, because its 10,017-byte line is over the 512-byte information field limit (see `tests/known-differences.txt`).
 
-It is the C member of a family of APRS libraries that all run the same language-neutral conformance vectors, [packet-net/aprs-vectors](https://github.com/packet-net/aprs-vectors): [Packet.Aprs](https://github.com/packet-net/packet.net) (C#), [pdn-aprs](https://github.com/packet-net/aprs-rs) (Rust), [pdn-aprs](https://github.com/packet-net/aprs-py) (Python) and [@packet-net/pdn-aprs](https://github.com/packet-net/aprs-ts) (TypeScript). At 0.1.0 it decoded all 6,879,893 packets of a real APRS-IS capture exactly as the Rust library did.
+It is the C member of a family of APRS libraries that all run the same language-neutral conformance vectors, [packet-net/aprs-vectors](https://github.com/packet-net/aprs-vectors): [Packet.Aprs](https://github.com/packet-net/packet.net) (C#), [pdn-aprs](https://github.com/packet-net/aprs-rs) (Rust), [pdn-aprs](https://github.com/packet-net/aprs-py) (Python), [@packet-net/pdn-aprs](https://github.com/packet-net/aprs-ts) (TypeScript) and [aprs-go](https://github.com/packet-net/aprs-go) (Go). At 0.1.0 it decoded all 6,879,893 packets of a real APRS-IS capture exactly as the Rust library did.
 
 - Every APRS data type: positions (plain, compressed, with timestamps, ambiguity, `!DAO!`, data extensions, frequencies, base-91 telemetry), Mic-E, objects, items, weather, messages, acks, bulletins, NWS bulletins, telemetry and its metadata, status, queries, capabilities, third-party, NMEA, raw weather, user-defined, test and Agrelo DF.
 - Lenient decoding by default, strict on request, and each tolerated defect switchable on its own.
@@ -33,7 +33,7 @@ Each [release](https://github.com/packet-net/aprs-c/releases) has a `.tar.gz` an
 | `pdn_aprs.c` | The whole library. |
 | `pdn_aprs_deviceid.c` | Optional: the device identification table from [aprs-deviceid](https://github.com/aprsorg/aprs-deviceid), CC BY-SA 2.0. |
 
-Add them to your build; there is nothing to configure. CMake users can also build and install the library and use `find_package(pdn_aprs)` or `pkg-config pdn_aprs` ([Building from source](#building-from-source)).
+Add them to your build; there is nothing to configure. CMake users can also build and install the library and use `find_package(pdn_aprs)` or `pkg-config pdn_aprs`, but that needs a clone of the repository: the release download holds only the source files (and the licence, notices, README and changelog), not the CMake files ([Building from source](#building-from-source)).
 
 **What 1.x promises.** Source compatibility only. Struct sizes follow the capacities (`PDN_APRS_MAX_INFO` and `PDN_APRS_MAX_PATH` can be overridden with `-D`), and a 1.x release may add a field to any struct, so rebuild everything that includes `pdn_aprs.h` when you upgrade, and compile in the single file or link the static library (the CMake target is always static). Zero-initialise every input struct (`= {0}` or a designated initializer): a field added later means "absent" when it is zero.
 
@@ -51,11 +51,16 @@ Decode a line into a `pdn_aprs_packet`. The packet holds the header, the raw inf
 
 int main(void)
 {
-    static pdn_aprs_packet p; /* about 2.5 KB: static here, or on a roomy stack */
+    static pdn_aprs_packet p; /* about 3.4 KB: static here, or on a roomy stack */
     const char *line = "M0LTE-9>APZ001,WIDE1-1,qAR,G4XYZ-10:=5130.00N/00007.00W>088/036Mobile";
-    int i;
+    int i, rc;
 
-    if (pdn_aprs_decode_tnc2(line, strlen(line), NULL, &p) != PDN_APRS_OK) {
+    rc = pdn_aprs_decode_tnc2(line, strlen(line), NULL, &p);
+    if (rc == PDN_APRS_ERR_TOO_LONG) {
+        printf("information field too long: the header was read, the rest was not kept\n");
+        return 1;
+    }
+    if (rc != PDN_APRS_OK) {
         printf("unusable header\n");
         return 1;
     }
@@ -85,12 +90,14 @@ comment: Mobile
 
 The shape of the API:
 
-- `pdn_aprs_decode_tnc2()`, `pdn_aprs_decode_ax25()` and `pdn_aprs_decode_info()` fill a `pdn_aprs_packet`. They return `PDN_APRS_OK`, or `PDN_APRS_ERR_HEADER` when the header is unusable (the packet's diagnostics still say why), or `PDN_APRS_ERR_TOO_LONG` for an information field over 512 bytes, which nothing on the air or on APRS-IS has. `pdn_aprs_decode_info_unbounded()` reads back a field the encoder wrote, which can be longer (below).
+- `pdn_aprs_decode_tnc2()`, `pdn_aprs_decode_ax25()` and `pdn_aprs_decode_info()` fill a `pdn_aprs_packet`. They return `PDN_APRS_OK`, or `PDN_APRS_ERR_HEADER` when the header is unusable (the packet's diagnostics still say why), or `PDN_APRS_ERR_TOO_LONG` for an information field over 512 bytes (not counting one trailing CR LF), which nothing on the air or on APRS-IS has. A too-long packet keeps its header but no information field, and sets `packet.info_dropped`, so `pdn_aprs_write_tnc2()` and `pdn_aprs_write_ax25()` refuse it with `PDN_APRS_ERR_TOO_LONG` rather than write a header with an empty field. `pdn_aprs_decode_info_unbounded()` reads back a field the encoder wrote, which can be longer (below).
+- Everything you fill in for the encoder is checked: a length, count or offset in `pdn_aprs_data` or a header's `path_count` that does not fit its array makes the encode call return `PDN_APRS_ERR_ARGUMENT`, and nothing is read past an array.
 - `packet.header` has the source, destination, path (each entry with its used flag) and the index of any APRS-IS q-construct.
 - `packet.data.type` says which member of the `packet.data.as` union to read. Positions, Mic-E, objects and items share `as.report`; messages, bulletins and NWS bulletins `as.message`; the telemetry metadata types `as.meta`; and so on, one struct per kind.
 - Optional fields have a `has_` flag, or are an empty string. Numbers are in the units APRS sends (`speed_knots`, `altitude_feet`, `temperature_f`), as the vectors' neutral form names them.
 - Text is UTF-8 in bounded, NUL-terminated arrays with an explicit length (text can hold a NUL). Text that was not valid UTF-8 is read as Latin-1, converted, and flagged with a `non-utf8-text` warning. The packet keeps no pointer into your input, so you can reuse the input buffer and copy the packet.
 - `packet.diagnostics` lists each diagnostic as a severity (info, warning, error) and a code. `pdn_aprs_code_name()` gives the vectors' name for a code, such as `trailing-line-break`.
+- Capacities are fixed: up to 16 path entries (`PDN_APRS_MAX_PATH`), 64 capabilities (`PDN_APRS_MAX_CAPABILITIES`), 15 telemetry metadata items (`PDN_APRS_MAX_META_ITEMS`), 5 analog values (`PDN_APRS_MAX_ANALOG`), 24 diagnostics (`PDN_APRS_MAX_DIAGNOSTICS`) and 8 unrecognised ("extra") weather fields per report (`PDN_APRS_MAX_WEATHER_EXTRA`). A ninth extra weather field ends the weather fields: it and the rest of the line become the comment, with a `weather-comment` warning (a strict decode rejects it).
 - A third-party packet (`}`) keeps the encapsulated packet as received; `pdn_aprs_decode_third_party()` decodes it into a packet of its own. Third-party packets nest at most four deep (`PDN_APRS_MAX_THIRD_PARTY_DEPTH`): a fifth `}` is read as unrecognized with `invalid-third-party`.
 - `pdn_aprs_identify_device()` names the sending radio or program, from a Mic-E report's type code and suffix or from the destination address.
 - `pdn_aprs_has_diagnostic(&p, -1, PDN_APRS_SEVERITY_ERROR)` says whether the packet has errors (code `-1` is any code; severity `-1` any severity). `pdn_aprs_write_tnc2()` and `pdn_aprs_write_ax25()` write a decoded packet back as it was received, for forwarding it, and `pdn_aprs_phg_values()` turns a PHG's codes into watts, feet, dB and degrees.
@@ -254,9 +261,9 @@ The library was written to be added to the source tree of a program like LinBPQ/
 
 The tests run every check the vectors' README defines against every case in [packet-net/aprs-vectors](https://github.com/packet-net/aprs-vectors), which is a submodule at `vectors/`: the lenient decode, the strict decode, the decode with each single tolerance switched off, the re-encode (identical; `canonical_info` byte for byte, for equivalent and rounded; or refused) and the encode cases.
 
-- **Vectors:** all 6,183 checks pass over 1,966 cases: 1,845 lenient decodes, 1,845 strict decodes, 699 decodes with a single tolerance switched off, 1,673 re-encodes and 121 encode cases. `pdn_aprs_vectors vectors -v` lists every check by case id.
+- **Vectors:** every check passes, except the three that `tests/known-differences.txt` skips, all for `third-party/nested-2000-deep`, whose 10,017-byte line is longer than the decoder takes. `pdn_aprs_vectors vectors tests/known-differences.txt` prints the counts of each kind of check and of the skips; `-v` lists every check by case id.
 - **A real capture:** at 0.1.0, on 6,879,893 packets from APRS-IS, the decodings (lenient and strict) and re-encodings agreed with the Rust library's on every packet, by the vectors' `tools/compare.py`. The only differences were encoder choices the comparison does not count: for 114 objects this library wrote the original bytes back where Rust wrote different but equivalent ones.
-- **Differential fuzzing:** the five implementations were also compared over 2,000,000 mutated packets (2026-09-27). Every disagreement was settled by a ruling, and the rulings are in the vectors as cases.
+- **Differential fuzzing:** the six implementations (C#, Rust, Python, TypeScript, C and Go) were also compared over 2,000,000 mutated packets (2026-09-27). Every disagreement was settled by a ruling, and the rulings are in the vectors as cases.
 
 `tools/diffdump.c` (`pdn_aprs_diffdump`) writes the comparison dumps the vectors' README describes, reading JSON lines on stdin and writing them on stdout:
 

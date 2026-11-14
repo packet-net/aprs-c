@@ -6,11 +6,16 @@
 
 int main(void)
 {
-    static pdn_aprs_packet p; /* about 2.5 KB: static here, or on a roomy stack */
+    static pdn_aprs_packet p; /* about 3.4 KB: static here, or on a roomy stack */
     const char *line = "M0LTE-9>APZ001,WIDE1-1,qAR,G4XYZ-10:=5130.00N/00007.00W>088/036Mobile";
-    int i;
+    int i, rc;
 
-    if (pdn_aprs_decode_tnc2(line, strlen(line), NULL, &p) != PDN_APRS_OK) {
+    rc = pdn_aprs_decode_tnc2(line, strlen(line), NULL, &p);
+    if (rc == PDN_APRS_ERR_TOO_LONG) {
+        printf("information field too long: the header was read, the rest was not kept\n");
+        return 1;
+    }
+    if (rc != PDN_APRS_OK) {
         printf("unusable header\n");
         return 1;
     }

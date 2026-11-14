@@ -7,6 +7,7 @@
 #include <locale.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "pdn_aprs.h"
@@ -1161,6 +1162,276 @@ static void test_refusal_codes(void)
     CHECK(n == PDN_APRS_ERR_ARGUMENT && enc.refusal == 0);
 }
 
+/* Lengths, counts and offsets in caller-filled data are checked against their
+   arrays: an out-of-range one is an invalid argument, never a read past the
+   end (run under ASan, the data is on the heap so the end of the struct shows). */
+static int encode_hostile(const pdn_aprs_data *d)
+{
+    char buf[8192];
+    pdn_aprs_encoded enc;
+    return pdn_aprs_encode_info(d, NULL, buf, sizeof buf, &enc);
+}
+
+static void test_hostile_lengths(void)
+{
+    pdn_aprs_data *d = (pdn_aprs_data *)calloc(1, sizeof *d);
+    pdn_aprs_header h;
+    char buf[8192];
+    pdn_aprs_encoded enc;
+    unsigned t;
+    CHECK(d != NULL);
+    if (!d)
+        return;
+
+    d->type = PDN_APRS_TYPE_STATUS;
+    strcpy(d->as.status.text, "hello");
+    d->as.status.text_len = 5;
+    CHECK(encode_hostile(d) == 6);
+    d->as.status.text_len = sizeof d->as.status.text;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->as.status.text_len = 60000;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+
+    memset(d, 0, sizeof *d);
+    d->type = PDN_APRS_TYPE_MESSAGE;
+    strcpy(d->as.message.addressee, "G4XYZ");
+    strcpy(d->as.message.text, "hi");
+    d->as.message.text_len = 2;
+    CHECK(encode_hostile(d) > 0);
+    d->as.message.text_len = 60000;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->type = PDN_APRS_TYPE_BULLETIN;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->type = PDN_APRS_TYPE_NWS_BULLETIN;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+
+    memset(d, 0, sizeof *d);
+    d->type = PDN_APRS_TYPE_TEST;
+    d->as.test.data_len = 60000;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->as.test.data_len = sizeof d->as.test.data;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+
+    memset(d, 0, sizeof *d);
+    d->type = PDN_APRS_TYPE_CAPABILITIES;
+    d->as.capabilities.count = 1;
+    memcpy(d->as.capabilities.text, "IGATE", 5);
+    d->as.capabilities.item[0].token_length = 5;
+    CHECK(encode_hostile(d) > 0);
+    d->as.capabilities.item[0].token_offset = 60000;
+    d->as.capabilities.item[0].token_length = 4;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->as.capabilities.item[0].token_offset = 0;
+    d->as.capabilities.item[0].token_length = 60000;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    /* offset and length each in range, their sum not */
+    d->as.capabilities.item[0].token_offset = sizeof d->as.capabilities.text - 2;
+    d->as.capabilities.item[0].token_length = 4;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->as.capabilities.item[0].token_offset = 0;
+    d->as.capabilities.item[0].token_length = 5;
+    d->as.capabilities.item[0].has_value = 1;
+    d->as.capabilities.item[0].value_offset = 60000;
+    d->as.capabilities.item[0].value_length = 1;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->as.capabilities.item[0].value_offset = 0;
+    d->as.capabilities.item[0].value_length = 60000;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->as.capabilities.item[0].has_value = 0;
+    d->as.capabilities.count = PDN_APRS_MAX_CAPABILITIES + 1;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->as.capabilities.count = 255;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+
+    memset(d, 0, sizeof *d);
+    d->type = PDN_APRS_TYPE_TELEMETRY_NAMES;
+    strcpy(d->as.meta.addressee, "G4XYZ");
+    memcpy(d->as.meta.text, "Volts", 6);
+    d->as.meta.count = 1;
+    d->as.meta.length[0] = 5;
+    CHECK(encode_hostile(d) > 0);
+    d->as.meta.offset[0] = 60000;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->as.meta.offset[0] = 0;
+    d->as.meta.length[0] = 60000;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->as.meta.length[0] = 5;
+    d->as.meta.offset[0] = sizeof d->as.meta.text - 2;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->type = PDN_APRS_TYPE_TELEMETRY_UNITS;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    /* a count past the arrays is still the encoder's refusal, and reads no item */
+    d->as.meta.offset[0] = 0;
+    d->as.meta.count = 255;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_REFUSED);
+    d->type = PDN_APRS_TYPE_TELEMETRY_COEFFICIENTS;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_REFUSED);
+    d->type = PDN_APRS_TYPE_TELEMETRY_BITS;
+    strcpy(d->as.meta.bits, "10101010");
+    d->as.meta.project_len = 60000;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_REFUSED);
+
+    memset(d, 0, sizeof *d);
+    d->type = PDN_APRS_TYPE_TELEMETRY;
+    strcpy(d->as.telemetry.sequence, "001");
+    d->as.telemetry.analog_count = 5;
+    d->as.telemetry.comment_len = 60000;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->as.telemetry.comment_len = 0;
+    d->as.telemetry.analog_count = 200;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_REFUSED);
+
+    memset(d, 0, sizeof *d);
+    d->type = PDN_APRS_TYPE_WEATHER;
+    strcpy(d->as.weather.timestamp, "10090556");
+    d->as.weather.comment_len = 60000;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->as.weather.comment_len = 0;
+    d->as.weather.weather.extra_count = PDN_APRS_MAX_WEATHER_EXTRA + 1;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->as.weather.weather.extra_count = 255;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+
+    memset(d, 0, sizeof *d);
+    d->type = PDN_APRS_TYPE_RAW_WEATHER;
+    d->as.raw_weather.data_len = 60000;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+
+    memset(d, 0, sizeof *d);
+    d->type = PDN_APRS_TYPE_NMEA;
+    d->as.nmea.sentence_len = 60000;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->as.nmea.sentence_len = 0;
+    d->as.nmea.comment_len = 60000;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+
+    memset(d, 0, sizeof *d);
+    d->type = PDN_APRS_TYPE_MAIDENHEAD_BEACON;
+    strcpy(d->as.maidenhead.locator, "IO91SX");
+    d->as.maidenhead.comment_len = 60000;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+
+    memset(d, 0, sizeof *d);
+    d->type = PDN_APRS_TYPE_THIRD_PARTY;
+    d->as.third_party.len = sizeof d->as.third_party.packet + 1;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->as.third_party.len = 60000;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+
+    memset(d, 0, sizeof *d);
+    d->type = PDN_APRS_TYPE_USER_DEFINED;
+    d->as.user_defined.user_id = 'A';
+    d->as.user_defined.packet_type = 'B';
+    d->as.user_defined.data_len = PDN_APRS_MAX_INFO;
+    CHECK(encode_hostile(d) > 0);
+    d->as.user_defined.data_len = PDN_APRS_MAX_INFO + 1;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    d->as.user_defined.data_len = 60000;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+
+    /* reports: position, Mic-E, object, item */
+    for (t = 0; t < 4; t++) {
+        static const uint8_t types[4] = {PDN_APRS_TYPE_POSITION, PDN_APRS_TYPE_MIC_E, PDN_APRS_TYPE_OBJECT,
+                                         PDN_APRS_TYPE_ITEM};
+        memset(d, 0, sizeof *d);
+        d->type = types[t];
+        d->as.report.comment_len = 60000;
+        CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+        d->as.report.comment_len = sizeof d->as.report.comment;
+        CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+        d->as.report.comment_len = 0;
+        d->as.report.has_weather = 1;
+        d->as.report.weather.extra_count = PDN_APRS_MAX_WEATHER_EXTRA + 1;
+        CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
+    }
+
+    /* the accessors, too */
+    memset(d, 0, sizeof *d);
+    d->as.capabilities.count = 1;
+    d->as.capabilities.item[0].token_offset = 60000;
+    d->as.capabilities.item[0].token_length = 4;
+    d->as.capabilities.item[0].has_value = 1;
+    d->as.capabilities.item[0].value_offset = 1;
+    d->as.capabilities.item[0].value_length = 60000;
+    CHECK(pdn_aprs_capability_token(&d->as.capabilities, 0, NULL) == NULL);
+    CHECK(pdn_aprs_capability_value(&d->as.capabilities, 0, NULL) == NULL);
+    memset(d, 0, sizeof *d);
+    d->as.meta.count = 1;
+    d->as.meta.offset[0] = 60000;
+    CHECK(pdn_aprs_telemetry_meta_item(&d->as.meta, 0, NULL) == NULL);
+
+    /* a header's path_count */
+    memset(&h, 0, sizeof h);
+    strcpy(h.source, "N0CALL");
+    strcpy(h.destination, "APZ001");
+    memset(d, 0, sizeof *d);
+    d->type = PDN_APRS_TYPE_STATUS;
+    strcpy(d->as.status.text, "hi");
+    d->as.status.text_len = 2;
+    CHECK(pdn_aprs_encode_tnc2(&h, d, NULL, buf, sizeof buf, &enc) > 0);
+    h.path_count = PDN_APRS_MAX_PATH + 1;
+    CHECK(pdn_aprs_encode_tnc2(&h, d, NULL, buf, sizeof buf, &enc) == PDN_APRS_ERR_ARGUMENT);
+    h.path_count = 255;
+    CHECK(pdn_aprs_encode_ax25(&h, d, NULL, buf, sizeof buf, &enc) == PDN_APRS_ERR_ARGUMENT);
+
+    free(d);
+}
+
+/* A packet whose information field was too long keeps its header only, and is
+   not written as one; the cap is on the field, not on its line end. */
+static void test_too_long_and_line_end(void)
+{
+    static char line[2000];
+    static pdn_aprs_packet p;
+    char out[4096];
+    size_t n;
+    int len, rc;
+    n = (size_t)sprintf(line, "M0LTE-9>APZ001,WIDE1-1:>");
+    memset(line + n, 'x', 600);
+    rc = pdn_aprs_decode_tnc2(line, n + 600, NULL, &p);
+    CHECK(rc == PDN_APRS_ERR_TOO_LONG && p.header_ok && p.info_len == 0);
+    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) == PDN_APRS_ERR_TOO_LONG);
+    CHECK(pdn_aprs_write_ax25(&p, out, sizeof out) == PDN_APRS_ERR_TOO_LONG);
+
+    /* the field itself at, and one past, the cap, with and without a line end */
+    for (len = PDN_APRS_MAX_INFO - 1; len <= PDN_APRS_MAX_INFO + 1; len++) {
+        static const char *const ends[] = {"", "\r\n", "\n", "\r"};
+        int e;
+        for (e = 0; e < 4; e++) {
+            size_t el = strlen(ends[e]);
+            n = (size_t)sprintf(line, "M0LTE-9>APZ001:");
+            line[n] = '>';
+            memset(line + n + 1, 'x', (size_t)len - 1);
+            memcpy(line + n + (size_t)len, ends[e], el);
+            rc = pdn_aprs_decode_tnc2(line, n + (size_t)len + el, NULL, &p);
+            if (len <= PDN_APRS_MAX_INFO) {
+                CHECK(rc == PDN_APRS_OK && p.info_len == (unsigned)len + el);
+                CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) == (int)(n + (size_t)len + el));
+                CHECK(memcmp(out, line, n + (size_t)len + el) == 0);
+                CHECK(pdn_aprs_write_ax25(&p, out, sizeof out) > 0);
+            } else {
+                CHECK(rc == PDN_APRS_ERR_TOO_LONG);
+                CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) == PDN_APRS_ERR_TOO_LONG);
+            }
+        }
+    }
+    /* two line ends are not one: they count against the cap */
+    n = (size_t)sprintf(line, "M0LTE-9>APZ001:>");
+    memset(line + n, 'x', PDN_APRS_MAX_INFO - 1);
+    memcpy(line + n + PDN_APRS_MAX_INFO - 1, "\r\n\r\n", 4);
+    CHECK(pdn_aprs_decode_tnc2(line, n + PDN_APRS_MAX_INFO + 3, NULL, &p) == PDN_APRS_ERR_TOO_LONG);
+
+    /* the information field on its own, and a frame, as well */
+    memset(line, 'x', PDN_APRS_MAX_INFO);
+    line[0] = '>';
+    memcpy(line + PDN_APRS_MAX_INFO, "\r\n", 2);
+    CHECK(pdn_aprs_decode_info(NULL, line, PDN_APRS_MAX_INFO + 2, NULL, &p) == PDN_APRS_OK);
+    CHECK(pdn_aprs_decode_info(NULL, line, PDN_APRS_MAX_INFO + 3, NULL, &p) == PDN_APRS_ERR_TOO_LONG);
+    CHECK(pdn_aprs_decode_info_unbounded(NULL, line, PDN_APRS_MAX_INFO + 3, NULL, &p) == PDN_APRS_OK);
+    /* an unbounded decode keeps nothing by design and still writes its header */
+    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) > 0);
+}
+
 int main(void)
 {
     test_basics();
@@ -1177,6 +1448,8 @@ int main(void)
     test_long_third_party();
     test_refusal_codes();
     test_round3();
+    test_hostile_lengths();
+    test_too_long_and_line_end();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

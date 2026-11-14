@@ -302,7 +302,8 @@ int pdn_aprs_has_diagnostic(const pdn_aprs_packet *packet, int code, int severit
 
 const char *pdn_aprs_telemetry_meta_item(const pdn_aprs_telemetry_meta *meta, unsigned i, size_t *len)
 {
-    if (!meta || i >= meta->count || i >= PDN_APRS_MAX_META_ITEMS)
+    if (!meta || i >= meta->count || i >= PDN_APRS_MAX_META_ITEMS ||
+        meta->offset[i] > sizeof meta->text || meta->length[i] > sizeof meta->text - meta->offset[i])
         return NULL;
     if (len)
         *len = meta->length[i];
@@ -317,6 +318,11 @@ static const char *capability_part(const pdn_aprs_capabilities *c, unsigned i, i
     item = &c->item[i];
     if (value && !item->has_value)
         return NULL;
+    {
+        size_t off = value ? item->value_offset : item->token_offset, n = value ? item->value_length : item->token_length;
+        if (off > sizeof c->text || n > sizeof c->text - off)
+            return NULL;
+    }
     if (len)
         *len = value ? item->value_length : item->token_length;
     return c->text + (value ? item->value_offset : item->token_offset);
@@ -457,6 +463,16 @@ static void packet_reset(pdn_aprs_packet *p)
     p->header.q_construct = -1;
 }
 
+/* The length of the one line end an information field may finish with. */
+static size_t line_end_len(const uint8_t *info, size_t len)
+{
+    if (len >= 2 && info[len - 2] == '\r' && info[len - 1] == '\n')
+        return 2;
+    if (len >= 1 && (info[len - 1] == '\r' || info[len - 1] == '\n'))
+        return 1;
+    return 0;
+}
+
 /* Decodes the information field into the packet, keeping a copy of it
    (keep), or not, in which case it may be longer than PDN_APRS_MAX_INFO. */
 static int decode_info_into(pdn_aprs_packet *packet, const pdn_aprs_decode_options *options, const uint8_t *info,
@@ -464,7 +480,9 @@ static int decode_info_into(pdn_aprs_packet *packet, const pdn_aprs_decode_optio
 {
     pdn_aprs__dctx c;
     uint8_t mark = packet->diagnostic_count;
-    if (keep && len > PDN_APRS_MAX_INFO) {
+    /* the cap is on the field, so one line end (CR LF, CR or LF) is not counted */
+    if (keep && len > PDN_APRS_MAX_INFO + line_end_len(info, len)) {
+        packet->info_dropped = 1;
         packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
         packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
         return PDN_APRS_ERR_TOO_LONG;
