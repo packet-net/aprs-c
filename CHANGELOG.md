@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 (2026-11-14)
 
 The round 3 rulings of the shared vectors (aprs-vectors `round-3`, pinned at 10d4e25).
 

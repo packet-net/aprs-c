@@ -2,7 +2,7 @@
 
 An APRS encoder and decoder in C99. It reads TNC2 / APRS-IS lines and AX.25 UI frames, tells you what each packet means and what is wrong with it, and writes packets back out. It is two files, `pdn_aprs.h` and `pdn_aprs.c`, plus an optional third holding the device identification table, and it is meant to be dropped into an existing C program such as a packet node, an IGate or a digipeater.
 
-Conforms to [aprs-vectors](https://github.com/packet-net/aprs-vectors) 1.0: every case passes.
+Conforms to [aprs-vectors](https://github.com/packet-net/aprs-vectors) 1.1: every case passes.
 
 It is the C member of a family of APRS libraries that all run the same language-neutral conformance vectors, [packet-net/aprs-vectors](https://github.com/packet-net/aprs-vectors): [Packet.Aprs](https://github.com/packet-net/packet.net) (C#), [pdn-aprs](https://github.com/packet-net/aprs-rs) (Rust), [pdn-aprs](https://github.com/packet-net/aprs-py) (Python) and [@packet-net/pdn-aprs](https://github.com/packet-net/aprs-ts) (TypeScript). At 0.1.0 it decoded all 6,879,893 packets of a real APRS-IS capture exactly as the Rust library did.
 
