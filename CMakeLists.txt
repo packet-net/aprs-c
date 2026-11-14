@@ -168,6 +168,17 @@ if(PDN_APRS_BUILD_TESTS)
     endif()
     file(GLOB PDN_APRS_REGRESSIONS ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/regressions/*)
     add_test(NAME fuzz_regressions COMMAND pdn_aprs_fuzz_replay ${PDN_APRS_REGRESSIONS})
+
+    # the private Mic-E suffix lookup, which the single file makes static
+    add_executable(pdn_aprs_mice_codes_test tests/mice_codes_test.c ${PDN_APRS_SOURCES})
+    target_include_directories(pdn_aprs_mice_codes_test PRIVATE ${PDN_APRS_INCLUDE} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_options(pdn_aprs_mice_codes_test PRIVATE ${PDN_APRS_WARNINGS})
+    if(MSVC)
+      target_compile_definitions(pdn_aprs_mice_codes_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+      target_link_libraries(pdn_aprs_mice_codes_test PRIVATE m)
+    endif()
+    add_test(NAME mice_codes COMMAND pdn_aprs_mice_codes_test)
   endif()
 
   if(PDN_APRS_CXX_CHECK)

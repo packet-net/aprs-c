@@ -135,7 +135,7 @@ PDN_APRS__PRIVATE int pdn_aprs__mic_e_suffix_known(char type_code, const uint8_t
         return 0;
     for (i = 0; i < sizeof mic_e_codes / sizeof mic_e_codes[0]; i++)
         if (mic_e_codes[i].type_code == want && (uint8_t)mic_e_codes[i].s[0] == s[0] &&
-            (n == 1 ? mic_e_codes[i].s[1] == 0 : (uint8_t)mic_e_codes[i].s[1] == s[1]))
+            (n == 1 ? mic_e_codes[i].s[1] == 0 : mic_e_codes[i].s[1] != 0 && (uint8_t)mic_e_codes[i].s[1] == s[1]))
             return 1;
     return 0;
 }}
