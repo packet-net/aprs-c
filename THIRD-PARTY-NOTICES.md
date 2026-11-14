@@ -17,4 +17,4 @@ The names of the named symbols (`PDN_APRS_SYMBOL_CAR` and so on) follow Packet.A
 
 ## aprs-vectors (tests only)
 
-The conformance vectors in the `vectors/` submodule, [packet-net/aprs-vectors](https://github.com/packet-net/aprs-vectors), are licensed AGPL-3.0-or-later. The tests read them; they are not part of the library or of a release.
+The conformance vectors in the `vectors/` submodule, [packet-net/aprs-vectors](https://github.com/packet-net/aprs-vectors), are dedicated to the public domain under CC0 1.0 (the scripts in their `tools/` are MIT). The tests read them; they are not part of the library or of a release.
