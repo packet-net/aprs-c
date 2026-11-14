@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Round 4 of the shared vectors (aprs-vectors `round-4`, pinned at c423a29, version 1.2), and the fixes from the November 2026 review. The vectors are now CC0 (their tools MIT); the library stays MIT.
+Round 4 of the shared vectors (aprs-vectors `round-4`, pinned at 0c625fc, version 1.2), and the fixes from the November 2026 review. The vectors are now CC0 (their tools MIT); the library stays MIT.
 
 ### Breaking changes for callers
 
