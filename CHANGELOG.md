@@ -2,7 +2,28 @@
 
 ## Unreleased
 
-Fixes from the November 2026 review. No decode result changes except for the line end in the second item.
+Round 4 of the shared vectors (aprs-vectors `round-4`, pinned at 9f3e07d, version 1.2), and the fixes from the November 2026 review. The vectors are now CC0 (their tools MIT); the library stays MIT.
+
+### Breaking changes for callers
+
+- An encoder or builder refuses an information field over 256 bytes (`too-long`), counted in bytes, number text included; for a third-party packet the outermost field. It was written at any length. A decoded packet over 256 bytes (up to the 512 the decoder holds) re-encodes refused. `PDN_APRS_MAX_FIELD` (256) is new.
+- Text with a control character (a byte below 0x20 or 0x7F, a tab or a line break inside it included) is refused with `invalid-character`, where only a line break was. A Mic-E status text starting with 0x1D is refused too, not written after a `/`. Test data (the `,` type) keeps its own rule. The decoder gives the tolerable warning `control-character-in-text` (`PDN_APRS_CODE_CONTROL_CHARACTER_IN_TEXT`), so a strict decode now rejects such a packet.
+- A weather value that runs on by two or more digits (`t2147483647r000`) before the end of the field or a defined field it goes on to read is dropped with `out-of-range-value` and the fields carry on, where it ended the fields and the rest became comment text.
+- A packet beyond a fixed capacity is `implementation-limit` (`PDN_APRS_CODE_IMPLEMENTATION_LIMIT`, an error) instead of the readings it gave at 1.1.0: an information field over 512 bytes, a 65th capability and a ninth extra weather field are `unrecognized` data (`malformed`) and return `PDN_APRS_ERR_TOO_LONG`, lenient and strict alike; a 17th path entry is an unusable header (`PDN_APRS_ERR_HEADER`). Before, a 65th capability was `invalid-capabilities`, a 17th path entry `invalid-header`, and a ninth extra field ended the weather fields and went into the comment.
+- A Mic-E altitude given to `pdn_aprs_build_mic_e` in feet (`altitude_feet`) goes in the Mic-E altitude bytes, rounded once to the nearest metre, as one in metres always did; it was a `/A=`. One outside -10000 to 743570 m is `value-out-of-range`. Neutral data to the encoder goes in a `/A=` only when only a `/A=` holds it exactly (whole feet within six digits that the Mic-E bytes do not hold exactly), so 100.5 ft is 31 m in the bytes (it was `/A=000101`) and -50000 ft is `/A=-50000` (it was refused). An altitude decoded from a `/A=` still writes back as one.
+- A positionless weather report built or encoded with no timestamp is `missing-field` (it was `invalid-timestamp`). Nothing in the library reads the clock, and it has no "now" helper: pass a time of your own (`pdn_aprs_format_timestamp()` formats one).
+
+### Changes
+
+- Builder defaults, written down: messaging off, Mic-E message off duty, no path, destination `APZ001`, no ambiguity, compression, message ID, reply-ack or bulletin group, alive, metadata to the sending station, `c`/`s`/`g`/`t` unknown dots, Mic-E speed 0. A positioned weather report built with no symbol has `/_` (it was `invalid-symbol`); every other positioned report with no symbol is `invalid-symbol`, as before.
+- `pdn_aprs_telemetry_args` gains `uint8_t no_sequence` at the end: set, the telemetry report is refused as `missing-field`. Zero is a valid sequence number, so a zeroed struct still has one. No bits still writes `00000000`.
+- The runner skips a case whose lenient result gives `implementation-limit`, counted on its own line (six cases); `tests/known-differences.txt` is empty.
+- The dump tool passes only the keys a recipe gives and fills in no default of its own (an absent `mic_e_message` is the builder's off duty, an absent telemetry `sequence` is `missing-field`, absent `analog` is five empty channels). Encode and build records gain the result `implementation-limit` for data beyond a capacity (text over 1,024 bytes, more than 64 capabilities, more than 8 extra weather fields), where they said `unsupported`. It reads the tokens `NaN`, `Infinity` and `-Infinity` in encode and build input, which the generator writes with `--nonfinite`.
+- README: the encoder's 256-byte limit, the capacities and `implementation-limit`, the builder defaults, control characters in text, the Mic-E altitude; the claim of no size limit is gone.
+
+### Fixes from the November 2026 review
+
+No decode result changes except for the line end in the second item.
 
 - Memory safety: the encoder no longer trusts the length, count and offset fields of a caller-filled `pdn_aprs_data`. A text length, `count`, token or value offset or length, `extra_count`, `data_len` or third-party `len` that does not fit its array, and a header `path_count` over `PDN_APRS_MAX_PATH`, now make the encode and build calls return `PDN_APRS_ERR_ARGUMENT` instead of reading past the array (the user-defined and third-party lengths and the capability and weather counts were clamped silently before). The capability and telemetry metadata accessors return NULL for an offset out of range. New tests, a hostile-length case in the libFuzzer target, and the existing ASan/UBSan job cover it.
 - Memory safety: a fixed char array in a caller-filled struct that the encoder reads as a C string (addresses and path calls in the header, and in the data the addressee, message and reply-ack IDs, name, timestamp, locator, device suffix, signpost, query type, target, sequence, bit strings, weather unit and extra values, number texts, NMEA time and waypoint) must now hold a NUL, or the encode call returns `PDN_APRS_ERR_ARGUMENT` instead of reading past the array; `pdn_aprs_write_tnc2()` and `pdn_aprs_write_ax25()` check the packet's header the same way. Only the arrays of the variant in use are checked.
