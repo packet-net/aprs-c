@@ -6,6 +6,8 @@
  */
 #include <locale.h>
 #include <math.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1432,6 +1434,182 @@ static void test_too_long_and_line_end(void)
     CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) > 0);
 }
 
+/* A fixed char array in caller-filled data with no NUL in it is an invalid
+   argument, never a string to read on past its end. Each case is a block
+   of exactly the size of its variant (calloc'd, so ASan sees the end), with
+   the one array filled with non-zero bytes. */
+typedef struct unterminated_case {
+    const char *name;
+    uint8_t type;
+    size_t variant_size;
+    size_t array_offset, array_size;
+    void (*setup)(pdn_aprs_data *);
+} unterminated_case;
+
+static void set_weather_report(pdn_aprs_data *d) { d->as.report.has_weather = 1; }
+static void set_weather_extra_report(pdn_aprs_data *d)
+{
+    d->as.report.has_weather = 1;
+    d->as.report.weather.extra_count = 1;
+}
+static void set_weather_extra(pdn_aprs_data *d) { d->as.weather.weather.extra_count = 1; }
+static void set_message_reply_ack(pdn_aprs_data *d) { d->as.message.has_reply_ack = 1; }
+static void set_ack_reply_ack(pdn_aprs_data *d) { d->as.ack.has_reply_ack = 1; }
+static void set_coefficient(pdn_aprs_data *d) { d->as.meta.count = 1; }
+static void set_analog(pdn_aprs_data *d) { d->as.telemetry.analog_count = 5; }
+static void set_telemetry_bits(pdn_aprs_data *d) { d->as.telemetry.has_bits = 1; }
+static void set_footprint(pdn_aprs_data *d) { d->as.query.has_footprint = 1; }
+
+#define UCASE(name, type, variant, field, setup)                                                                       \
+    {name, type, sizeof(((pdn_aprs_data *)0)->as.variant), offsetof(pdn_aprs_data, as.variant.field),                  \
+     sizeof(((pdn_aprs_data *)0)->as.variant.field), setup}
+
+static void test_unterminated_strings(void)
+{
+    static const unterminated_case cases[] = {
+        UCASE("position timestamp", PDN_APRS_TYPE_POSITION, report, timestamp, NULL),
+        UCASE("position signpost", PDN_APRS_TYPE_POSITION, report, signpost, NULL),
+        UCASE("object name", PDN_APRS_TYPE_OBJECT, report, name, NULL),
+        UCASE("object timestamp", PDN_APRS_TYPE_OBJECT, report, timestamp, NULL),
+        UCASE("item name", PDN_APRS_TYPE_ITEM, report, name, NULL),
+        UCASE("mic-e device_suffix", PDN_APRS_TYPE_MIC_E, report, device_suffix, NULL),
+        UCASE("mic-e locator", PDN_APRS_TYPE_MIC_E, report, locator, NULL),
+        UCASE("report weather unit", PDN_APRS_TYPE_POSITION, report, weather.unit, set_weather_report),
+        UCASE("report weather extra", PDN_APRS_TYPE_POSITION, report, weather.extra[0].value, set_weather_extra_report),
+        UCASE("message addressee", PDN_APRS_TYPE_MESSAGE, message, addressee, NULL),
+        UCASE("message message_id", PDN_APRS_TYPE_MESSAGE, message, message_id, NULL),
+        UCASE("bulletin reply_ack", PDN_APRS_TYPE_BULLETIN, message, reply_ack, set_message_reply_ack),
+        UCASE("ack addressee", PDN_APRS_TYPE_ACK, ack, addressee, NULL),
+        UCASE("ack id", PDN_APRS_TYPE_ACK, ack, id, NULL),
+        UCASE("reject reply_ack", PDN_APRS_TYPE_REJECT, ack, reply_ack, set_ack_reply_ack),
+        UCASE("directed query addressee", PDN_APRS_TYPE_DIRECTED_QUERY, directed_query, addressee, NULL),
+        UCASE("directed query query_type", PDN_APRS_TYPE_DIRECTED_QUERY, directed_query, query_type, NULL),
+        UCASE("directed query target", PDN_APRS_TYPE_DIRECTED_QUERY, directed_query, target, NULL),
+        UCASE("names addressee", PDN_APRS_TYPE_TELEMETRY_NAMES, meta, addressee, NULL),
+        UCASE("units message_id", PDN_APRS_TYPE_TELEMETRY_UNITS, meta, message_id, NULL),
+        UCASE("coefficient text", PDN_APRS_TYPE_TELEMETRY_COEFFICIENTS, meta, coefficient[0].text, set_coefficient),
+        UCASE("bits bits", PDN_APRS_TYPE_TELEMETRY_BITS, meta, bits, NULL),
+        UCASE("status timestamp", PDN_APRS_TYPE_STATUS, status, timestamp, NULL),
+        UCASE("status locator", PDN_APRS_TYPE_STATUS, status, locator, NULL),
+        UCASE("telemetry sequence", PDN_APRS_TYPE_TELEMETRY, telemetry, sequence, NULL),
+        UCASE("telemetry analog text", PDN_APRS_TYPE_TELEMETRY, telemetry, analog[0].text, set_analog),
+        UCASE("telemetry bits", PDN_APRS_TYPE_TELEMETRY, telemetry, bits, set_telemetry_bits),
+        UCASE("weather timestamp", PDN_APRS_TYPE_WEATHER, weather, timestamp, NULL),
+        UCASE("weather unit", PDN_APRS_TYPE_WEATHER, weather, weather.unit, NULL),
+        UCASE("weather extra", PDN_APRS_TYPE_WEATHER, weather, weather.extra[0].value, set_weather_extra),
+        UCASE("nmea time", PDN_APRS_TYPE_NMEA, nmea, time, NULL),
+        UCASE("nmea waypoint", PDN_APRS_TYPE_NMEA, nmea, waypoint, NULL),
+        UCASE("maidenhead locator", PDN_APRS_TYPE_MAIDENHEAD_BEACON, maidenhead, locator, NULL),
+        UCASE("query query_type", PDN_APRS_TYPE_QUERY, query, query_type, NULL),
+        UCASE("query latitude_text", PDN_APRS_TYPE_QUERY, query, latitude_text, set_footprint),
+        UCASE("query longitude_text", PDN_APRS_TYPE_QUERY, query, longitude_text, set_footprint),
+    };
+    size_t i;
+    for (i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        const unterminated_case *c = &cases[i];
+        pdn_aprs_data *d = (pdn_aprs_data *)calloc(1, offsetof(pdn_aprs_data, as) + c->variant_size);
+        char buf[8192];
+        pdn_aprs_encoded enc;
+        int rc;
+        CHECK(d != NULL);
+        if (!d)
+            return;
+        d->type = c->type;
+        if (c->setup)
+            c->setup(d);
+        memset((char *)d + c->array_offset, 'A', c->array_size);
+        rc = pdn_aprs_encode_info(d, NULL, buf, sizeof buf, &enc);
+        if (rc != PDN_APRS_ERR_ARGUMENT)
+            printf("not refused as an argument: %s (%d)\n", c->name, rc);
+        CHECK(rc == PDN_APRS_ERR_ARGUMENT);
+        free(d);
+    }
+}
+
+static void test_unterminated_header(void)
+{
+    pdn_aprs_header *h = (pdn_aprs_header *)calloc(1, sizeof *h);
+    pdn_aprs_data d;
+    pdn_aprs_packet *p = (pdn_aprs_packet *)calloc(1, sizeof *p);
+    char buf[8192];
+    pdn_aprs_encoded enc;
+    int field;
+    CHECK(h != NULL && p != NULL);
+    if (!h || !p)
+        return;
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_STATUS;
+    memcpy(d.as.status.text, "hi", 2);
+    d.as.status.text_len = 2;
+    for (field = 0; field < 3; field++) {
+        memset(h, 0, sizeof *h);
+        strcpy(h->source, "M0LTE");
+        strcpy(h->destination, "APZ001");
+        strcpy(h->path[0].call, "WIDE1-1");
+        h->path_count = 1;
+        h->q_construct = -1;
+        if (field == 0)
+            memset(h->source, 'A', sizeof h->source);
+        else if (field == 1)
+            memset(h->destination, 'A', sizeof h->destination);
+        else
+            memset(h->path[0].call, 'A', sizeof h->path[0].call);
+        CHECK(pdn_aprs_encode_tnc2(h, &d, NULL, buf, sizeof buf, &enc) == PDN_APRS_ERR_ARGUMENT);
+        CHECK(pdn_aprs_encode_ax25(h, &d, NULL, buf, sizeof buf, &enc) == PDN_APRS_ERR_ARGUMENT);
+        p->header_ok = 1;
+        p->header = *h;
+        CHECK(pdn_aprs_write_tnc2(p, buf, sizeof buf) == PDN_APRS_ERR_ARGUMENT);
+        CHECK(pdn_aprs_write_ax25(p, buf, sizeof buf) == PDN_APRS_ERR_ARGUMENT);
+    }
+    /* a path call beyond path_count is not read */
+    memset(h, 0, sizeof *h);
+    strcpy(h->source, "M0LTE");
+    strcpy(h->destination, "APZ001");
+    memset(h->path[0].call, 'A', sizeof h->path[0].call);
+    h->q_construct = -1;
+    CHECK(pdn_aprs_encode_tnc2(h, &d, NULL, buf, sizeof buf, &enc) > 0);
+    free(h);
+    free(p);
+}
+
+/* An unbounded decode that overflows returns TOO_LONG and sets info_dropped,
+   so the writers refuse it as they do a bounded one; one that fits does not. */
+static void test_unbounded_too_long(void)
+{
+    static char big[3000];
+    static pdn_aprs_packet p;
+    char out[4096];
+    memset(big, 'x', sizeof big);
+    big[0] = '>';
+    CHECK(pdn_aprs_decode_info_unbounded(NULL, big, sizeof big, NULL, &p) == PDN_APRS_ERR_TOO_LONG);
+    CHECK(p.info_dropped == 1);
+    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) == PDN_APRS_ERR_TOO_LONG);
+    CHECK(pdn_aprs_write_ax25(&p, out, sizeof out) == PDN_APRS_ERR_TOO_LONG);
+    CHECK(pdn_aprs_decode_info_unbounded(NULL, big, 100, NULL, &p) == PDN_APRS_OK);
+    CHECK(p.info_dropped == 0);
+    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) > 0);
+}
+
+/* A capability with no value has an offset nobody reads, and none is formed from it. */
+static void test_capability_without_value(void)
+{
+    pdn_aprs_data *d = (pdn_aprs_data *)calloc(1, sizeof *d);
+    char buf[8192];
+    pdn_aprs_encoded enc;
+    CHECK(d != NULL);
+    if (!d)
+        return;
+    d->type = PDN_APRS_TYPE_CAPABILITIES;
+    d->as.capabilities.count = 1;
+    memcpy(d->as.capabilities.text, "IGATE", 5);
+    d->as.capabilities.item[0].token_length = 5;
+    d->as.capabilities.item[0].value_offset = 60000;
+    d->as.capabilities.item[0].value_length = 60000;
+    CHECK(pdn_aprs_encode_info(d, NULL, buf, sizeof buf, &enc) == 6 && memcmp(buf, "<IGATE", 6) == 0);
+    free(d);
+}
+
+
 int main(void)
 {
     test_basics();
@@ -1450,6 +1628,10 @@ int main(void)
     test_round3();
     test_hostile_lengths();
     test_too_long_and_line_end();
+    test_unterminated_strings();
+    test_unterminated_header();
+    test_unbounded_too_long();
+    test_capability_without_value();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

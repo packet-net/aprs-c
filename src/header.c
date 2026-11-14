@@ -12,6 +12,20 @@ PDN_APRS__PRIVATE void pdn_aprs__header_default(pdn_aprs_header *h)
     h->q_construct = -1;
 }
 
+/* 1 if the source, the destination (when asked) and the path calls up to
+   path_count each hold a NUL, so the writers may read them as C strings.
+   path_count must already be within PDN_APRS_MAX_PATH. */
+PDN_APRS__PRIVATE int pdn_aprs__header_strings_ok(const pdn_aprs_header *h, int destination)
+{
+    unsigned i;
+    if (!memchr(h->source, 0, sizeof h->source) || (destination && !memchr(h->destination, 0, sizeof h->destination)))
+        return 0;
+    for (i = 0; i < h->path_count && i < PDN_APRS_MAX_PATH; i++)
+        if (!memchr(h->path[i].call, 0, sizeof h->path[i].call))
+            return 0;
+    return 1;
+}
+
 /* An APRS-IS address: 1-9 letters, digits or '-'. */
 static int address_ok(const uint8_t *s, size_t n)
 {

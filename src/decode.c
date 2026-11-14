@@ -501,6 +501,8 @@ static int decode_info_into(pdn_aprs_packet *packet, const pdn_aprs_decode_optio
     c.depth = depth;
     pdn_aprs__decode_field(&c);
     if (c.too_long) {
+        /* whether or not a copy was kept, the writers refuse the packet */
+        packet->info_dropped = 1;
         memset(&packet->data, 0, sizeof packet->data);
         packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
         packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;

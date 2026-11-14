@@ -2126,10 +2126,12 @@ static int encode_capabilities(pdn_aprs__ectx *e, const pdn_aprs_capabilities *c
     /* by code across all the entries (ruling 1): a value with a comma or
        control character, then a padded value, then a bad token */
     for (i = 0; i < c->count && i < PDN_APRS_MAX_CAPABILITIES; i++) {
-        const char *v = c->text + c->item[i].value_offset;
-        size_t vl = c->item[i].value_length, k;
+        const char *v;
+        size_t vl, k;
         if (!c->item[i].has_value)
             continue;
+        v = c->text + c->item[i].value_offset;
+        vl = c->item[i].value_length;
         if (memchr(v, ',', vl))
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "a capability value has no commas");
         for (k = 0; k < vl; k++)
@@ -2137,9 +2139,13 @@ static int encode_capabilities(pdn_aprs__ectx *e, const pdn_aprs_capabilities *c
                 return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "a capability value has no control characters");
     }
     for (i = 0; i < c->count && i < PDN_APRS_MAX_CAPABILITIES; i++) {
-        const char *v = c->text + c->item[i].value_offset;
-        size_t vl = c->item[i].value_length;
-        if (c->item[i].has_value && vl > 0 && (v[0] == ' ' || v[vl - 1] == ' '))
+        const char *v;
+        size_t vl;
+        if (!c->item[i].has_value)
+            continue;
+        v = c->text + c->item[i].value_offset;
+        vl = c->item[i].value_length;
+        if (vl > 0 && (v[0] == ' ' || v[vl - 1] == ' '))
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_PADDING_SPACE, "a capability value cannot start or end with a space");
     }
     pdn_aprs__putc(e->b, '<');
@@ -2425,7 +2431,7 @@ static int span_ok(size_t offset, size_t length, size_t size)
 /* 1 if every length, count and offset the encoder reads from data is within
    the array it indexes. The data is filled in by the caller, so none of them
    can be trusted; a bad one is an invalid argument, not something to clamp. */
-static int data_bounds_ok(const pdn_aprs_data *d)
+static int lengths_ok(const pdn_aprs_data *d)
 {
     unsigned i;
     switch (d->type) {
@@ -2489,6 +2495,112 @@ static int data_bounds_ok(const pdn_aprs_data *d)
     default:
         return 1;
     }
+}
+
+/* 1 if the fixed array holds a NUL, so it is a C string the encoder may
+   strlen, print or compare. */
+#define TERMINATED(a) (memchr((a), 0, sizeof(a)) != NULL)
+
+static int weather_strings_ok(const pdn_aprs_weather *w)
+{
+    unsigned i;
+    if (!TERMINATED(w->unit))
+        return 0;
+    for (i = 0; i < w->extra_count && i < PDN_APRS_MAX_WEATHER_EXTRA; i++)
+        if (!TERMINATED(w->extra[i].value))
+            return 0;
+    return 1;
+}
+
+/* a number's text is read only for a number that is not null */
+static int number_ok(const pdn_aprs_number *n)
+{
+    return n->is_null || TERMINATED(n->text);
+}
+
+/* 1 if every fixed char array the encoder reads as a C string, in the
+   variant of data that is in use, has a NUL in it. The data is filled in by
+   the caller, so an array with none is an invalid argument, not a string to
+   read on past its end. Arrays read with a length (comments, texts) are not
+   strings. */
+static int strings_ok(const pdn_aprs_data *d)
+{
+    unsigned i;
+    switch (d->type) {
+    case PDN_APRS_TYPE_POSITION:
+    case PDN_APRS_TYPE_MIC_E:
+    case PDN_APRS_TYPE_OBJECT:
+    case PDN_APRS_TYPE_ITEM: {
+        const pdn_aprs_report *r = &d->as.report;
+        if (!TERMINATED(r->signpost))
+            return 0;
+        if ((d->type == PDN_APRS_TYPE_POSITION || d->type == PDN_APRS_TYPE_OBJECT) && !TERMINATED(r->timestamp))
+            return 0;
+        if ((d->type == PDN_APRS_TYPE_OBJECT || d->type == PDN_APRS_TYPE_ITEM) && !TERMINATED(r->name))
+            return 0;
+        if (d->type == PDN_APRS_TYPE_MIC_E && (!TERMINATED(r->device_suffix) || !TERMINATED(r->locator)))
+            return 0;
+        return !r->has_weather || weather_strings_ok(&r->weather);
+    }
+    case PDN_APRS_TYPE_MESSAGE:
+    case PDN_APRS_TYPE_BULLETIN:
+    case PDN_APRS_TYPE_NWS_BULLETIN: {
+        const pdn_aprs_message *m = &d->as.message;
+        return TERMINATED(m->addressee) && TERMINATED(m->message_id) && (!m->has_reply_ack || TERMINATED(m->reply_ack));
+    }
+    case PDN_APRS_TYPE_ACK:
+    case PDN_APRS_TYPE_REJECT: {
+        const pdn_aprs_ack *a = &d->as.ack;
+        return TERMINATED(a->addressee) && TERMINATED(a->id) && (!a->has_reply_ack || TERMINATED(a->reply_ack));
+    }
+    case PDN_APRS_TYPE_DIRECTED_QUERY: {
+        const pdn_aprs_directed_query *q = &d->as.directed_query;
+        return TERMINATED(q->addressee) && TERMINATED(q->query_type) && TERMINATED(q->target);
+    }
+    case PDN_APRS_TYPE_TELEMETRY_NAMES:
+    case PDN_APRS_TYPE_TELEMETRY_UNITS:
+    case PDN_APRS_TYPE_TELEMETRY_COEFFICIENTS:
+    case PDN_APRS_TYPE_TELEMETRY_BITS: {
+        const pdn_aprs_telemetry_meta *m = &d->as.meta;
+        if (!TERMINATED(m->addressee) || !TERMINATED(m->message_id))
+            return 0;
+        if (d->type == PDN_APRS_TYPE_TELEMETRY_BITS)
+            return TERMINATED(m->bits);
+        for (i = 0; d->type == PDN_APRS_TYPE_TELEMETRY_COEFFICIENTS && i < m->count && i < PDN_APRS_MAX_META_ITEMS; i++)
+            if (!number_ok(&m->coefficient[i]))
+                return 0;
+        return 1;
+    }
+    case PDN_APRS_TYPE_STATUS:
+        return TERMINATED(d->as.status.timestamp) && TERMINATED(d->as.status.locator);
+    case PDN_APRS_TYPE_TELEMETRY: {
+        const pdn_aprs_telemetry *t = &d->as.telemetry;
+        if (!TERMINATED(t->sequence) || (t->has_bits && !TERMINATED(t->bits)))
+            return 0;
+        for (i = 0; i < t->analog_count && i < PDN_APRS_MAX_ANALOG; i++)
+            if (!number_ok(&t->analog[i]))
+                return 0;
+        return 1;
+    }
+    case PDN_APRS_TYPE_WEATHER:
+        return TERMINATED(d->as.weather.timestamp) && weather_strings_ok(&d->as.weather.weather);
+    case PDN_APRS_TYPE_NMEA:
+        return TERMINATED(d->as.nmea.time) && TERMINATED(d->as.nmea.waypoint);
+    case PDN_APRS_TYPE_MAIDENHEAD_BEACON:
+        return TERMINATED(d->as.maidenhead.locator);
+    case PDN_APRS_TYPE_QUERY: {
+        const pdn_aprs_query *q = &d->as.query;
+        return TERMINATED(q->query_type) &&
+               (!q->has_footprint || (TERMINATED(q->latitude_text) && TERMINATED(q->longitude_text)));
+    }
+    default:
+        return 1;
+    }
+}
+
+static int data_bounds_ok(const pdn_aprs_data *d)
+{
+    return lengths_ok(d) && strings_ok(d);
 }
 
 static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf, size_t cap,
@@ -2568,6 +2680,9 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
         return PDN_APRS_ERR_ARGUMENT;
     if (header->path_count > PDN_APRS_MAX_PATH)
         return PDN_APRS_ERR_ARGUMENT;
+    /* a Mic-E destination is computed, so the one in header is not read */
+    if (!pdn_aprs__header_strings_ok(header, data->type != PDN_APRS_TYPE_MIC_E))
+        return PDN_APRS_ERR_ARGUMENT;
     if (!encoded)
         encoded = &local;
     /* the information field first, at the start of buf, then moved along
@@ -2639,6 +2754,8 @@ static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int a
     if (!p->header_ok)
         return PDN_APRS_ERR_HEADER;
     if (p->info_len > sizeof p->info || p->header.path_count > PDN_APRS_MAX_PATH)
+        return PDN_APRS_ERR_ARGUMENT;
+    if (!pdn_aprs__header_strings_ok(&p->header, 1))
         return PDN_APRS_ERR_ARGUMENT;
     /* the information field was longer than the packet holds, so none of it was kept */
     if (p->info_dropped)
