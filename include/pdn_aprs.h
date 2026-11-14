@@ -1156,10 +1156,11 @@ PDN_APRS_API const pdn_aprs_device_table *pdn_aprs_devices(void);
 /* Encode options. A zeroed struct (or NULL) is the default. */
 typedef struct pdn_aprs_encode_options {
     /* The device table the packet's readers use. The encoder checks what it
-       writes by decoding it; with the table, a Mic-E comment that happens to
-       end in a known device suffix is refused rather than written, since it
-       would read back as that suffix. NULL checks only the report's own
-       suffix. */
+       writes by decoding it; with the table, a Mic-E comment that would read
+       back as a known device suffix is written after a "/" where that makes
+       it read back as comment text, and refused where nothing does. NULL
+       checks only the report's own suffix (see the note at
+       pdn_aprs_build_mic_e()). */
     const pdn_aprs_device_table *devices;
 } pdn_aprs_encode_options;
 
@@ -1228,6 +1229,13 @@ typedef struct pdn_aprs_encoded {
  * PDN_APRS_ERR_ARGUMENT; on failure buf holds nothing of use. options and
  * encoded may be NULL, though a Mic-E report needs encoded for its
  * destination address.
+ *
+ * Mic-E and the device table: without the table (pdn_aprs_deviceid.c) the
+ * encoder cannot tell a Mic-E device suffix from comment text, so it can
+ * write a Mic-E comment that other implementations read as a device suffix;
+ * the decoder leaves suffixes in the comment. The shared test cases are run
+ * with the table; build with the table for Mic-E that reads the same
+ * everywhere.
  */
 PDN_APRS_API int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf,
                                       size_t cap, pdn_aprs_encoded *encoded);
@@ -1369,6 +1377,12 @@ typedef struct pdn_aprs_mic_e_args {
     const char *comment;
 } pdn_aprs_mic_e_args;
 
+/* Without the device table (pdn_aprs_deviceid.c) the library cannot tell a
+   Mic-E device suffix from comment text, so the decoder leaves suffixes in
+   the comment and the encoder can write a Mic-E comment that other
+   implementations read as a device suffix. The shared test cases are run
+   with the table; build with the table for Mic-E that reads the same
+   everywhere. */
 PDN_APRS_API int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_args *args, void *buf,
                                       size_t cap, pdn_aprs_encoded *result);
 
