@@ -47,12 +47,13 @@ static int dao_at(const uint8_t *s)
     return 0;
 }
 
-PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs_report *r, uint8_t dao[5])
+/* Finds, without taking anything out, the base-91 telemetry and the !DAO! the
+   comment's start lifts: the last two | around a valid telemetry body, and
+   the last !DAO! outside it. */
+PDN_APRS__PRIVATE void pdn_aprs__find_telemetry_dao(const pdn_aprs__cbuf *cb, pdn_aprs__lifted *f)
 {
-    size_t last = cb->n, prev = cb->n, i, tstart = 0, tend = 0;
-    int have_tlm = 0;
-    size_t dao_pos = 0;
-    int have_dao = 0;
+    size_t last = cb->n, prev = cb->n, i;
+    memset(f, 0, sizeof *f);
     for (i = cb->n; i > 0; i--) {
         if (cb->b[i - 1] == '|') {
             if (last == cb->n) {
@@ -70,40 +71,65 @@ PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs
             if (!A_B91(cb->b[k]))
                 ok = 0;
         if (ok) {
-            const uint8_t *t = cb->b + prev + 1;
-            size_t pairs = len / 2, p;
-            memset(&r->telemetry, 0, sizeof r->telemetry);
-            r->has_telemetry = 1;
-            r->telemetry.sequence = (uint16_t)pdn_aprs__b91(t, 2);
-            for (p = 1; p < pairs && p <= PDN_APRS_MAX_ANALOG; p++)
-                r->telemetry.analog[r->telemetry.analog_count++] = (uint16_t)pdn_aprs__b91(t + 2 * p, 2);
-            if (pairs == 7) {
-                /* eight binary channels; bits 9-13 are reserved (APRS12c ch. 13) */
-                r->telemetry.has_digital = 1;
-                r->telemetry.digital = (uint16_t)(pdn_aprs__b91(t + 12, 2) & 0xFF);
-            }
-            have_tlm = 1;
-            tstart = prev;
-            tend = last + 1;
+            f->have_tlm = 1;
+            f->tstart = prev;
+            f->tend = last + 1;
         }
     }
     /* the last !DAO! outside the telemetry */
     if (cb->n >= 5) {
         for (i = cb->n - 5 + 1; i > 0; i--) {
             size_t k = i - 1;
-            if (have_tlm && k + 5 > tstart && k < tend)
+            if (f->have_tlm && k + 5 > f->tstart && k < f->tend)
                 continue;
             /* bytes either side of what was taken out never join into one */
             if (cb->cut && k + 1 < cb->cut && cb->cut - 1 < k + 5)
                 continue;
             if (dao_at(cb->b + k)) {
-                memcpy(dao, cb->b + k, 5);
-                dao_pos = k;
-                have_dao = 1;
+                f->dao_pos = k;
+                f->have_dao = 1;
                 break;
             }
         }
     }
+}
+
+PDN_APRS__PRIVATE int pdn_aprs__lifted_run_to_end(const pdn_aprs__cbuf *cb, size_t at)
+{
+    /* the weather text ends at the end of the field or where the first
+       lifted element starts; what follows an element is not weather text */
+    pdn_aprs__lifted f;
+    pdn_aprs__find_telemetry_dao(cb, &f);
+    return at == cb->n || (f.have_tlm && at == f.tstart) || (f.have_dao && at == f.dao_pos);
+}
+
+PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs_report *r, uint8_t dao[5])
+{
+    pdn_aprs__lifted f;
+    size_t tstart, tend, dao_pos;
+    int have_tlm, have_dao;
+    pdn_aprs__find_telemetry_dao(cb, &f);
+    have_tlm = f.have_tlm;
+    have_dao = f.have_dao;
+    tstart = f.tstart;
+    tend = f.tend;
+    dao_pos = f.dao_pos;
+    if (have_tlm) {
+        const uint8_t *t = cb->b + tstart + 1;
+        size_t pairs = (tend - tstart - 2) / 2, p;
+        memset(&r->telemetry, 0, sizeof r->telemetry);
+        r->has_telemetry = 1;
+        r->telemetry.sequence = (uint16_t)pdn_aprs__b91(t, 2);
+        for (p = 1; p < pairs && p <= PDN_APRS_MAX_ANALOG; p++)
+            r->telemetry.analog[r->telemetry.analog_count++] = (uint16_t)pdn_aprs__b91(t + 2 * p, 2);
+        if (pairs == 7) {
+            /* eight binary channels; bits 9-13 are reserved (APRS12c ch. 13) */
+            r->telemetry.has_digital = 1;
+            r->telemetry.digital = (uint16_t)(pdn_aprs__b91(t + 12, 2) & 0xFF);
+        }
+    }
+    if (have_dao)
+        memcpy(dao, cb->b + dao_pos, 5);
     cb->gaps = 0;
     if (have_dao && have_tlm && dao_pos > tstart) {
         pdn_aprs__cbuf_cut(cb, dao_pos, 5);

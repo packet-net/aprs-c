@@ -112,7 +112,7 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pdn_aprs.pc DESTINATION ${CMAKE_INSTAL
 
 # ---- tests, tools, examples
 
-set(PDN_APRS_TEST_SUPPORT tests/json.c tests/neutral.c)
+set(PDN_APRS_TEST_SUPPORT tests/json.c tests/neutral.c tests/recipe.c)
 
 if(PDN_APRS_BUILD_TESTS OR PDN_APRS_BUILD_TOOLS)
   add_library(pdn_aprs_test_support STATIC ${PDN_APRS_TEST_SUPPORT})

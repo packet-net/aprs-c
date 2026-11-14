@@ -62,11 +62,13 @@ PDN_APRS_API const char *pdn_aprs_version(void);
 /* ------------------------------------------------------------------------ */
 
 /*
- * The longest information field the decoder accepts, in bytes. APRS-IS lines
- * are at most 512 bytes and an AX.25 information field at most 256, so the
- * default holds anything valid. A longer field is refused with
- * PDN_APRS_ERR_TOO_LONG. It may be overridden with -D, but then identically
- * for every file that includes this header, since it sets struct sizes.
+ * The longest information field the decoder holds, in bytes: a capacity of this
+ * library. APRS-IS lines are at most 512 bytes and an AX.25 information field
+ * at most 256, so the default holds anything on the air. A longer field is not
+ * read some other way: the decode returns PDN_APRS_ERR_TOO_LONG with the data
+ * unrecognized and the error PDN_APRS_CODE_IMPLEMENTATION_LIMIT. It may be
+ * overridden with -D, but then identically for every file that includes this
+ * header, since it sets struct sizes.
  */
 #ifndef PDN_APRS_MAX_INFO
 #define PDN_APRS_MAX_INFO 512
@@ -74,6 +76,11 @@ PDN_APRS_API const char *pdn_aprs_version(void);
 #if PDN_APRS_MAX_INFO < 256 || PDN_APRS_MAX_INFO > 16384
 #error "PDN_APRS_MAX_INFO must be between 256 and 16384"
 #endif
+
+/* The longest information field an encoder or builder writes, in bytes (APRS12c
+   ch. 3, and the vectors' "an information field is at most 256 bytes"). A
+   decoder sets no limit of its own but PDN_APRS_MAX_INFO. */
+#define PDN_APRS_MAX_FIELD 256
 
 /* Room for any text taken from an information field, as UTF-8 plus a NUL
    (Latin-1 text can double in size when converted). */
@@ -83,8 +90,9 @@ PDN_APRS_API const char *pdn_aprs_version(void);
 #define PDN_APRS_NAME_SIZE 20
 /* Room for an address: up to 9 characters and a NUL. */
 #define PDN_APRS_ADDR_SIZE 10
-/* The most path entries a header can hold. AX.25 allows 8; APRS-IS adds
-   q-constructs. A TNC2 header with more is an invalid-header error. */
+/* The most path entries a header can hold, a capacity of this library. AX.25
+   allows 8; APRS-IS adds q-constructs. A TNC2 header with more is unusable,
+   with the error PDN_APRS_CODE_IMPLEMENTATION_LIMIT. */
 #ifndef PDN_APRS_MAX_PATH
 #define PDN_APRS_MAX_PATH 16
 #endif
@@ -101,12 +109,13 @@ PDN_APRS_API const char *pdn_aprs_version(void);
 /* Third-party packets nest at most this many deep (vectors interpretation
    "third-party packets nest at most four deep"). */
 #define PDN_APRS_MAX_THIRD_PARTY_DEPTH 4
-/* Station capabilities kept for one report; more is invalid-capabilities. */
+/* Station capabilities kept for one report, a capacity of this library; more is
+   unrecognized data with the error PDN_APRS_CODE_IMPLEMENTATION_LIMIT. */
 #define PDN_APRS_MAX_CAPABILITIES 64
 /* Unrecognised weather fields ("extra", a letter the spec does not define and
-   a number of under 24 characters) kept for one report. A ninth one ends the
-   weather fields: it and everything after it is the comment, which is a
-   weather-comment warning in a lenient decode and a rejection in a strict one. */
+   a number of under 24 characters) kept for one report, a capacity of this
+   library. A ninth one is unrecognized data with the error
+   PDN_APRS_CODE_IMPLEMENTATION_LIMIT, in a lenient decode and a strict one. */
 #define PDN_APRS_MAX_WEATHER_EXTRA 8
 
 /* ------------------------------------------------------------------------ */
@@ -118,10 +127,10 @@ PDN_APRS_API const char *pdn_aprs_version(void);
 #define PDN_APRS_OK 0
 #define PDN_APRS_ERR_ARGUMENT (-1) /* a NULL pointer or an argument out of range */
 #define PDN_APRS_ERR_HEADER (-2)   /* the header is unusable; the packet's diagnostics say why */
-#define PDN_APRS_ERR_TOO_LONG (-3) /* the information field is longer than PDN_APRS_MAX_INFO */
+#define PDN_APRS_ERR_TOO_LONG (-3) /* the packet needs more than a capacity holds (an information field over PDN_APRS_MAX_INFO, say): the data is unrecognized with PDN_APRS_CODE_IMPLEMENTATION_LIMIT */
 #define PDN_APRS_ERR_BUFFER (-4)   /* the output buffer is too small */
 #define PDN_APRS_ERR_REFUSED (-5)  /* the encoder refuses: APRS does not allow writing this data */
-#define PDN_APRS_ERR_UNSUPPORTED (-6) /* APRS allows it, but it does not fit this library's fixed buffers */
+#define PDN_APRS_ERR_UNSUPPORTED (-6) /* text that does not fit this library's fixed buffers (and so no information field could carry it) */
 
 /* A short plain-ASCII description of a result code. */
 PDN_APRS_API const char *pdn_aprs_strerror(int result);
@@ -204,15 +213,34 @@ typedef enum pdn_aprs_code {
     PDN_APRS_CODE_INVALID_ADDRESSEE_CHARACTERS,
     PDN_APRS_CODE_LETTER_GROUP_BULLETIN,
     PDN_APRS_CODE_FREE_TEXT_CAPABILITIES,
+    PDN_APRS_CODE_CONTROL_CHARACTER_IN_TEXT,
+    PDN_APRS_CODE_IMPLEMENTATION_LIMIT,
     PDN_APRS_CODE_COUNT
 } pdn_aprs_code;
+
+/* Which fixed capacity a decode met when it gave PDN_APRS_CODE_IMPLEMENTATION_LIMIT
+   (pdn_aprs_packet.limit). The names are the keys of limits.json in the
+   repository, which lists each capacity. */
+typedef enum pdn_aprs_limit {
+    PDN_APRS_LIMIT_NONE = 0,
+    PDN_APRS_LIMIT_INFORMATION_FIELD, /* PDN_APRS_MAX_INFO: the field, or a text in it */
+    PDN_APRS_LIMIT_PATH,              /* PDN_APRS_MAX_PATH: path entries, in the header or an inner one */
+    PDN_APRS_LIMIT_CAPABILITIES,      /* PDN_APRS_MAX_CAPABILITIES */
+    PDN_APRS_LIMIT_WEATHER_EXTRAS,    /* PDN_APRS_MAX_WEATHER_EXTRA */
+    PDN_APRS_LIMIT_WEATHER_EXTRA_VALUE /* an extra field's value of more than 23 characters */
+} pdn_aprs_limit;
+
+/* The limits.json key for a pdn_aprs_limit ("path"), or NULL for none or out of range. */
+PDN_APRS_API const char *pdn_aprs_limit_name(int limit);
 
 typedef struct pdn_aprs_diagnostic {
     uint8_t severity; /* pdn_aprs_severity */
     uint8_t code;     /* pdn_aprs_code */
 } pdn_aprs_diagnostic;
 
-/* The vectors' id for a code ("trailing-line-break"), or NULL if out of range. */
+/* The vectors' id for a code ("trailing-line-break"), or NULL if out of range.
+   control-character-in-text is tolerable (a byte below 0x20 or 0x7F in text
+   read as text); implementation-limit is an error and never tolerable. */
 PDN_APRS_API const char *pdn_aprs_code_name(int code);
 /* The code for a vectors' id, or PDN_APRS_CODE_NONE. */
 PDN_APRS_API int pdn_aprs_code_from_name(const char *name, size_t len);
@@ -1042,6 +1070,9 @@ typedef struct pdn_aprs_packet {
        way an unbounded decode gets here). pdn_aprs_write_tnc2() and
        pdn_aprs_write_ax25() refuse the packet. */
     uint8_t info_dropped;
+    /* Which capacity the diagnostic PDN_APRS_CODE_IMPLEMENTATION_LIMIT is
+       about (a pdn_aprs_limit), zero when there is none. */
+    uint8_t limit;
     pdn_aprs_data data;
     /* Every diagnostic, the header's first. */
     uint8_t diagnostic_count;
@@ -1073,10 +1104,9 @@ PDN_APRS_API int pdn_aprs_decode_info(const pdn_aprs_header *header, const void 
 /*
  * Decodes an information field as pdn_aprs_decode_info does, but keeps no
  * copy of it in the packet (info_len is 0), so it may be longer than
- * PDN_APRS_MAX_INFO. The encoder writes a field of any length (text received
- * as Latin-1 is written back as UTF-8, up to twice as long), and this reads
- * one back. Returns PDN_APRS_ERR_TOO_LONG, the data unrecognized, if a part
- * of the field is longer than the packet's data holds.
+ * PDN_APRS_MAX_INFO. Returns PDN_APRS_ERR_TOO_LONG, the data unrecognized
+ * with the error implementation-limit, if a part of the field is longer than
+ * the packet's data holds.
  */
 PDN_APRS_API int pdn_aprs_decode_info_unbounded(const pdn_aprs_header *header, const void *info, size_t len,
                                          const pdn_aprs_decode_options *options, pdn_aprs_packet *packet);
@@ -1164,7 +1194,8 @@ typedef enum pdn_aprs_refusal {
     PDN_APRS_REFUSAL_INVALID_CODE,
     PDN_APRS_REFUSAL_INVALID_NMEA,
     PDN_APRS_REFUSAL_NOT_ENCODABLE,
-    PDN_APRS_REFUSAL_DOES_NOT_READ_BACK
+    PDN_APRS_REFUSAL_DOES_NOT_READ_BACK,
+    PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG /* the whole field is over 256 bytes: judged last */
 } pdn_aprs_refusal;
 
 /* The vectors' id for a refusal code ("too-long"), or NULL if out of range or
@@ -1184,9 +1215,14 @@ typedef struct pdn_aprs_encoded {
 
 /*
  * Encodes data as an information field. Writes at most cap bytes and no NUL.
- * There is no limit on the length but cap: a field may be longer than
- * PDN_APRS_MAX_INFO (text received as Latin-1 is written back as UTF-8, up
- * to twice as long), and pdn_aprs_decode_info_unbounded reads one back. Returns the
+ * A field of more than PDN_APRS_MAX_FIELD (256) bytes is refused, whatever
+ * cap is, as PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG (PDN_APRS_REFUSAL_TOO_LONG
+ * now means only a field over its own limit, message text over 67
+ * characters and the like): it is the last check, after the read-back, and
+ * the bytes written count, number text
+ * and any delimiter included, and for third-party data the outermost field.
+ * Text with a byte below 0x20 or 0x7F is refused as
+ * PDN_APRS_REFUSAL_INVALID_CHARACTER. Returns the
  * length, or PDN_APRS_ERR_REFUSED (encoded->reason says why),
  * PDN_APRS_ERR_BUFFER (buf is too small to write and check the field) or
  * PDN_APRS_ERR_ARGUMENT; on failure buf holds nothing of use. options and
@@ -1315,9 +1351,13 @@ typedef struct pdn_aprs_mic_e_args {
     uint8_t has_speed;
     double speed_knots;
     uint8_t has_altitude;
-    double altitude_feet; /* written as a /A= */
+    /* An altitude goes in the Mic-E altitude bytes whichever unit it is given
+       in, rounded once to the nearest metre from the value given (1000 feet is
+       305 m); one outside -10000 to 743570 m is out of range. Give it in one
+       unit, not both. */
+    double altitude_feet;
     uint8_t has_altitude_m;
-    double altitude_m;    /* in the Mic-E altitude bytes, rounded to the metre; not with altitude_feet */
+    double altitude_m;
     /* A device type code: '>' or ']' (with device_suffix) or ' '; 0 for none,
        and then messaging picks the type code. */
     char type_code;
@@ -1410,13 +1450,17 @@ PDN_APRS_API int pdn_aprs_build_status(const pdn_aprs_station *station, const pd
    refused above), five analog values, eight bits ("01101001", B1 first, or
    NULL for "00000000") and an optional comment. empty[i] set leaves analog
    channel i empty (sent as nothing between the commas, its analog value
-   ignored); zero means present, so a zeroed struct has all five. */
+   ignored); zero means present, so a zeroed struct has all five. no_sequence
+   set says the program has no sequence number to give: the report is then
+   refused as missing-field (zero is a sequence number, so a zeroed struct has
+   one). */
 typedef struct pdn_aprs_telemetry_args {
     unsigned sequence;
     double analog[5];
     uint8_t empty[5];
     const char *bits;
     const char *comment;
+    uint8_t no_sequence;
 } pdn_aprs_telemetry_args;
 
 PDN_APRS_API int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const pdn_aprs_telemetry_args *args,
@@ -1458,7 +1502,10 @@ PDN_APRS_API int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_
    packet whose decode returned PDN_APRS_ERR_TOO_LONG has info_dropped set and
    is not written: PDN_APRS_ERR_TOO_LONG. A packet decoded with
    pdn_aprs_decode_info_unbounded keeps no information field, so only its
-   header is written (unless it returned TOO_LONG, as above). */
+   header is written (unless it returned TOO_LONG, as above). These pass
+   the information field through as received, even over 256 bytes: they write
+   a packet the program already holds and are not encoders, so they make no
+   size check. */
 PDN_APRS_API int pdn_aprs_write_tnc2(const pdn_aprs_packet *packet, char *buf, size_t cap);
 PDN_APRS_API int pdn_aprs_write_ax25(const pdn_aprs_packet *packet, void *buf, size_t cap);
 

@@ -331,12 +331,21 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_message(pdn_aprs__dctx *c)
             /* the structure (list and braces) before the text's encoding */
             if (brace && !pdn_aprs__tolerate(c, PDN_APRS_CODE_BRACE_IN_MESSAGE_TEXT))
                 return;
-            if (!pdn_aprs__check_text(c, t + 5, body_end - 5))
+            if (!pdn_aprs__check_encoding(c, t + 5, body_end - 5))
                 return;
             if (c->latin1 && (t[0] == 'P' || t[0] == 'U'))
                 decode_names(c, t + 5, body_end - 5, m);
             else if (c->latin1 && t[0] == 'B')
                 decode_bits(c, t + 5, body_end - 5, m);
+            /* names, units and the project title are text; coefficients and
+               bits are numbers (the title follows the eight bits and a comma) */
+            if (t[0] == 'P' || t[0] == 'U') {
+                if (!pdn_aprs__check_controls(c, t + 5, body_end - 5))
+                    return;
+            } else if (t[0] == 'B' && body_end - 5 > 9) {
+                if (!pdn_aprs__check_controls(c, t + 14, body_end - 14))
+                    return;
+            }
             d->type = t[0] == 'P'   ? PDN_APRS_TYPE_TELEMETRY_NAMES
                       : t[0] == 'U' ? PDN_APRS_TYPE_TELEMETRY_UNITS
                       : t[0] == 'E' ? PDN_APRS_TYPE_TELEMETRY_COEFFICIENTS

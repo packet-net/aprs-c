@@ -1,7 +1,8 @@
 /*
  * vectors.c - runs every check the aprs-vectors README defines, for every
  * case: lenient, strict, single-tolerance, re-encode (identical, or
- * canonical_info byte for byte), and the encode cases.
+ * canonical_info byte for byte), and the encode and build cases (a build case
+ * runs through the same recipe code as pdn_aprs_diffdump --build).
  * One test per check per case, named "<case id> [<check>]".
  *
  *   vectors <vectors dir> [known-differences file] [-v] [-k substring]
@@ -15,13 +16,14 @@
 #include "json.h"
 #include "neutral.h"
 #include "pdn_aprs.h"
+#include "recipe.h"
 
 static int verbose = 0;
-/* passes per kind of check: lenient, strict, tolerance, reencode, encode */
-static const char *const kinds[] = {"lenient", "strict", "tolerance", "reencode", "encode"};
-static int kind_passed[5];
+/* passes per kind of check: lenient, strict, tolerance, reencode, encode, build */
+static const char *const kinds[] = {"lenient", "strict", "tolerance", "reencode", "encode", "build"};
+static int kind_passed[6];
 static const char *filter = NULL;
-static int passed = 0, failed = 0, skipped = 0;
+static int passed = 0, failed = 0, skipped = 0, skipped_limit = 0;
 static char **known = NULL;
 static size_t known_count = 0;
 
@@ -80,7 +82,7 @@ static void report(const char *id, const char *check, int ok, const char *why, c
     if (ok) {
         int k;
         passed++;
-        for (k = 0; k < 5; k++)
+        for (k = 0; k < 6; k++)
             if (strncmp(check, kinds[k], strlen(kinds[k])) == 0)
                 kind_passed[k]++;
         if (verbose)
@@ -318,6 +320,120 @@ static int strict_matches(const jval *got, const jval *c, char *why, size_t whyl
     return result_matches(got, st, why, whylen);
 }
 
+
+/* ---- implementation limits: the library's capacity may stand in for a
+   reading only where the case really needs more than it holds ---- */
+
+/* The longest array under key, anywhere in v. */
+static size_t max_array(const jval *v, const char *key)
+{
+    size_t i, best = 0, k;
+    if (!v)
+        return 0;
+    if (v->t == J_OBJ) {
+        for (i = 0; i < v->count; i++) {
+            const jval *x = v->items[i];
+            if (strcmp(v->keys[i], key) == 0 && x->t == J_ARR && x->count > best)
+                best = x->count;
+            k = max_array(x, key);
+            if (k > best)
+                best = k;
+        }
+    } else if (v->t == J_ARR) {
+        for (i = 0; i < v->count; i++) {
+            k = max_array(v->items[i], key);
+            if (k > best)
+                best = k;
+        }
+    }
+    return best;
+}
+
+/* The longest "value" of an item of a weather "extra" list, anywhere in v. */
+static size_t max_extra_value(const jval *v)
+{
+    size_t i, j, best = 0, k;
+    if (!v)
+        return 0;
+    if (v->t == J_OBJ) {
+        for (i = 0; i < v->count; i++) {
+            const jval *x = v->items[i];
+            if (strcmp(v->keys[i], "extra") == 0 && x->t == J_ARR)
+                for (j = 0; j < x->count; j++) {
+                    const jval *s = json_get(x->items[j], "value");
+                    if (s && s->t == J_STR && s->len > best)
+                        best = s->len;
+                }
+            k = max_extra_value(x);
+            if (k > best)
+                best = k;
+        }
+    } else if (v->t == J_ARR) {
+        for (i = 0; i < v->count; i++) {
+            k = max_extra_value(v->items[i]);
+            if (k > best)
+                best = k;
+        }
+    }
+    return best;
+}
+
+/* The longest string anywhere in v. */
+static size_t max_string(const jval *v)
+{
+    size_t i, best = 0, k;
+    if (!v)
+        return 0;
+    if (v->t == J_STR)
+        return v->len;
+    if (v->t == J_OBJ || v->t == J_ARR)
+        for (i = 0; i < v->count; i++) {
+            k = max_string(v->items[i]);
+            if (k > best)
+                best = k;
+        }
+    return best;
+}
+
+/* 1 if the case needs more than the library's capacity named by limit
+   (pdn_aprs_limit) holds, so that a result of implementation-limit is the
+   library's own and not a failure to read what it could. For a decode case
+   in is the input; for a build case it is NULL. */
+static int needs_more_than(const jval *c, const input_t *in, int limit)
+{
+    const jval *expect = json_get(c, "expect");
+    switch (limit) {
+    case PDN_APRS_LIMIT_INFORMATION_FIELD:
+        if (in) {
+            size_t len = in->len > in->info_at ? in->len - in->info_at : 0;
+            if (len >= 2 && in->bytes[in->info_at + len - 2] == '\r' && in->bytes[in->info_at + len - 1] == '\n')
+                len -= 2;
+            else if (len >= 1 && (in->bytes[in->info_at + len - 1] == '\r' || in->bytes[in->info_at + len - 1] == '\n'))
+                len--;
+            return len > PDN_APRS_MAX_INFO;
+        }
+        return max_string(json_get(c, "input")) > PDN_APRS_MAX_INFO;
+    case PDN_APRS_LIMIT_PATH: {
+        size_t commas = 0, i;
+        if (in)
+            for (i = 0; i < in->len && i < in->info_at && in->bytes[i] != ':'; i++)
+                commas += in->bytes[i] == ',';
+        return commas > PDN_APRS_MAX_PATH || max_array(expect, "path") > PDN_APRS_MAX_PATH ||
+               max_array(json_get(c, "input"), "path") > PDN_APRS_MAX_PATH;
+    }
+    case PDN_APRS_LIMIT_CAPABILITIES:
+        return max_array(expect, "capabilities") > PDN_APRS_MAX_CAPABILITIES ||
+               max_array(json_get(c, "input"), "capabilities") > PDN_APRS_MAX_CAPABILITIES;
+    case PDN_APRS_LIMIT_WEATHER_EXTRAS:
+        return max_array(expect, "extra") > PDN_APRS_MAX_WEATHER_EXTRA ||
+               max_array(json_get(c, "input"), "extra") > PDN_APRS_MAX_WEATHER_EXTRA;
+    case PDN_APRS_LIMIT_WEATHER_EXTRA_VALUE:
+        return max_extra_value(expect) >= sizeof((pdn_aprs_weather_extra *)0)->value;
+    default:
+        return 0;
+    }
+}
+
 /* ---- checks ---- */
 
 static const pdn_aprs_device_table *devices(void) { return pdn_aprs_devices(); }
@@ -343,6 +459,27 @@ static void check_decode_case(const jval *c, const char *id)
     /* lenient */
     rc = decode(&in, &lenient, &pkt);
     got = neutral_result(&pkt, rc, &lenient);
+    /* a packet beyond this library's fixed capacity says so, and the case is
+       skipped, as one the data model cannot hold is (README, Implementation
+       limits) */
+    if (has_diag(json_get(got, "header_error"), "error:implementation-limit") ||
+        has_diag(json_get(got, "diagnostics"), "error:implementation-limit")) {
+        int lim = neutral_result_limit(&pkt, &lenient);
+        /* ... but only where the case really needs more than the capacity:
+           a claim of a limit for input within it is a failure, not a skip */
+        if (!lim || !needs_more_than(c, &in, lim)) {
+            snprintf(why, sizeof why, "implementation-limit (%s) for input within the library's capacity",
+                     lim ? pdn_aprs_limit_name(lim) : "no limit named");
+            report(id, "lenient", 0, why, got, NULL);
+            json_free(got);
+            return;
+        }
+        skipped_limit++;
+        if (verbose)
+            printf("skip %s: implementation-limit (%s)\n", id, pdn_aprs_limit_name(lim));
+        json_free(got);
+        return;
+    }
     ok = result_matches(got, expect, why, sizeof why);
     if (ok && json_get(expect, "device")) {
         pdn_aprs_device dev;
@@ -477,14 +614,17 @@ static void check_encode_case(const jval *c, const char *id)
     char err[128], why[512];
     uint8_t buf[2048];
     pdn_aprs_encoded enc;
+    pdn_aprs_encode_options eo;
     int n, conv;
     memset(&enc, 0, sizeof enc);
+    /* the dump tool encodes with the device table, as a decoder reads with it */
+    eo.devices = devices();
     conv = neutral_to_data(json_get(in, "encode"), &d, err, sizeof err);
     if (conv == 0) {
         report(id, "encode", 0, err, NULL, NULL);
         return;
     }
-    n = conv < 0 ? PDN_APRS_ERR_REFUSED : neutral_encode(&d, NULL, buf, sizeof buf, &enc);
+    n = conv < 0 ? PDN_APRS_ERR_REFUSED : neutral_encode(&d, &eo, buf, sizeof buf, &enc);
     if (json_get(expect, "refused")) {
         const char *wcode = json_gets(expect, "refusal");
         const char *gcode = NULL;
@@ -514,12 +654,52 @@ static void check_encode_case(const jval *c, const char *id)
     }
 }
 
+static void check_build_case(const jval *c, const char *id)
+{
+    jval *expect = json_get(c, "expect");
+    uint8_t buf[2048];
+    recipe_result res;
+    char why[512];
+    if (recipe_build(json_get(json_get(c, "input"), "build"), buf, sizeof buf - 1, &res) == RECIPE_LIMIT) {
+        /* the library's fixed capacity, not a reading (README Implementation
+           limits), where the recipe really needs more than it holds */
+        if (!needs_more_than(c, NULL, res.limit)) {
+            snprintf(why, sizeof why, "implementation-limit (%s) for input within the library's capacity",
+                     pdn_aprs_limit_name(res.limit) ? pdn_aprs_limit_name(res.limit) : "no limit named");
+            report(id, "build", 0, why, NULL, NULL);
+            return;
+        }
+        skipped_limit++;
+        return;
+    }
+    if (json_get(expect, "refused")) {
+        const char *wcode = json_gets(expect, "refusal");
+        if (res.kind != RECIPE_REFUSED)
+            snprintf(why, sizeof why, res.kind == RECIPE_BUILT ? "built %s" : "unsupported: %s",
+                     res.kind == RECIPE_BUILT ? ascii(buf, (int)res.len) : (res.reason ? res.reason : ""));
+        else
+            snprintf(why, sizeof why, "refused as %s, want %s", res.refusal ? res.refusal : "(none)",
+                     wcode ? wcode : "-");
+        report(id, "build", res.kind == RECIPE_REFUSED && (!wcode || (res.refusal && strcmp(res.refusal, wcode) == 0)),
+               why, NULL, NULL);
+    } else {
+        const char *want = json_gets(expect, "tnc2");
+        int ok = res.kind == RECIPE_BUILT && want && strlen(want) == res.len && memcmp(buf, want, res.len) == 0;
+        if (res.kind == RECIPE_BUILT)
+            snprintf(why, sizeof why, "built %s, want %s", ascii(buf, (int)res.len), want ? want : "?");
+        else
+            snprintf(why, sizeof why, "%s: %s", res.kind == RECIPE_REFUSED ? "refused" : "unsupported",
+                     res.reason ? res.reason : "");
+        report(id, "build", ok, why, NULL, NULL);
+    }
+}
+
 int main(int argc, char **argv)
 {
     static const char *const files[] = {"envelope",  "position",          "mic-e",       "object-item",
                                         "message",   "weather-telemetry", "status-other", "deviations",
                                         "encode",    "corpus-findings",   "differential", "corpus",
-                                        "precedence"};
+                                        "precedence", "builder"};
     const char *dir = NULL;
     size_t f;
     int i;
@@ -560,15 +740,18 @@ int main(int argc, char **argv)
             const char *id = json_gets(c, "id");
             if (filter && !strstr(id, filter))
                 continue;
-            if (json_get(json_get(c, "input"), "encode"))
+            if (json_get(json_get(c, "input"), "build"))
+                check_build_case(c, id);
+            else if (json_get(json_get(c, "input"), "encode"))
                 check_encode_case(c, id);
             else
                 check_decode_case(c, id);
         }
         json_free(doc);
     }
-    printf("passed by check: lenient %d, strict %d, single tolerance %d, re-encode %d, encode %d\n",
-           kind_passed[0], kind_passed[1], kind_passed[2], kind_passed[3], kind_passed[4]);
-    printf("%d passed, %d failed, %d skipped (known differences)\n", passed, failed, skipped);
+    printf("passed by check: lenient %d, strict %d, single tolerance %d, re-encode %d, encode %d, build %d\n",
+           kind_passed[0], kind_passed[1], kind_passed[2], kind_passed[3], kind_passed[4], kind_passed[5]);
+    printf("%d passed, %d failed, %d skipped (known differences), %d cases skipped (implementation limit)\n", passed,
+           failed, skipped, skipped_limit);
     return failed ? 1 : 0;
 }
