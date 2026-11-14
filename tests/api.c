@@ -1046,7 +1046,21 @@ static void test_refusal_codes(void)
     d.type = PDN_APRS_TYPE_TELEMETRY;
     d.as.telemetry.analog_count = 5;
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
-    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_MALFORMED);
+    /* no sequence is a missing field (revision G) */
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_MISSING_FIELD);
+    /* the 256 bytes of the field are judged last: a record with another fault gets that fault's code */
+    memset(d.as.telemetry.comment, 'x', 300);
+    d.as.telemetry.comment_len = 300;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_MISSING_FIELD);
+    memcpy(d.as.telemetry.sequence, "001", 4);
+    memcpy(d.as.telemetry.bits, "00000000", 9);
+    d.as.telemetry.has_bits = 1;
+    n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+    /* ... also into a buffer too small to hold the field */
+    n = pdn_aprs_encode_info(&d, NULL, line, 32, &enc);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
 
     /* a 1-character addressee with over-long text reads no further than it is */
     {
@@ -1199,7 +1213,7 @@ static void test_refusal_codes(void)
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
     CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM);
 
-    /* a Mic-E altitude whose first byte reads as a type code: the status text reads as a field */
+    /* a Mic-E altitude whose first byte reads as a type code, with no /A= to hold it: no form (revision B) */
     {
         static const char line_in[] = "LA7DHA-8>U9UR55,LD1OE*,WIDE2-1,qAS,LB1HG-10:`&>]l#MPY/>\"3}";
         pdn_aprs_encode_options opt;
@@ -1207,7 +1221,7 @@ static void test_refusal_codes(void)
         opt.devices = pdn_aprs_devices();
         CHECK(decode(line_in) == PDN_APRS_OK && pkt.data.type == PDN_APRS_TYPE_MIC_E);
         n = pdn_aprs_encode_info(&pkt.data, &opt, line, sizeof line, &enc);
-        CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD);
+        CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM);
     }
 
     /* a data type with no writer, and a bare NULL, which is no refusal */

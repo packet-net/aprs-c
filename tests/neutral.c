@@ -572,6 +572,9 @@ int neutral_limit(void)
     return last_limit;
 }
 
+static void note_pending(int code, const char *why);
+static int int_in(conv *cv, const jval *o, const char *k, double lo, double hi, long *out);
+
 /* Every key of o is one of keys (NULL-terminated). */
 static void keys_only(conv *cv, const jval *o, const char *const *keys)
 {
@@ -601,6 +604,21 @@ static int num_in(conv *cv, const jval *o, const char *k, double *out)
         return cannot(cv, "is not a number", k);
     *out = v->num;
     return 1;
+}
+
+/* A whole number for a field whose type is narrower than the range APRS
+   allows: one outside the type is out of the field's range, which the
+   encoder would refuse as value-out-of-range, so it is noted and the field
+   left 0. */
+static int int_ranged(conv *cv, const jval *o, const char *k, double lo, double hi, long *out)
+{
+    jval *v = json_get(o, k);
+    *out = 0;
+    if (v && v->t == J_NUM && v->num == floor(v->num) && (v->num < lo || v->num > hi)) {
+        note_pending(PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "out of range");
+        return 1;
+    }
+    return int_in(cv, o, k, lo, hi, out);
 }
 
 /* A whole number the C field's type holds, lo to hi. */
@@ -645,6 +663,22 @@ static int str_in(conv *cv, const jval *o, const char *k, char *dst, size_t cap,
     if (len)
         *len = (uint16_t)v->len;
     return 1;
+}
+
+/* Text for a small fixed field whose rule names a refusal when the text does
+   not fit: a timestamp, the telemetry bits. The text is kept cut to the field
+   and the refusal noted, so the encoder's own faults are still found and the
+   first in the README's order is named. */
+static int str_fixed(conv *cv, const jval *o, const char *k, char *dst, size_t cap, int code, const char *why)
+{
+    jval *v = json_get(o, k);
+    if (v && v->t == J_STR && v->len >= cap && cap < PDN_APRS_TEXT_SIZE) {
+        memcpy(dst, v->str, cap - 1);
+        dst[cap - 1] = 0;
+        note_pending(code, why);
+        return 1;
+    }
+    return str_in(cv, o, k, dst, cap, NULL);
 }
 
 /* One character: a string of exactly one byte. */
@@ -701,7 +735,17 @@ static int symbol_in(conv *cv, const jval *o, pdn_aprs_symbol *s)
     jval *v = json_get(o, "symbol");
     if (!v)
         return 0;
-    if (v->t != J_STR || latin1_bytes(v, b, 2) != 2)
+    if (v->t == J_STR && v->len == 0)
+        return 0; /* absent text is empty text */
+    if (v->t == J_STR && latin1_bytes(v, b, 2) != 2) {
+        /* a symbol is a table and a code: this is neither, however it is
+           cut (a code no symbol has is what the encoder refuses as one) */
+        s->table = '/';
+        s->code = 1;
+        note_pending(PDN_APRS_REFUSAL_INVALID_SYMBOL, "a symbol is a table character and a code character");
+        return 1;
+    }
+    if (v->t != J_STR)
         return cannot(cv, "is not two characters U+0000-U+00FF", "symbol");
     s->table = (char)b[0];
     s->code = (char)b[1];
@@ -827,13 +871,13 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
         static const char *const bk[] = {"bearing_degrees", "number", "range", "quality", NULL};
         keys_only(cv, v, bk);
         r->has_df_bearing = 1;
-        int_in(cv, v, "bearing_degrees", 0, 65535, &n);
+        int_ranged(cv, v, "bearing_degrees", 0, 65535, &n);
         r->df_bearing.bearing_degrees = (uint16_t)n;
         int_in(cv, v, "number", 0, 255, &n);
         r->df_bearing.number = (uint8_t)n;
         int_in(cv, v, "range", 0, 255, &n);
         r->df_bearing.range = (uint8_t)n;
-        int_in(cv, v, "quality", 0, 255, &n);
+        int_ranged(cv, v, "quality", 0, 255, &n);
         r->df_bearing.quality = (uint8_t)n;
     }
     if ((v = json_get(o, "storm")) != NULL) {
@@ -917,7 +961,7 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
     }
     str_in(cv, o, "signpost", r->signpost, sizeof r->signpost, NULL);
     str_in(cv, o, "comment", r->comment, sizeof r->comment, &r->comment_len);
-    str_in(cv, o, "timestamp", r->timestamp, sizeof r->timestamp, NULL);
+    str_fixed(cv, o, "timestamp", r->timestamp, sizeof r->timestamp, PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "a timestamp is 7 or 8 characters");
     r->messaging = (uint8_t)flag_in(cv, o, "messaging");
     str_in(cv, o, "name", r->name, sizeof r->name, NULL);
     r->killed = (uint8_t)flag_in(cv, o, "killed");
@@ -1032,7 +1076,11 @@ int neutral_encode(const pdn_aprs_data *d, const pdn_aprs_encode_options *o, voi
     pending_refusal = 0;
     if (!code)
         return rc;
-    if (rc != PDN_APRS_ERR_REFUSED || neutral_refusal_rank(code) < neutral_refusal_rank(enc->refusal)) {
+    /* the 256 bytes of the field are judged only for a record with no other
+       fault, and this one has the noted fault (the encoder's reason text) */
+    if (rc != PDN_APRS_ERR_REFUSED || neutral_refusal_rank(code) < neutral_refusal_rank(enc->refusal) ||
+        (enc->refusal == PDN_APRS_REFUSAL_TOO_LONG && enc->reason &&
+         strcmp(enc->reason, "an information field is at most 256 bytes") == 0)) {
         enc->refusal = code;
         enc->reason = why;
     }
@@ -1134,8 +1182,11 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         }
         if (rc != 1 && !(rc == -1 && header_fault)) {
             free(inner);
-            if (rc == 0)
+            if (rc == 0) {
+                /* the inner data's own fault of capacity, if it was that */
+                cv->limit = last_limit;
                 cv->bad = 1;
+            }
             return rc;
         }
         i = rc == 1 ? neutral_encode(inner, NULL, line + 2 * PDN_APRS_MAX_INFO, 2 * PDN_APRS_MAX_INFO, &enc)
@@ -1277,7 +1328,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
                     m->coefficient[m->count++].value = a->items[k]->num;
                 }
         } else {
-            str_in(cv, j, "bits", m->bits, sizeof m->bits, NULL);
+            str_fixed(cv, j, "bits", m->bits, sizeof m->bits, PDN_APRS_REFUSAL_MALFORMED, "telemetry bits are eight 0 or 1 characters");
             str_in(cv, j, "project", m->text, sizeof m->text, &m->project_len);
         }
         break;
@@ -1296,7 +1347,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         pdn_aprs_status *s = &d->as.status;
         jval *b;
         keys_only(cv, j, keys);
-        str_in(cv, j, "timestamp", s->timestamp, sizeof s->timestamp, NULL);
+        str_fixed(cv, j, "timestamp", s->timestamp, sizeof s->timestamp, PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "a status timestamp is DHM zulu");
         str_in(cv, j, "locator", s->locator, sizeof s->locator, NULL);
         symbol_in(cv, j, &s->symbol);
         if ((b = json_get(j, "beam")) != NULL) {
@@ -1329,14 +1380,14 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
             tl->analog[k].value = a->items[k]->num;
             tl->analog_count = (uint8_t)(k + 1);
         }
-        tl->has_bits = (uint8_t)str_in(cv, j, "bits", tl->bits, sizeof tl->bits, NULL);
+        tl->has_bits = (uint8_t)str_fixed(cv, j, "bits", tl->bits, sizeof tl->bits, PDN_APRS_REFUSAL_MALFORMED, "telemetry bits are eight 0 or 1 characters");
         str_in(cv, j, "comment", tl->comment, sizeof tl->comment, &tl->comment_len);
         break;
     }
     case PDN_APRS_TYPE_WEATHER: {
         static const char *const keys[] = {"type", "timestamp", "weather", "comment", NULL};
         keys_only(cv, j, keys);
-        str_in(cv, j, "timestamp", d->as.weather.timestamp, sizeof d->as.weather.timestamp, NULL);
+        str_fixed(cv, j, "timestamp", d->as.weather.timestamp, sizeof d->as.weather.timestamp, PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "a timestamp is 8 characters");
         if (json_get(j, "weather"))
             weather_in(cv, json_get(j, "weather"), &d->as.weather.weather);
         str_in(cv, j, "comment", d->as.weather.comment, sizeof d->as.weather.comment, &d->as.weather.comment_len);
@@ -1505,9 +1556,9 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
     case PDN_APRS_TYPE_AGRELO_DF: {
         static const char *const keys[] = {"type", "bearing_degrees", "quality", NULL};
         keys_only(cv, j, keys);
-        int_in(cv, j, "bearing_degrees", 0, 65535, &n);
+        int_ranged(cv, j, "bearing_degrees", 0, 65535, &n);
         d->as.agrelo.bearing_degrees = (uint16_t)n;
-        int_in(cv, j, "quality", 0, 255, &n);
+        int_ranged(cv, j, "quality", 0, 255, &n);
         d->as.agrelo.quality = (uint8_t)n;
         break;
     }

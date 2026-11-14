@@ -94,14 +94,20 @@ static int unit_ok(const uint8_t *s, size_t n)
 }
 
 /* 1 if the bytes at s[at] start a defined weather field the fields would go
-   on to read: a letter APRS12c defines, not already read, with a value. Used
+   on to read: a letter APRS12c defines, not already read (the run's own
+   field, own, is read), with a value. Used
    to tell a value that runs on by many digits (a broken sensor) from a
    comment that starts with digits. */
-static int field_follows(const uint8_t *s, size_t n, size_t at, int mode, int wind_known, const int *present)
+static int field_follows(const uint8_t *s, size_t n, size_t at, int mode, int wind_known, const int *present_in, int own)
 {
+    int present[PDN_APRS_WX_COUNT];
     uint8_t L;
     size_t avail, d;
     int snow = 0, idx, width;
+    /* the run's own field counts as read (its letter after the run is not a
+       field to carry on with, and an s after an s is snowfall) */
+    memcpy(present, present_in, sizeof present);
+    present[own] = 1;
     if (at >= n)
         return 0;
     L = s[at];
@@ -241,7 +247,7 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
             if (d == lead)
                 break;
             if (d >= (size_t)width + 2) {
-                if (i + 1 + d == n || field_follows(s, n, i + 1 + d, mode, wind_known, present)) {
+                if (i + 1 + d == n || field_follows(s, n, i + 1 + d, mode, wind_known, present, idx)) {
                     /* a value that runs on: out of range, dropped, and the
                        fields carry on after the run */
                     used = d;

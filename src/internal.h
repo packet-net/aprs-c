@@ -20,6 +20,12 @@
 #endif
 
 #define PDN_APRS__UNUSED(x) ((void)(x))
+
+/* The reason given when an information field is over 256 bytes and nothing
+   else is wrong. The size is judged last, so a caller that has noted a fault
+   of its own (the builder, the tests' neutral conversion) recognises this
+   refusal by it and lets its own fault stand. */
+#define PDN_APRS__SIZE_REASON "an information field is at most 256 bytes"
 #define PDN_APRS__KNOTS_TO_MPH (1852.0 / 1609.344)
 
 /* ---- ASCII classification and conversion (never locale-dependent) ---- */

@@ -138,6 +138,12 @@ static void note_text(pending *p, const char *s, int list)
         note(p, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the text cannot contain , or { or a control character");
 }
 
+/* 1 if the encoder refused only for the 256 bytes of the information field */
+static int size_refusal(const pdn_aprs_encoded *r)
+{
+    return r->refusal == PDN_APRS_REFUSAL_TOO_LONG && r->reason && strcmp(r->reason, PDN_APRS__SIZE_REASON) == 0;
+}
+
 static int build_with(const pdn_aprs_station *station, const pdn_aprs_data *d, void *buf, size_t cap,
                       pdn_aprs_encoded *result, const pending *p)
 {
@@ -148,7 +154,9 @@ static int build_with(const pdn_aprs_station *station, const pdn_aprs_data *d, v
     rc = pdn_aprs_build(station, d, buf, cap, result);
     if (!p->code || (rc < 0 && rc != PDN_APRS_ERR_REFUSED && rc != PDN_APRS_ERR_BUFFER))
         return rc;
-    if (rc == PDN_APRS_ERR_REFUSED && pdn_aprs__refusal_rank(result->refusal) <= pdn_aprs__refusal_rank(p->code))
+    /* the size of a record with a fault is not judged: the fault stands */
+    if (rc == PDN_APRS_ERR_REFUSED && !size_refusal(result) &&
+        pdn_aprs__refusal_rank(result->refusal) <= pdn_aprs__refusal_rank(p->code))
         return rc;
     result->len = 0;
     result->destination[0] = 0;
@@ -370,7 +378,7 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
     if (twice && (rc >= 0 || rc == PDN_APRS_ERR_BUFFER ||
                   (rc == PDN_APRS_ERR_REFUSED && result &&
                    (result->refusal == PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD ||
-                    result->refusal == PDN_APRS_REFUSAL_DOES_NOT_READ_BACK)))) {
+                    result->refusal == PDN_APRS_REFUSAL_DOES_NOT_READ_BACK || size_refusal(result))))) {
         if (result) {
             result->len = 0;
             result->destination[0] = 0;
@@ -609,8 +617,6 @@ int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const pdn_aprs_tel
         return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     /* a program's number has a three-digit form up to 999, and is refused
        above it, not wrapped (ruling B6) */
-    if (!a->no_sequence && a->sequence > 999)
-        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "a telemetry sequence number is 0 to 999");
     memset(&d, 0, sizeof d);
     d.type = PDN_APRS_TYPE_TELEMETRY;
     /* no sequence is missing-field, noted here and folded into the encoder's
@@ -619,6 +625,11 @@ int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const pdn_aprs_tel
         unsigned sq = a->no_sequence ? 0 : a->sequence;
         if (a->no_sequence)
             note(&pend, PDN_APRS_REFUSAL_MISSING_FIELD, "a telemetry report needs a sequence number");
+        else if (sq > 999) {
+            /* noted, so a fault earlier in the order (NaN in a channel) is named first */
+            note(&pend, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "a telemetry sequence number is 0 to 999");
+            sq = 0;
+        }
         t->sequence[0] = (char)('0' + sq / 100);
         t->sequence[1] = (char)('0' + sq / 10 % 10);
         t->sequence[2] = (char)('0' + sq % 10);

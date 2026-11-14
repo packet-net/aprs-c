@@ -1,7 +1,8 @@
 /*
  * vectors.c - runs every check the aprs-vectors README defines, for every
  * case: lenient, strict, single-tolerance, re-encode (identical, or
- * canonical_info byte for byte), and the encode cases.
+ * canonical_info byte for byte), and the encode and build cases (a build case
+ * runs through the same recipe code as pdn_aprs_diffdump --build).
  * One test per check per case, named "<case id> [<check>]".
  *
  *   vectors <vectors dir> [known-differences file] [-v] [-k substring]
@@ -15,11 +16,12 @@
 #include "json.h"
 #include "neutral.h"
 #include "pdn_aprs.h"
+#include "recipe.h"
 
 static int verbose = 0;
-/* passes per kind of check: lenient, strict, tolerance, reencode, encode */
-static const char *const kinds[] = {"lenient", "strict", "tolerance", "reencode", "encode"};
-static int kind_passed[5];
+/* passes per kind of check: lenient, strict, tolerance, reencode, encode, build */
+static const char *const kinds[] = {"lenient", "strict", "tolerance", "reencode", "encode", "build"};
+static int kind_passed[6];
 static const char *filter = NULL;
 static int passed = 0, failed = 0, skipped = 0, skipped_limit = 0;
 static char **known = NULL;
@@ -80,7 +82,7 @@ static void report(const char *id, const char *check, int ok, const char *why, c
     if (ok) {
         int k;
         passed++;
-        for (k = 0; k < 5; k++)
+        for (k = 0; k < 6; k++)
             if (strncmp(check, kinds[k], strlen(kinds[k])) == 0)
                 kind_passed[k]++;
         if (verbose)
@@ -525,12 +527,45 @@ static void check_encode_case(const jval *c, const char *id)
     }
 }
 
+static void check_build_case(const jval *c, const char *id)
+{
+    jval *expect = json_get(c, "expect");
+    uint8_t buf[2048];
+    recipe_result res;
+    char why[512];
+    if (recipe_build(json_get(json_get(c, "input"), "build"), buf, sizeof buf - 1, &res) == RECIPE_LIMIT) {
+        /* the library's fixed capacity, not a reading (README Implementation limits) */
+        skipped_limit++;
+        return;
+    }
+    if (json_get(expect, "refused")) {
+        const char *wcode = json_gets(expect, "refusal");
+        if (res.kind != RECIPE_REFUSED)
+            snprintf(why, sizeof why, res.kind == RECIPE_BUILT ? "built %s" : "unsupported: %s",
+                     res.kind == RECIPE_BUILT ? ascii(buf, (int)res.len) : (res.reason ? res.reason : ""));
+        else
+            snprintf(why, sizeof why, "refused as %s, want %s", res.refusal ? res.refusal : "(none)",
+                     wcode ? wcode : "-");
+        report(id, "build", res.kind == RECIPE_REFUSED && (!wcode || (res.refusal && strcmp(res.refusal, wcode) == 0)),
+               why, NULL, NULL);
+    } else {
+        const char *want = json_gets(expect, "tnc2");
+        int ok = res.kind == RECIPE_BUILT && want && strlen(want) == res.len && memcmp(buf, want, res.len) == 0;
+        if (res.kind == RECIPE_BUILT)
+            snprintf(why, sizeof why, "built %s, want %s", ascii(buf, (int)res.len), want ? want : "?");
+        else
+            snprintf(why, sizeof why, "%s: %s", res.kind == RECIPE_REFUSED ? "refused" : "unsupported",
+                     res.reason ? res.reason : "");
+        report(id, "build", ok, why, NULL, NULL);
+    }
+}
+
 int main(int argc, char **argv)
 {
     static const char *const files[] = {"envelope",  "position",          "mic-e",       "object-item",
                                         "message",   "weather-telemetry", "status-other", "deviations",
                                         "encode",    "corpus-findings",   "differential", "corpus",
-                                        "precedence"};
+                                        "precedence", "builder"};
     const char *dir = NULL;
     size_t f;
     int i;
@@ -571,15 +606,17 @@ int main(int argc, char **argv)
             const char *id = json_gets(c, "id");
             if (filter && !strstr(id, filter))
                 continue;
-            if (json_get(json_get(c, "input"), "encode"))
+            if (json_get(json_get(c, "input"), "build"))
+                check_build_case(c, id);
+            else if (json_get(json_get(c, "input"), "encode"))
                 check_encode_case(c, id);
             else
                 check_decode_case(c, id);
         }
         json_free(doc);
     }
-    printf("passed by check: lenient %d, strict %d, single tolerance %d, re-encode %d, encode %d\n",
-           kind_passed[0], kind_passed[1], kind_passed[2], kind_passed[3], kind_passed[4]);
+    printf("passed by check: lenient %d, strict %d, single tolerance %d, re-encode %d, encode %d, build %d\n",
+           kind_passed[0], kind_passed[1], kind_passed[2], kind_passed[3], kind_passed[4], kind_passed[5]);
     printf("%d passed, %d failed, %d skipped (known differences), %d cases skipped (implementation limit)\n", passed,
            failed, skipped, skipped_limit);
     return failed ? 1 : 0;
