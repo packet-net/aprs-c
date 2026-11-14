@@ -103,7 +103,10 @@ PDN_APRS_API const char *pdn_aprs_version(void);
 #define PDN_APRS_MAX_THIRD_PARTY_DEPTH 4
 /* Station capabilities kept for one report; more is invalid-capabilities. */
 #define PDN_APRS_MAX_CAPABILITIES 64
-/* Unrecognised weather fields ("extra") kept for one report. */
+/* Unrecognised weather fields ("extra", a letter the spec does not define and
+   a number of under 24 characters) kept for one report. A ninth one ends the
+   weather fields: it and everything after it is the comment, which is a
+   weather-comment warning in a lenient decode and a rejection in a strict one. */
 #define PDN_APRS_MAX_WEATHER_EXTRA 8
 
 /* ------------------------------------------------------------------------ */
@@ -1032,7 +1035,13 @@ typedef struct pdn_aprs_packet {
     pdn_aprs_header header;
     /* The information field as received, including any trailing CR/LF. */
     uint16_t info_len;
-    uint8_t info[PDN_APRS_MAX_INFO];
+    uint8_t info[PDN_APRS_MAX_INFO + 2];
+    /* 1 whenever the decode returned PDN_APRS_ERR_TOO_LONG: the information
+       field was longer than PDN_APRS_MAX_INFO (not counting one trailing
+       line end), or a part of it was longer than the data holds (the only
+       way an unbounded decode gets here). pdn_aprs_write_tnc2() and
+       pdn_aprs_write_ax25() refuse the packet. */
+    uint8_t info_dropped;
     pdn_aprs_data data;
     /* Every diagnostic, the header's first. */
     uint8_t diagnostic_count;
@@ -1444,8 +1453,12 @@ PDN_APRS_API int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_
    PDN_APRS_ERR_HEADER if the packet's header was unusable,
    PDN_APRS_ERR_REFUSED for an address the format cannot carry as sent (an
    AX.25 frame holds no SSID with a leading zero, for one), or
-   PDN_APRS_ERR_BUFFER. A packet decoded with pdn_aprs_decode_info_unbounded
-   keeps no information field, so only the header is written. */
+   PDN_APRS_ERR_BUFFER, or PDN_APRS_ERR_ARGUMENT for a length or path count
+   that does not fit its array, or a fixed string in the header with no NUL. A
+   packet whose decode returned PDN_APRS_ERR_TOO_LONG has info_dropped set and
+   is not written: PDN_APRS_ERR_TOO_LONG. A packet decoded with
+   pdn_aprs_decode_info_unbounded keeps no information field, so only its
+   header is written (unless it returned TOO_LONG, as above). */
 PDN_APRS_API int pdn_aprs_write_tnc2(const pdn_aprs_packet *packet, char *buf, size_t cap);
 PDN_APRS_API int pdn_aprs_write_ax25(const pdn_aprs_packet *packet, void *buf, size_t cap);
 

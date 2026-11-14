@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+Fixes from the November 2026 review. No decode result changes except for the line end in the second item.
+
+- Memory safety: the encoder no longer trusts the length, count and offset fields of a caller-filled `pdn_aprs_data`. A text length, `count`, token or value offset or length, `extra_count`, `data_len` or third-party `len` that does not fit its array, and a header `path_count` over `PDN_APRS_MAX_PATH`, now make the encode and build calls return `PDN_APRS_ERR_ARGUMENT` instead of reading past the array (the user-defined and third-party lengths and the capability and weather counts were clamped silently before). The capability and telemetry metadata accessors return NULL for an offset out of range. New tests, a hostile-length case in the libFuzzer target, and the existing ASan/UBSan job cover it.
+- Memory safety: a fixed char array in a caller-filled struct that the encoder reads as a C string (addresses and path calls in the header, and in the data the addressee, message and reply-ack IDs, name, timestamp, locator, device suffix, signpost, query type, target, sequence, bit strings, weather unit and extra values, number texts, NMEA time and waypoint) must now hold a NUL, or the encode call returns `PDN_APRS_ERR_ARGUMENT` instead of reading past the array; `pdn_aprs_write_tnc2()` and `pdn_aprs_write_ax25()` check the packet's header the same way. Only the arrays of the variant in use are checked.
+- A capability with no value no longer forms a pointer from its unchecked value offset.
+- The 512-byte cap on an information field no longer counts one trailing CR LF (or CR, or LF), so a 512-byte field with its line end is read. `pdn_aprs_packet.info` is 2 bytes longer to hold it; `sizeof(pdn_aprs_packet)` is unchanged at 3,440 bytes on x86-64.
+- A packet whose decode returned `PDN_APRS_ERR_TOO_LONG` now sets the new `pdn_aprs_packet.info_dropped`, and `pdn_aprs_write_tnc2()` and `pdn_aprs_write_ax25()` return `PDN_APRS_ERR_TOO_LONG` for it, where they wrote its header with an empty information field. This now holds for an unbounded decode that returns `PDN_APRS_ERR_TOO_LONG` too (it left `info_dropped` clear, so the writers wrote the header alone); an unbounded decode that succeeds is unchanged.
+- Documentation: the README's decode example tells a too-long field from an unusable header, the family list includes Go and counts six implementations, the conformance claims name the three skipped `third-party/nested-2000-deep` checks and no longer quote counts that go stale, the limit of 8 extra weather fields is documented, `examples/decode.c` gives the right packet size (about 3.4 KB), and the README says CMake and pkg-config need a clone of the repository.
+
 ## 1.1.0 (2026-11-14)
 
 The round 3 rulings of the shared vectors (aprs-vectors `round-3`, pinned at 10d4e25).
