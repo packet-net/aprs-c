@@ -43,12 +43,26 @@ PDN_APRS__PRIVATE int pdn_aprs__tolerate(pdn_aprs__dctx *c, int code)
     return 1;
 }
 
-PDN_APRS__PRIVATE int pdn_aprs__check_text(pdn_aprs__dctx *c, const uint8_t *s, size_t n)
+PDN_APRS__PRIVATE int pdn_aprs__check_encoding(pdn_aprs__dctx *c, const uint8_t *s, size_t n)
 {
     c->latin1 = !pdn_aprs__utf8_valid(s, n);
     if (c->latin1)
         return pdn_aprs__tolerate(c, PDN_APRS_CODE_NON_UTF8_TEXT);
     return 1;
+}
+
+PDN_APRS__PRIVATE int pdn_aprs__check_controls(pdn_aprs__dctx *c, const uint8_t *s, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (s[i] < 0x20 || s[i] == 0x7f)
+            return pdn_aprs__tolerate(c, PDN_APRS_CODE_CONTROL_CHARACTER_IN_TEXT);
+    return 1;
+}
+
+PDN_APRS__PRIVATE int pdn_aprs__check_text(pdn_aprs__dctx *c, const uint8_t *s, size_t n)
+{
+    return pdn_aprs__check_encoding(c, s, n) && pdn_aprs__check_controls(c, s, n);
 }
 
 PDN_APRS__PRIVATE int pdn_aprs__overflow(pdn_aprs__dctx *c)
@@ -159,6 +173,8 @@ static const char *const code_names[PDN_APRS_CODE_COUNT] = {
     "invalid-addressee-characters",
     "letter-group-bulletin",
     "free-text-capabilities",
+    "control-character-in-text",
+    "implementation-limit",
 };
 
 static const uint8_t code_tolerable[PDN_APRS_CODE_COUNT] = {
@@ -170,6 +186,7 @@ static const uint8_t code_tolerable[PDN_APRS_CODE_COUNT] = {
     0, 0, 1, 0, 0, 0, 0, 0, 0, 0, /* invalid-telemetry-metadata .. invalid-capabilities */
     0, 0, 1, 1, 1, 1, 1, 1, 1, 1, /* invalid-user-defined .. mic-e-altitude-not-first */
     1, 1, 1, 1,                   /* brace-in-message-text .. free-text-capabilities */
+    1, 0,                         /* control-character-in-text, implementation-limit */
 };
 
 const char *pdn_aprs_refusal_name(int refusal)
@@ -473,6 +490,18 @@ static size_t line_end_len(const uint8_t *info, size_t len)
     return 0;
 }
 
+/* The packet needs more than this library holds: an error that stands for the
+   whole result, so any other diagnostic of the data is dropped (the header's,
+   kept below mark, stay). */
+static void limit_diagnostic(pdn_aprs_packet *p)
+{
+    if (p->diagnostic_count < PDN_APRS_MAX_DIAGNOSTICS) {
+        p->diagnostics[p->diagnostic_count].severity = PDN_APRS_SEVERITY_ERROR;
+        p->diagnostics[p->diagnostic_count].code = PDN_APRS_CODE_IMPLEMENTATION_LIMIT;
+        p->diagnostic_count++;
+    }
+}
+
 /* Decodes the information field into the packet, keeping a copy of it
    (keep), or not, in which case it may be longer than PDN_APRS_MAX_INFO. */
 static int decode_info_into(pdn_aprs_packet *packet, const pdn_aprs_decode_options *options, const uint8_t *info,
@@ -485,6 +514,7 @@ static int decode_info_into(pdn_aprs_packet *packet, const pdn_aprs_decode_optio
         packet->info_dropped = 1;
         packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
         packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
+        limit_diagnostic(packet);
         return PDN_APRS_ERR_TOO_LONG;
     }
     if (keep) {
@@ -507,6 +537,7 @@ static int decode_info_into(pdn_aprs_packet *packet, const pdn_aprs_decode_optio
         packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
         packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
         packet->diagnostic_count = mark;
+        limit_diagnostic(packet);
         return PDN_APRS_ERR_TOO_LONG;
     }
     return PDN_APRS_OK;

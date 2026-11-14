@@ -118,14 +118,24 @@ static void note(pending *p, int code, const char *why)
     }
 }
 
+/* 1 if s holds a byte below 0x20 or 0x7F: a control character, a line break
+   included (text read as text has none). */
+static int text_has_control(const char *s)
+{
+    for (; *s; s++)
+        if ((uint8_t)*s < 0x20 || (uint8_t)*s == 0x7f)
+            return 1;
+    return 0;
+}
+
 /* What the encoder would say of a name, unit or title it never sees. */
 static void note_text(pending *p, const char *s, int list)
 {
     size_t n = s ? strlen(s) : 0;
     if (!n)
         return;
-    if (!pdn_aprs__utf8_valid((const uint8_t *)s, n) || (n && (strpbrk(s, "\r\n{") || (list && strchr(s, ',')))))
-        note(p, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the text cannot contain , or { or a line break");
+    if (!pdn_aprs__utf8_valid((const uint8_t *)s, n) || (n && (text_has_control(s) || strchr(s, '{') || (list && strchr(s, ',')))))
+        note(p, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the text cannot contain , or { or a control character");
 }
 
 static int build_with(const pdn_aprs_station *station, const pdn_aprs_data *d, void *buf, size_t cap,
@@ -176,6 +186,11 @@ static int fill_position(pdn_aprs_encoded *result, pdn_aprs_report *r, const pdn
     r->latitude = p->latitude;
     r->longitude = p->longitude;
     r->symbol = p->symbol;
+    /* a weather report with no symbol given has the weather station symbol */
+    if (p->weather && !p->symbol.table && !p->symbol.code) {
+        r->symbol.table = '/';
+        r->symbol.code = '_';
+    }
     r->ambiguity = p->ambiguity;
     r->compressed = p->compressed;
     r->has_course = p->has_course;
@@ -281,6 +296,7 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
     pdn_aprs_report *r = &d.as.report;
     size_t n = 0;
     int rc, twice = 0;
+    pending pend = {0, NULL};
     begin(result);
     if (!m)
         return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
@@ -297,12 +313,24 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
     r->course_degrees = m->course_degrees;
     r->has_speed = 1;
     r->speed_knots = m->has_speed ? m->speed_knots : 0;
-    /* feet go in a /A=; metres in the Mic-E altitude bytes, whose unit is
-       the metre, rounded to it (ruling B2) */
+    /* the altitude goes in the Mic-E altitude bytes, whose unit is the metre,
+       whatever unit it was given in, rounded once to the nearest metre from
+       the value given (1000 feet is 305 m); one outside their range is
+       out of range, and is not moved to a /A= */
     twice = m->has_altitude && m->has_altitude_m;
-    r->has_altitude = (uint8_t)(m->has_altitude || m->has_altitude_m);
-    r->altitude_feet = m->has_altitude_m ? pdn_aprs__round(m->altitude_m) / 0.3048 : m->altitude_feet;
-    r->altitude_in_comment = (uint8_t)(m->has_altitude != 0);
+    if (m->has_altitude || m->has_altitude_m) {
+        double metres = m->has_altitude_m ? m->altitude_m : m->altitude_feet * 0.3048;
+        r->has_altitude = 1;
+        r->altitude_feet = metres / 0.3048;
+        if (metres == metres && fabs(metres) < 1e9) {
+            double mm = pdn_aprs__round(metres);
+            if (mm < -10000 || mm > 743570)
+                note(&pend, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "a Mic-E altitude is -10000 to 743570 metres");
+            else
+                r->altitude_feet = mm / 0.3048;
+        }
+    }
+    r->altitude_in_comment = 0;
     /* a device type code, or else the one that says whether the station
        takes messages */
     if (m->type_code) {
@@ -336,7 +364,7 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
     if (rc != PDN_APRS_OK)
         return rc;
     r->comment_len = (uint16_t)n;
-    rc = pdn_aprs_build(station, &d, buf, cap, result);
+    rc = build_with(station, &d, buf, cap, result, &pend);
     /* an altitude given in feet and in metres is refused, but any other
        reason that outranks it is named first (DESIGN.md, ruling 1) */
     if (twice && (rc >= 0 || rc == PDN_APRS_ERR_BUFFER ||
@@ -446,9 +474,9 @@ static int build_message(const pdn_aprs_station *station, int type, const char *
         if (bad)
             return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESSEE,
                         "an addressee is 1-9 printable characters without spaces or colons");
-        if (!pdn_aprs__utf8_valid((const uint8_t *)text, strlen(text)) || strpbrk(text, "\r\n{"))
+        if (!pdn_aprs__utf8_valid((const uint8_t *)text, strlen(text)) || text_has_control(text) || strchr(text, '{'))
             return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_CHARACTER,
-                        "the text has a line break, a { or is not UTF-8");
+                        "the text has a control character, a { or is not UTF-8");
     }
     rc = too_long_for_aprs(result, text, 67, PDN_APRS_REFUSAL_TOO_LONG, "message text is at most 67 characters");
     if (rc != PDN_APRS_OK)
@@ -575,18 +603,26 @@ int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const pdn_aprs_tel
     pdn_aprs_telemetry *t = &d.as.telemetry;
     size_t n = 0;
     int i, rc;
+    pending pend = {0, NULL};
     begin(result);
     if (!a)
         return fail(result, PDN_APRS_ERR_ARGUMENT, 0, NO_ARGS);
     /* a program's number has a three-digit form up to 999, and is refused
        above it, not wrapped (ruling B6) */
-    if (a->sequence > 999)
+    if (!a->no_sequence && a->sequence > 999)
         return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "a telemetry sequence number is 0 to 999");
     memset(&d, 0, sizeof d);
     d.type = PDN_APRS_TYPE_TELEMETRY;
-    t->sequence[0] = (char)('0' + a->sequence / 100);
-    t->sequence[1] = (char)('0' + a->sequence / 10 % 10);
-    t->sequence[2] = (char)('0' + a->sequence % 10);
+    /* no sequence is missing-field, noted here and folded into the encoder's
+       result by the README's order; the data holds a placeholder */
+    {
+        unsigned sq = a->no_sequence ? 0 : a->sequence;
+        if (a->no_sequence)
+            note(&pend, PDN_APRS_REFUSAL_MISSING_FIELD, "a telemetry report needs a sequence number");
+        t->sequence[0] = (char)('0' + sq / 100);
+        t->sequence[1] = (char)('0' + sq / 10 % 10);
+        t->sequence[2] = (char)('0' + sq % 10);
+    }
     t->analog_count = 5;
     for (i = 0; i < 5; i++) {
         if (a->empty[i])
@@ -606,7 +642,7 @@ int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const pdn_aprs_tel
     if (rc != PDN_APRS_OK)
         return rc;
     t->comment_len = (uint16_t)n;
-    return pdn_aprs_build(station, &d, buf, cap, result);
+    return build_with(station, &d, buf, cap, result, &pend);
 }
 
 /* Telemetry metadata goes to the station itself unless told otherwise. */

@@ -147,8 +147,9 @@ static void test_encoding(void)
     d.as.report.latitude = 91;
     CHECK(pdn_aprs_encode_info(&d, NULL, frame, sizeof frame, &enc) == PDN_APRS_ERR_REFUSED && enc.reason != NULL);
 
-    /* no size limit: Latin-1 text is written back as UTF-8, longer than the
-       decoder takes off the air, and pdn_aprs_decode_info_unbounded reads it */
+    /* the encoder refuses a field over 256 bytes (too-long), however it came by
+       the data; the decoder sets no limit but the packet's own, and
+       pdn_aprs_decode_info_unbounded reads a field longer than that back */
     {
         static char in[PDN_APRS_MAX_INFO + 16];
         static uint8_t out[3 * PDN_APRS_MAX_INFO];
@@ -160,16 +161,45 @@ static void test_encoding(void)
         CHECK(pdn_aprs_decode_tnc2(in, 15 + PDN_APRS_MAX_INFO - 1, NULL, &pkt) == PDN_APRS_OK);
         d = pkt.data;
         n = pdn_aprs_encode_info(&d, NULL, out, sizeof out, &enc);
-        CHECK(n == 1 + 2 * (PDN_APRS_MAX_INFO - 1) && out[1] == 0xC3 && out[2] == 0xA9);
-        CHECK(pdn_aprs_encode_info(&d, NULL, out, (size_t)n - 1, &enc) == PDN_APRS_ERR_BUFFER);
-        CHECK(pdn_aprs_decode_info(NULL, out, (size_t)n, NULL, &pkt2) == PDN_APRS_ERR_TOO_LONG);
-        CHECK(pdn_aprs_decode_info_unbounded(NULL, out, (size_t)n, NULL, &pkt2) == PDN_APRS_OK && pkt2.info_len == 0 &&
-              pkt2.diagnostic_count == 0 && pkt2.data.as.status.text_len == d.as.status.text_len &&
-              memcmp(pkt2.data.as.status.text, d.as.status.text, d.as.status.text_len) == 0);
+        CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
         n = pdn_aprs_encode_tnc2(&pkt.header, &d, NULL, line, sizeof line, &enc);
-        CHECK(n == 14 + 1 + 2 * (PDN_APRS_MAX_INFO - 1) && memcmp(line, "N0CALL>APZ001:>\xC3\xA9", 17) == 0 &&
-              line[n] == 0);
-        CHECK(pdn_aprs_encode_tnc2(&pkt.header, &d, NULL, line, (size_t)n - 1, &enc) == PDN_APRS_ERR_BUFFER);
+        CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+        /* with a buffer too small to hold the field the size still decides */
+        CHECK(pdn_aprs_encode_info(&d, NULL, out, 100, &enc) == PDN_APRS_ERR_REFUSED &&
+              enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+        /* a field of 255 bytes and one of 256 are written, 257 is refused */
+        for (k = 254; k <= 256; k++) {
+            pdn_aprs_data st;
+            memset(&st, 0, sizeof st);
+            st.type = PDN_APRS_TYPE_STATUS;
+            memset(st.as.status.text, 'x', k);
+            st.as.status.text_len = (uint16_t)k;
+            n = pdn_aprs_encode_info(&st, NULL, line, sizeof line, &enc);
+            if (k < 256)
+                CHECK(n == (int)k + 1);
+            else
+                CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+        }
+        /* a field over 512 bytes is the library's capacity: the data is
+           unrecognized and the diagnostic says so */
+        out[0] = '>';
+        for (k = 1; k < 2 * PDN_APRS_MAX_INFO; k += 2) {
+            out[k] = 0xC3;
+            out[k + 1] = 0xA9;
+        }
+        CHECK(pdn_aprs_decode_info(NULL, out, 2 * PDN_APRS_MAX_INFO, NULL, &pkt2) == PDN_APRS_ERR_TOO_LONG);
+        CHECK(pkt2.data.type == PDN_APRS_TYPE_UNRECOGNIZED && pkt2.data.reason == PDN_APRS_UNRECOGNIZED_MALFORMED &&
+              pdn_aprs_has_diagnostic(&pkt2, PDN_APRS_CODE_IMPLEMENTATION_LIMIT, PDN_APRS_SEVERITY_ERROR));
+        {
+            pdn_aprs_decode_options strict;
+            memset(&strict, 0, sizeof strict);
+            strict.strict = 1;
+            CHECK(pdn_aprs_decode_info(NULL, out, 2 * PDN_APRS_MAX_INFO, &strict, &pkt2) == PDN_APRS_ERR_TOO_LONG);
+            CHECK(pdn_aprs_has_diagnostic(&pkt2, PDN_APRS_CODE_IMPLEMENTATION_LIMIT, PDN_APRS_SEVERITY_ERROR));
+        }
+        n = 2 * PDN_APRS_MAX_INFO - 1;
+        CHECK(pdn_aprs_decode_info_unbounded(NULL, out, (size_t)n, NULL, &pkt2) == PDN_APRS_OK && pkt2.info_len == 0 &&
+              pkt2.diagnostic_count == 0 && pkt2.data.as.status.text_len == 2 * PDN_APRS_MAX_INFO - 2);
         /* a field the packet's data cannot hold */
         memset(out, 'x', sizeof out);
         out[0] = '>';
@@ -591,7 +621,7 @@ static void test_batch2(void)
           strstr(line, ":!0058.59N/00058.59W>/A=-00001") != NULL);
 
     /* Mic-E: a course that rounds to 0 is the spec's unknown (B1); feet go
-       in a /A= and metres in the Mic-E altitude bytes (B2) */
+       and metres alike go in the Mic-E altitude bytes (B2, R5) */
     memset(&mic, 0, sizeof mic);
     mic.latitude = 33.427333;
     mic.longitude = -112.129;
@@ -601,8 +631,9 @@ static void test_batch2(void)
     mic.course_degrees = 0.3;
     mic.has_altitude = 1;
     mic.altitude_feet = 0;
-    CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line, NULL) > 0 && strstr(line, "/A=000000") != NULL &&
-          decode(line) == PDN_APRS_OK && !pkt.data.as.report.has_course);
+    CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line, NULL) > 0 && strstr(line, "/A=") == NULL &&
+          decode(line) == PDN_APRS_OK && !pkt.data.as.report.has_course && pkt.data.as.report.has_altitude &&
+          !pkt.data.as.report.altitude_in_comment && fabs(pkt.data.as.report.altitude_feet) < 1e-6);
     mic.has_altitude = 0;
     mic.has_altitude_m = 1;
     mic.altitude_m = 100.4;
@@ -728,7 +759,28 @@ static void test_batch2(void)
     mic.has_altitude = 1;
     mic.altitude_feet = 101;
     mic.comment = "/{}";
-    CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line, NULL) > 0 && strstr(line, "/A=000101 /{}") != NULL);
+    /* 101 feet is 31 metres, in the Mic-E bytes; the comment's / is not joined to them */
+    CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line, NULL) > 0 && strstr(line, "/A=") == NULL &&
+          strstr(line, "`\"46}//{}") != NULL && decode(line) == PDN_APRS_OK &&
+          strcmp(pkt.data.as.report.comment, "/{}") == 0 && fabs(pkt.data.as.report.altitude_feet - 31 / 0.3048) < 1e-6);
+    /* a Mic-E altitude in feet or metres is rounded to the metre once, and one outside the
+       bytes' range is out of range, not moved to a /A= */
+    {
+        pdn_aprs_encoded res;
+        mic.comment = NULL;
+        mic.altitude_feet = 1000;
+        CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line, NULL) > 0 && strstr(line, "`\"77}") != NULL);
+        mic.altitude_feet = -50000;
+        CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line, &res) == PDN_APRS_ERR_REFUSED &&
+              res.refusal == PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE);
+        mic.has_altitude = 0;
+        mic.has_altitude_m = 1;
+        mic.altitude_m = 743570.4;
+        CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line, &res) > 0);
+        mic.altitude_m = 743570.6;
+        CHECK(pdn_aprs_build_mic_e(&me, &mic, line, sizeof line, &res) == PDN_APRS_ERR_REFUSED &&
+              res.refusal == PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE);
+    }
 
     /* text after an area symbol that is not an area takes no delimiter (E7):
        81019310 would be colour 19 */
@@ -766,8 +818,10 @@ static void test_long_third_party(void)
     memcpy(d.as.third_party.packet, head, h);
     memset(d.as.third_party.packet + h, 'x', 600);
     d.as.third_party.len = (uint16_t)n;
+    /* the outermost field is judged: a builder refuses it over 256 bytes */
     w = pdn_aprs_build(&me, &d, line, sizeof line, NULL);
-    CHECK(w > 0 && (size_t)w > PDN_APRS_MAX_INFO && strstr(line, ":}WB4APR-14>APRS:>xxx") != NULL);
+    CHECK(w == PDN_APRS_ERR_REFUSED);
+    /* a long inner field is still read */
     CHECK(pdn_aprs_decode_third_party(&d, NULL, &inner) == PDN_APRS_OK &&
           inner.data.type == PDN_APRS_TYPE_STATUS && inner.data.as.status.text_len == 600);
     d.as.third_party.len = 60000;
@@ -799,7 +853,7 @@ static void test_round3(void)
     memcpy(d.as.third_party.packet + n, ">hi", 3);
     d.as.third_party.len = (uint16_t)(n + 3);
     w = pdn_aprs_build(&me, &d, line, sizeof line, NULL);
-    CHECK(w > 0);
+    CHECK(w == PDN_APRS_ERR_REFUSED);
     /* decode the chain level by level, as a caller would */
     while (pdn_aprs_decode_third_party(&d, NULL, &inner) == PDN_APRS_OK && inner.data.type == PDN_APRS_TYPE_THIRD_PARTY &&
            levels < 1000) {
@@ -1324,8 +1378,12 @@ static void test_hostile_lengths(void)
     d->type = PDN_APRS_TYPE_USER_DEFINED;
     d->as.user_defined.user_id = 'A';
     d->as.user_defined.packet_type = 'B';
-    d->as.user_defined.data_len = PDN_APRS_MAX_INFO;
+    d->as.user_defined.data_len = PDN_APRS_MAX_FIELD - 3;
     CHECK(encode_hostile(d) > 0);
+    d->as.user_defined.data_len = PDN_APRS_MAX_FIELD - 2;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_REFUSED);
+    d->as.user_defined.data_len = PDN_APRS_MAX_INFO;
+    CHECK(encode_hostile(d) == PDN_APRS_ERR_REFUSED);
     d->as.user_defined.data_len = PDN_APRS_MAX_INFO + 1;
     CHECK(encode_hostile(d) == PDN_APRS_ERR_ARGUMENT);
     d->as.user_defined.data_len = 60000;
@@ -1610,6 +1668,128 @@ static void test_capability_without_value(void)
 }
 
 
+/* Round 4: capacities say so, builders write nothing they were not asked for and
+   never read the clock, control characters are text's defect, a run-on weather
+   value is dropped. */
+static void test_round4(void)
+{
+    static char line[2048];
+    pdn_aprs_station me = {"G9RXG", NULL, NULL, 0, NULL};
+    pdn_aprs_encoded res;
+    pdn_aprs_decode_options strict;
+    int n, k;
+    memset(&strict, 0, sizeof strict);
+    strict.strict = 1;
+
+    /* a 17th path entry is an unusable header with the capacity named; 16 are read */
+    {
+        char l[400];
+        int len = snprintf(l, sizeof l, "N0CALL>APZ001");
+        for (k = 1; k <= 17; k++)
+            len += snprintf(l + len, sizeof l - (size_t)len, ",D%d", k);
+        snprintf(l + len, sizeof l - (size_t)len, ":>hi");
+        CHECK(pdn_aprs_decode_tnc2(l, strlen(l), NULL, &pkt) == PDN_APRS_ERR_HEADER);
+        CHECK(pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_IMPLEMENTATION_LIMIT, PDN_APRS_SEVERITY_ERROR) &&
+              !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_INVALID_HEADER, -1));
+        *strstr(l, ",D17") = 0;
+        strcat(l, ":>hi");
+        CHECK(pdn_aprs_decode_tnc2(l, strlen(l), NULL, &pkt) == PDN_APRS_OK && pkt.header.path_count == 16);
+    }
+    /* 65 capabilities, a ninth extra weather field: unrecognized, lenient and strict */
+    {
+        char l[600];
+        size_t o = 0;
+        l[o++] = '<';
+        for (k = 1; k <= 65; k++)
+            o += (size_t)snprintf(l + o, sizeof l - o, "%sC%d", k > 1 ? "," : "", k);
+        CHECK(pdn_aprs_decode_info(NULL, l, o, NULL, &pkt) == PDN_APRS_ERR_TOO_LONG &&
+              pkt.data.type == PDN_APRS_TYPE_UNRECOGNIZED &&
+              pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_IMPLEMENTATION_LIMIT, PDN_APRS_SEVERITY_ERROR));
+        CHECK(pdn_aprs_decode_info(NULL, l, o, &strict, &pkt) == PDN_APRS_ERR_TOO_LONG);
+        o = (size_t)snprintf(l, sizeof l, "_10090556c220s004g005t077A11B12D13E14F15G16I17J18K19");
+        CHECK(pdn_aprs_decode_info(NULL, l, o, NULL, &pkt) == PDN_APRS_ERR_TOO_LONG &&
+              pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_IMPLEMENTATION_LIMIT, PDN_APRS_SEVERITY_ERROR));
+        o = (size_t)snprintf(l, sizeof l, "_10090556c220s004g005t077A11B12D13E14F15G16I17J18");
+        CHECK(pdn_aprs_decode_info(NULL, l, o, NULL, &pkt) == PDN_APRS_OK && pkt.data.as.weather.weather.extra_count == 8);
+    }
+    /* a control character in text is a warning a strict decode rejects; the text is kept */
+    CHECK(decode("N0CALL>APZ001:>a\tb") == PDN_APRS_OK && pkt.data.as.status.text_len == 3 &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_CONTROL_CHARACTER_IN_TEXT, PDN_APRS_SEVERITY_WARNING));
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001:>a\tb", 19, &strict, &pkt) == PDN_APRS_OK &&
+          pkt.data.type == PDN_APRS_TYPE_UNRECOGNIZED &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_CONTROL_CHARACTER_IN_TEXT, PDN_APRS_SEVERITY_ERROR));
+    /* ... and the encoder and builders refuse it */
+    {
+        pdn_aprs_status_args st;
+        memset(&st, 0, sizeof st);
+        st.text = "a\tb";
+        CHECK(pdn_aprs_build_status(&me, &st, line, sizeof line, &res) == PDN_APRS_ERR_REFUSED &&
+              res.refusal == PDN_APRS_REFUSAL_INVALID_CHARACTER);
+        st.text = "a b";
+        CHECK(pdn_aprs_build_status(&me, &st, line, sizeof line, &res) > 0);
+    }
+    /* a weather value that runs on by many digits is dropped, and the fields go on */
+    CHECK(pdn_aprs_decode_info(NULL, "_10090556c220s004g005t2147483647r000", 36, NULL, &pkt) == PDN_APRS_OK &&
+          pkt.data.type == PDN_APRS_TYPE_WEATHER && !pkt.data.as.weather.weather.has[PDN_APRS_WX_TEMPERATURE_F] &&
+          pkt.data.as.weather.weather.has[PDN_APRS_WX_RAIN_1H_IN] &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_OUT_OF_RANGE_VALUE, PDN_APRS_SEVERITY_WARNING));
+    CHECK(pdn_aprs_decode_info(NULL, "_10090556c220s004g005t2147483647r000", 36, &strict, &pkt) == PDN_APRS_OK &&
+          pkt.data.type == PDN_APRS_TYPE_UNRECOGNIZED);
+
+    /* builder defaults: no clock, no symbol, no sequence */
+    {
+        pdn_aprs_weather wx;
+        pdn_aprs_position_args pos;
+        pdn_aprs_telemetry_args tlm;
+        pdn_aprs_weather_init(&wx);
+        pdn_aprs_weather_set(&wx, PDN_APRS_WX_WIND_DIRECTION_DEGREES, 220);
+        pdn_aprs_weather_set(&wx, PDN_APRS_WX_WIND_SPEED_MPH, 4);
+        pdn_aprs_weather_set(&wx, PDN_APRS_WX_WIND_GUST_MPH, 5);
+        pdn_aprs_weather_set(&wx, PDN_APRS_WX_TEMPERATURE_F, 77);
+        CHECK(pdn_aprs_build_weather(&me, NULL, &wx, line, sizeof line, &res) == PDN_APRS_ERR_REFUSED &&
+              res.refusal == PDN_APRS_REFUSAL_MISSING_FIELD);
+        CHECK(pdn_aprs_build_weather(&me, "10090556", &wx, line, sizeof line, &res) > 0);
+        memset(&pos, 0, sizeof pos);
+        pos.latitude = 49.05833;
+        pos.longitude = -72.02916;
+        CHECK(pdn_aprs_build_position(&me, &pos, line, sizeof line, &res) == PDN_APRS_ERR_REFUSED &&
+              res.refusal == PDN_APRS_REFUSAL_INVALID_SYMBOL);
+        pos.weather = &wx;
+        n = pdn_aprs_build_position(&me, &pos, line, sizeof line, &res);
+        CHECK(n > 0 && strstr(line, ":!4903.50N/07201.75W_220/004g005t077") != NULL);
+        pos.weather = NULL;
+        pos.symbol = pdn_aprs_symbol_make('/', '-');
+        CHECK(pdn_aprs_build_position(&me, &pos, line, sizeof line, &res) > 0 && strstr(line, ":!4903.50N/07201.75W-") != NULL);
+        pos.name = "OBJECT";
+        CHECK(pdn_aprs_build_object(&me, &pos, line, sizeof line, &res) == PDN_APRS_ERR_REFUSED &&
+              res.refusal == PDN_APRS_REFUSAL_MISSING_FIELD);
+        memset(&tlm, 0, sizeof tlm);
+        tlm.no_sequence = 1;
+        CHECK(pdn_aprs_build_telemetry(&me, &tlm, line, sizeof line, &res) == PDN_APRS_ERR_REFUSED &&
+              res.refusal == PDN_APRS_REFUSAL_MISSING_FIELD);
+        tlm.no_sequence = 0;
+        n = pdn_aprs_build_telemetry(&me, &tlm, line, sizeof line, &res);
+        CHECK(n > 0 && strstr(line, ":T#000,000,000,000,000,000,00000000") != NULL);
+    }
+    /* the field limit: a position comment to 256 bytes is written, to 257 refused */
+    {
+        static char comment[300];
+        pdn_aprs_position_args pos;
+        memset(&pos, 0, sizeof pos);
+        pos.latitude = 49.05833;
+        pos.longitude = -72.02916;
+        pos.symbol = pdn_aprs_symbol_make('/', '-');
+        memset(comment, 'x', 299);
+        pos.comment = comment;
+        comment[256 - 20] = 0;
+        CHECK(pdn_aprs_build_position(&me, &pos, line, sizeof line, &res) > 0);
+        comment[256 - 20] = 'x';
+        comment[257 - 20] = 0;
+        CHECK(pdn_aprs_build_position(&me, &pos, line, sizeof line, &res) == PDN_APRS_ERR_REFUSED &&
+              res.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+    }
+}
+
 int main(void)
 {
     test_basics();
@@ -1632,6 +1812,7 @@ int main(void)
     test_unterminated_header();
     test_unbounded_too_long();
     test_capability_without_value();
+    test_round4();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

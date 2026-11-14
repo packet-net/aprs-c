@@ -41,6 +41,7 @@ typedef struct pdn_aprs__buf {
     uint8_t *p;
     size_t cap;
     size_t len;
+    size_t total; /* bytes offered, written or not: what len would be with room */
     int overflow;
 } pdn_aprs__buf;
 
@@ -115,6 +116,11 @@ PDN_APRS__PRIVATE int pdn_aprs__rejects(const pdn_aprs__dctx *c, int code);
 PDN_APRS__PRIVATE int pdn_aprs__tolerate(pdn_aprs__dctx *c, int code);
 /* Checks a text field's encoding before it is taken: text that is not
    UTF-8 is read as Latin-1, with a warning. Returns 0 if that is rejected. */
+PDN_APRS__PRIVATE int pdn_aprs__check_encoding(pdn_aprs__dctx *c, const uint8_t *s, size_t n);
+/* A byte below 0x20 or 0x7F in text read as text: one warning for the text
+   (control-character-in-text). Returns 0 if that is rejected. */
+PDN_APRS__PRIVATE int pdn_aprs__check_controls(pdn_aprs__dctx *c, const uint8_t *s, size_t n);
+/* Both, in that order: the checks for text read as text. */
 PDN_APRS__PRIVATE int pdn_aprs__check_text(pdn_aprs__dctx *c, const uint8_t *s, size_t n);
 /* Copies text from the field into dst, honouring the field's encoding. */
 PDN_APRS__PRIVATE size_t pdn_aprs__take_text(pdn_aprs__dctx *c, char *dst, size_t cap, const uint8_t *s, size_t n);

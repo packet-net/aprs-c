@@ -147,12 +147,29 @@ static int has_line_break(const char *s, size_t n)
     return 0;
 }
 
+/* Text read as text holds no byte below 0x20 or 0x7F (README Encoding), a
+   line break included. */
+static int has_control(const char *s, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++)
+        if ((uint8_t)s[i] < 0x20 || (uint8_t)s[i] == 0x7f)
+            return 1;
+    return 0;
+}
+
 static size_t utf8_chars(const char *s, size_t n)
 {
     return pdn_aprs__char_count((const uint8_t *)s, n, 0);
 }
 
 static int valid_text(const char *s, size_t n)
+{
+    return pdn_aprs__utf8_valid((const uint8_t *)s, n) && !has_control(s, n);
+}
+
+/* Test data is not read as text: only its line break is refused. */
+static int valid_data_text(const char *s, size_t n)
 {
     return pdn_aprs__utf8_valid((const uint8_t *)s, n) && !has_line_break(s, n);
 }
@@ -788,7 +805,7 @@ static int put_comment_part(pdn_aprs__ectx *e, const pdn_aprs_report *r, int at_
         pdn_aprs__refuse(e, PDN_APRS_REFUSAL_TOO_LONG, "comment too long");
         n = 0;
     } else if (!valid_text(c, n)) {
-        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");
+        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a control character or is not UTF-8");
     }
     if (n > 0 && (c[0] == ' ' || c[0] == '/' || (e->variant & 1)))
         slash = 1;
@@ -1162,7 +1179,7 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
     } else {
         put_uncompressed(e, r, dao);
     }
-    symbol_end = e->b->len;
+    symbol_end = e->b->total;
 
     if (r->has_weather && !weather) {
         int gga_in_cs = r->compressed && r->has_compression && r->compression.source == PDN_APRS_SOURCE_GGA;
@@ -1404,7 +1421,7 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         at_ext = 0;
     }
     if (!r->has_weather)
-        put_comment_part(e, r, at_ext, e->b->len != symbol_end, ext_counts, 0);
+        put_comment_part(e, r, at_ext, e->b->total != symbol_end, ext_counts, 0);
     if (r->has_dao)
         pdn_aprs__put(e->b, dao, 5);
     return 1;
@@ -1425,18 +1442,33 @@ static int locator_fixed_form(const char *l)
 }
 
 
-/* 1 if a Mic-E altitude goes in the Mic-E altitude bytes (whole metres), with
-   the value to write in *v; otherwise it needs a /A=. */
-static int mic_e_altitude_bytes(const pdn_aprs_report *r, long *v)
+/* Where neutral data puts a Mic-E altitude (README Encoding; interpretation "A
+   Mic-E altitude goes in the Mic-E altitude bytes"). A /A= holds a whole
+   number of feet, the Mic-E bytes a whole number of metres, and the value
+   says which: it goes in a /A= only when it is a whole number of feet within
+   the six digits that the Mic-E bytes do not hold exactly (not a whole number
+   of metres, or outside their range), each judged within 1e-6 of a whole
+   number in its unit. Anything else goes in the Mic-E bytes, rounded to the
+   metre. Returns 0: the Mic-E bytes, with the value to write in *v; 1: a
+   /A=; 2: out of range (the bytes cannot hold it and a /A= does not hold it
+   exactly). *whole_feet is 1 for a whole number of feet within a /A=. */
+static int mic_e_altitude_form(const pdn_aprs_report *r, long *v, int *whole_feet)
 {
-    double back;
+    double f = r->altitude_feet, m, rf;
+    int in_range, whole_m;
     *v = 0;
-    if (!r->has_altitude || r->altitude_in_comment || !finite_number(r->altitude_feet) || fabs(r->altitude_feet) >= 1e9)
-        return 0;
-    *v = (long)pdn_aprs__round(r->altitude_feet * 0.3048 + 10000.0);
-    back = (double)(*v - 10000) / 0.3048;
-    return *v >= 0 && *v < 91L * 91 * 91 &&
-           fabs(back - r->altitude_feet) <= 1e-9 * (fabs(r->altitude_feet) > 1 ? fabs(r->altitude_feet) : 1);
+    *whole_feet = 0;
+    if (!r->has_altitude || r->altitude_in_comment || !finite_number(f) || fabs(f) >= 1e9)
+        return 1;
+    rf = pdn_aprs__round(f);
+    *whole_feet = fabs(f - rf) <= 1e-6 && rf >= -99999 && rf <= 999999;
+    m = f * 0.3048;
+    *v = (long)pdn_aprs__round(m) + 10000;
+    in_range = *v >= 0 && *v < 91L * 91 * 91;
+    whole_m = in_range && fabs(m - pdn_aprs__round(m)) <= 1e-6;
+    if (*whole_feet && !whole_m)
+        return 1;
+    return in_range ? 0 : 2;
 }
 
 PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_report *r)
@@ -1560,10 +1592,11 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     {
         /* an altitude that needs a /A= and is past its field comes first */
         long av;
-        if (r->has_altitude && !mic_e_altitude_bytes(r, &av)) {
+        int whole, form = mic_e_altitude_form(r, &av, &whole);
+        if (r->has_altitude && form != 0) {
             if (not_a_number(e, r->altitude_feet))
                 return 0;
-            if (pdn_aprs__round(r->altitude_feet) < -99999 || pdn_aprs__round(r->altitude_feet) > 999999)
+            if (form == 2 || pdn_aprs__round(r->altitude_feet) < -99999 || pdn_aprs__round(r->altitude_feet) > 999999)
                 pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "altitude out of range");
         }
     }
@@ -1613,13 +1646,20 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     {
         int alt_b91 = 0, at_ext = 0, ext_counts = 0;
         long v = 0;
-        alt_b91 = mic_e_altitude_bytes(r, &v);
-        if (alt_b91) {
+        {
+            int whole;
+            alt_b91 = mic_e_altitude_form(r, &v, &whole) == 0;
             /* with no type code, a first byte that is one reads back as it
-               (ruling 28): beyond a /A=, the altitude has no form */
-            if (!r->type_code && strchr("`'>] ", (int)(33 + v / (91L * 91) % 91)) &&
-                (pdn_aprs__round(r->altitude_feet) > 999999 || pdn_aprs__round(r->altitude_feet) < -99999))
-                pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "this altitude has no form in the Mic-E bytes");
+               (ruling 28): a /A= holds the altitude if it is whole feet,
+               otherwise it has no form */
+            if (alt_b91 && !r->type_code && strchr("`'>] ", (int)(33 + v / (91L * 91) % 91))) {
+                if (whole)
+                    alt_b91 = 0;
+                else if (pdn_aprs__round(r->altitude_feet) > 999999 || pdn_aprs__round(r->altitude_feet) < -99999)
+                    pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "this altitude has no form in the Mic-E bytes");
+            }
+        }
+        if (alt_b91) {
             put_b91(e->b, v, 3);
             pdn_aprs__putc(e->b, '}');
             alt_written = 1;
@@ -1768,7 +1808,7 @@ static int encode_message(pdn_aprs__ectx *e, const pdn_aprs_data *d)
             pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_ADDRESSEE, "this addressee would read back as a bulletin");
     }
     if (!valid_text(m->text, m->text_len))
-        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the text has a line break or is not UTF-8");
+        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the text has a control character or is not UTF-8");
     if (memchr(m->text, '{', m->text_len))
         pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "message text cannot contain {");
     chars = utf8_chars(m->text, m->text_len);
@@ -1873,7 +1913,7 @@ static int encode_meta(pdn_aprs__ectx *e, const pdn_aprs_data *d)
             const char *s = m->text + m->offset[i];
             size_t n = m->length[i];
             if (!valid_text(s, n) || memchr(s, ',', n) || memchr(s, '{', n))
-                pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "a name or unit cannot contain , or { or a line break");
+                pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "a name or unit cannot contain , or { or a control character");
             if (i)
                 pdn_aprs__putc(e->b, ',');
             pdn_aprs__put(e->b, s, n);
@@ -1906,7 +1946,7 @@ static int encode_meta(pdn_aprs__ectx *e, const pdn_aprs_data *d)
             n = 0;
         }
         if (!valid_text(m->text, n) || memchr(m->text, '{', n))
-            pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the project title cannot contain { or a line break");
+            pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the project title cannot contain { or a control character");
         if (utf8_chars(m->text, n) > 23)
             pdn_aprs__refuse(e, PDN_APRS_REFUSAL_TOO_LONG, "a project title is at most 23 characters");
         if (strlen(m->bits) != 8 || strspn(m->bits, "01") != 8)
@@ -1955,7 +1995,7 @@ static int encode_telemetry(pdn_aprs__ectx *e, const pdn_aprs_telemetry *t)
     if (strcmp(t->sequence, "MIC") == 0 && t->analog_count > 0 && t->analog[0].is_null)
         pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "T#MIC needs a first channel");
     if (!valid_text(t->comment, t->comment_len))
-        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");
+        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a control character or is not UTF-8");
     if (sl == 0)
         pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a telemetry report needs a sequence");
     for (i = 0; i < sl; i++)
@@ -2019,7 +2059,7 @@ static int encode_status(pdn_aprs__ectx *e, const pdn_aprs_status *s)
             pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a locator is 4 or 6 characters, upper case, then a symbol");
     }
     if (!valid_text(s->text, s->text_len))
-        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the text has a line break or is not UTF-8");
+        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the text has a control character or is not UTF-8");
     if (s->timestamp[0] && s->locator[0])
         defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a status report with a locator has no timestamp");
     if (e->reason)
@@ -2048,6 +2088,16 @@ static int encode_status(pdn_aprs__ectx *e, const pdn_aprs_status *s)
 static int encode_positionless_weather(pdn_aprs__ectx *e, const pdn_aprs_weather_report *w)
 {
     size_t i;
+    /* a timestamp left out is missing-field, as for an object: the report is
+       not stamped from anything, and the walk goes on */
+    if (!w->timestamp[0]) {
+        defer(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a positionless weather report needs a timestamp");
+        pdn_aprs__putc(e->b, '_');
+        pdn_aprs__encode_weather_fields(e, &w->weather, 1);
+        if (w->comment_len)
+            defer(e, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED, "a weather report has no comment");
+        return !e->reason;
+    }
     if (strlen(w->timestamp) != 8)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "a positionless weather report has an MDHM timestamp");
     for (i = 0; i < 8; i++)
@@ -2074,7 +2124,7 @@ static int encode_nmea(pdn_aprs__ectx *e, const pdn_aprs_nmea *m)
     if (n >= sizeof m->sentence || m->comment_len >= sizeof m->comment)
         return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_TOO_LONG, "NMEA sentence or comment too long");
     if (m->comment_len && !valid_text(m->comment, m->comment_len))
-        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");
+        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a control character or is not UTF-8");
     for (i = 0; i < n; i++)
         if (!A_PRINT(m->sentence[i]))
             pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "an NMEA sentence is printable ASCII");
@@ -2243,7 +2293,7 @@ static int encode_data_inner(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         if (!locator_fixed_form(m->locator))
             pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a Maidenhead locator is 4 or 6 characters, upper case");
         if (!valid_text(m->comment, m->comment_len))
-            pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a line break or is not UTF-8");
+            pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the comment has a control character or is not UTF-8");
         if (e->reason)
             return 0;
         pdn_aprs__putc(e->b, '[');
@@ -2310,8 +2360,8 @@ static int encode_data_inner(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         pdn_aprs__put(e->b, d->as.user_defined.data, d->as.user_defined.data_len);
         return 1;
     case PDN_APRS_TYPE_TEST:
-        if (!valid_text(d->as.test.data, d->as.test.data_len))
-            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the text has a line break or is not UTF-8");
+        if (!valid_data_text(d->as.test.data, d->as.test.data_len))
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER, "the text has a control character or is not UTF-8");
         pdn_aprs__putc(e->b, ',');
         pdn_aprs__put(e->b, d->as.test.data, d->as.test.data_len);
         return 1;
@@ -2331,6 +2381,10 @@ static int encode_data_inner(pdn_aprs__ectx *e, const pdn_aprs_data *d)
 PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_data *d)
 {
     int ok = encode_data_inner(e, d);
+    /* an information field is at most 256 bytes: judged on the bytes the data's
+       fields make as given, so it comes before the faults that rank after it */
+    if (e->b->total > PDN_APRS_MAX_FIELD)
+        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_TOO_LONG, "an information field is at most 256 bytes");
     if (e->deferred)
         pdn_aprs__refuse(e, e->deferred, e->deferred_why);
     return ok && !e->reason;

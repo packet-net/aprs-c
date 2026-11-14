@@ -428,7 +428,8 @@ static int control_byte(uint8_t ch)
 /* Splits the items of a capabilities report into cap: at commas, and each
    item at its first = into a token and a value. Spaces (U+0020 only) around
    an item, a token or a value are padding; an item left empty is skipped.
-   Returns 0 if there are too many items. Sets *free_text when a token is
+   *full is set, and the split stops, when the items or their text do not fit
+   (the report's capacity). Sets *free_text when a token is
    empty or holds a space or a control byte, or a value holds a control byte. */
 static int split_capabilities(const uint8_t *s, size_t n, int latin1, pdn_aprs_capabilities *cap, int *free_text,
                               int *full)
@@ -449,8 +450,11 @@ static int split_capabilities(const uint8_t *s, size_t n, int latin1, pdn_aprs_c
             b--;
         if (a == b)
             continue;
-        if (cap->count >= PDN_APRS_MAX_CAPABILITIES)
-            return 0;
+        if (cap->count >= PDN_APRS_MAX_CAPABILITIES) {
+            /* one more than the report holds: the capacity, not a defect */
+            *full = 1;
+            return 1;
+        }
         for (eq = a; eq < b && s[eq] != '='; eq++)
             ;
         for (te = eq; te > a && s[te - 1] == ' '; te--)
@@ -488,8 +492,13 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_capabilities(pdn_aprs__dctx *c)
         pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_CAPABILITIES);
         return;
     }
+    /* more than the report holds: the capacity, whatever the text's encoding */
+    if (full) {
+        pdn_aprs__overflow(c);
+        return;
+    }
     /* the text's encoding is checked before free text */
-    if (!pdn_aprs__check_text(c, s, n))
+    if (!pdn_aprs__check_encoding(c, s, n))
         return;
     if (c->latin1)
         split_capabilities(s, n, 1, cap, &free_text, &full);
@@ -499,6 +508,24 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_capabilities(pdn_aprs__dctx *c)
     }
     if (free_text && !pdn_aprs__tolerate(c, PDN_APRS_CODE_FREE_TEXT_CAPABILITIES))
         return;
+    /* a capability value is text: judged for control characters last. A
+       token keeps its own rule (free-text-capabilities). */
+    {
+        unsigned i;
+        size_t k;
+        for (i = 0; i < cap->count; i++) {
+            const pdn_aprs_capability *it = &cap->item[i];
+            if (!it->has_value)
+                continue;
+            for (k = 0; k < it->value_length; k++) {
+                uint8_t b = (uint8_t)cap->text[it->value_offset + k];
+                if (b < 0x20 || b == 0x7f) {
+                    pdn_aprs__tolerate(c, PDN_APRS_CODE_CONTROL_CHARACTER_IN_TEXT);
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /* ---- general queries ---- */
@@ -642,7 +669,8 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_test(pdn_aprs__dctx *c)
     pdn_aprs_test *t = &c->data->as.test;
     c->data->type = PDN_APRS_TYPE_TEST;
     memset(t, 0, sizeof *t);
-    if (!pdn_aprs__check_text(c, c->info + 1, c->len - 1))
+    /* test data is not read as text: its control characters are data */
+    if (!pdn_aprs__check_encoding(c, c->info + 1, c->len - 1))
         return;
     t->data_len = (uint16_t)pdn_aprs__take_text(c, t->data, sizeof t->data, c->info + 1, c->len - 1);
 }

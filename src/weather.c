@@ -93,6 +93,44 @@ static int unit_ok(const uint8_t *s, size_t n)
     return !all_digits;
 }
 
+/* 1 if the bytes at s[at] start a defined weather field the fields would go
+   on to read: a letter APRS12c defines, not already read, with a value. Used
+   to tell a value that runs on by many digits (a broken sensor) from a
+   comment that starts with digits. */
+static int field_follows(const uint8_t *s, size_t n, size_t at, int mode, int wind_known, const int *present)
+{
+    uint8_t L;
+    size_t avail, d;
+    int snow = 0, idx, width;
+    if (at >= n)
+        return 0;
+    L = s[at];
+    if (L == 's') {
+        if (mode == 0)
+            snow = present[PDN_APRS_WX_WIND_SPEED_MPH];
+        else
+            snow = wind_known || !present[PDN_APRS_WX_WIND_DIRECTION_DEGREES] || present[PDN_APRS_WX_WIND_SPEED_MPH];
+    }
+    idx = field_index(L, snow);
+    if (idx < 0 || present[idx] || (L == 'c' && mode != 0 && wind_known))
+        return 0;
+    avail = n - at - 1;
+    if (avail == 0)
+        return 0;
+    s += at + 1;
+    width = field_width(L);
+    if (A_DIGIT(s[0]) || s[0] == '.')
+        return 1;
+    if (L == 't' && s[0] == '-')
+        return avail > 1 && A_DIGIT(s[1]);
+    if (s[0] == ' ') {
+        for (d = 0; d < avail && d < (size_t)width && s[d] == ' '; d++)
+            ;
+        return d == (size_t)width;
+    }
+    return 0;
+}
+
 PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_weather *w,
                                                       int mode, int wind_known, pdn_aprs_report *r,
                                                       char *comment, size_t comment_cap, uint16_t *comment_len)
@@ -112,7 +150,7 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
         const uint8_t *v = s + i + 1;
         size_t avail = n - i - 1, used = 0;
         double value = 0;
-        int unknown = 0, width_defect = 0;
+        int unknown = 0, width_defect = 0, run_on = 0;
         if (L == 's') {
             /* s is the wind speed while the wind comes as fields (always in a
                positionless report; once a c field is read in a position,
@@ -133,9 +171,12 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
                 break;
             while (run < avail && (A_DIGIT(v[run]) || v[run] == '.' || v[run] == '-'))
                 run++;
-            if (run < 2 || !A_DIGIT(v[run - 1]) || w->extra_count >= PDN_APRS_MAX_WEATHER_EXTRA ||
-                run >= sizeof w->extra[0].value)
+            if (run < 2 || !A_DIGIT(v[run - 1]) || run >= sizeof w->extra[0].value)
                 break;
+            if (w->extra_count >= PDN_APRS_MAX_WEATHER_EXTRA) {
+                /* one more than the report holds: the capacity, not a comment */
+                return pdn_aprs__overflow(c);
+            }
             w->extra[w->extra_count].letter = (char)L;
             memcpy(w->extra[w->extra_count].value, v, run);
             w->extra[w->extra_count].value[run] = 0;
@@ -200,15 +241,26 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
             if (d == lead)
                 break;
             if (d >= (size_t)width + 2) {
-                used = (size_t)width;
-                stop_after = 1;
+                if (i + 1 + d == n || field_follows(s, n, i + 1 + d, mode, wind_known, present)) {
+                    /* a value that runs on: out of range, dropped, and the
+                       fields carry on after the run */
+                    used = d;
+                    run_on = 1;
+                } else {
+                    used = (size_t)width;
+                    stop_after = 1;
+                }
             } else {
                 used = d;
                 width_defect = d != (size_t)width;
             }
-            if (!pdn_aprs__parse_number(v, used, 0, &dv))
-                break;
-            value = dv;
+            if (run_on) {
+                unknown = 1;
+            } else {
+                if (!pdn_aprs__parse_number(v, used, 0, &dv))
+                    break;
+                value = dv;
+            }
         } else {
             break;
         }
@@ -216,7 +268,10 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
             pending[npending++] = (uint8_t)PDN_APRS_CODE_NON_STANDARD_WEATHER_FIELD_WIDTH;
         /* a humidity over 100 or a wind direction over 360 is out of range,
            and dropped; the field still counts as sent */
-        if (!unknown && ((L == 'h' && value > 100) || (L == 'c' && value > 360))) {
+        if (run_on) {
+            if (npending < (int)sizeof pending)
+                pending[npending++] = (uint8_t)PDN_APRS_CODE_OUT_OF_RANGE_VALUE;
+        } else if (!unknown && ((L == 'h' && value > 100) || (L == 'c' && value > 360))) {
             if (npending < (int)sizeof pending)
                 pending[npending++] = (uint8_t)PDN_APRS_CODE_OUT_OF_RANGE_VALUE;
             unknown = 1;

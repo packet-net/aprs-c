@@ -542,6 +542,7 @@ typedef struct conv {
     char *err;
     size_t errlen;
     int bad;
+    int limit;        /* the first thing the C data could not hold was a fixed capacity */
     int short_legacy; /* Mic-E legacy telemetry of fewer than five values: refused */
 } conv;
 
@@ -552,6 +553,23 @@ static int cannot(conv *cv, const char *what, const char *key)
         cv->bad = 1;
     }
     return 0;
+}
+
+/* Whether the last neutral_to_data stopped at a fixed capacity. */
+static int last_limit;
+
+/* The same, for a thing that is more than a fixed capacity of the library
+   holds (a text, a list), not something its data has no field for. */
+static int cannot_limit(conv *cv, const char *what, const char *key)
+{
+    if (!cv->bad)
+        cv->limit = 1;
+    return cannot(cv, what, key);
+}
+
+int neutral_limit(void)
+{
+    return last_limit;
 }
 
 /* Every key of o is one of keys (NULL-terminated). */
@@ -620,7 +638,8 @@ static int str_in(conv *cv, const jval *o, const char *k, char *dst, size_t cap,
     if (v->t != J_STR)
         return cannot(cv, "is not text", k);
     if (v->len >= cap)
-        return cannot(cv, "is longer than the C field holds", k);
+        return cap >= PDN_APRS_TEXT_SIZE ? cannot_limit(cv, "is longer than the C field holds", k)
+                                         : cannot(cv, "is longer than the C field holds", k);
     memcpy(dst, v->str, v->len);
     dst[v->len] = 0;
     if (len)
@@ -707,7 +726,7 @@ static void weather_in(conv *cv, const jval *o, pdn_aprs_weather *w)
     if (extra) {
         size_t k;
         if (extra->t != J_ARR || extra->count > PDN_APRS_MAX_WEATHER_EXTRA) {
-            cannot(cv, "has more fields than the C data holds", "extra");
+            cannot_limit(cv, "has more fields than the C data holds", "extra");
             return;
         }
         for (k = 0; k < extra->count; k++) {
@@ -950,7 +969,7 @@ static void meta_strings_in(conv *cv, const jval *a, const char *k, pdn_aprs_tel
             return;
         }
         if (out + v->len + 1 > sizeof m->text) {
-            cannot(cv, "is longer than the C field holds", k);
+            cannot_limit(cv, "is longer than the C field holds", k);
             return;
         }
         memcpy(m->text + out, v->str, v->len);
@@ -1149,7 +1168,7 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         }
         free(inner);
         if (h + 1 + (size_t)i > sizeof t->packet)
-            return cannot(cv, "is longer than the C field holds", "packet");
+            return cannot_limit(cv, "is longer than the C field holds", "packet");
         memcpy(t->packet, head, h);
         t->packet[h] = ':';
         memcpy(t->packet + h + 1, line + 2 * PDN_APRS_MAX_INFO, (size_t)i);
@@ -1169,8 +1188,10 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
     c.err = err;
     c.errlen = errlen;
     c.bad = 0;
+    c.limit = 0;
     c.short_legacy = 0;
     err[0] = 0;
+    last_limit = 0;
     last_refusal = 0;
     pending_refusal = 0;
     if (!type) {
@@ -1384,7 +1405,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         size_t k, out = 0;
         keys_only(cv, j, keys);
         if (a && (a->t != J_ARR || a->count > PDN_APRS_MAX_CAPABILITIES)) {
-            cannot(cv, "has more items than the C data holds", "capabilities");
+            cannot_limit(cv, "has more items than the C data holds", "capabilities");
             break;
         }
         for (k = 0; a && k < a->count; k++) {
@@ -1396,7 +1417,10 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
             }
             for (f = 0; f < item->count; f++) {
                 if (item->items[f]->t != J_STR || out + item->items[f]->len + 1 > sizeof cp->text) {
-                    cannot(cv, "is longer than the C field holds", "capabilities");
+                    if (item->items[f]->t == J_STR)
+                        cannot_limit(cv, "is longer than the C field holds", "capabilities");
+                    else
+                        cannot(cv, "is longer than the C field holds", "capabilities");
                     break;
                 }
                 if (f == 0) {
@@ -1461,10 +1485,15 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
             cannot(cv, "is not one character U+0000-U+00FF", "packet_type");
         u->packet_type = (char)b[0];
         len = latin1_bytes(json_get(j, "data"), u->data, sizeof u->data);
-        if (len < 0)
-            cannot(cv, "is not text U+0000-U+00FF of a length the C field holds", "data");
-        else
+        if (len < 0) {
+            jval *dv = json_get(j, "data");
+            if (dv && dv->t == J_STR && dv->len > sizeof u->data)
+                cannot_limit(cv, "is not text U+0000-U+00FF of a length the C field holds", "data");
+            else
+                cannot(cv, "is not text U+0000-U+00FF of a length the C field holds", "data");
+        } else {
             u->data_len = (uint16_t)len;
+        }
         break;
     }
     case PDN_APRS_TYPE_TEST: {
@@ -1492,5 +1521,6 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         snprintf(err, errlen, "legacy_telemetry has fewer than five values");
         note_pending(PDN_APRS_REFUSAL_MALFORMED, "obsolete Mic-E telemetry has five values");
     }
+    last_limit = c.bad && c.limit;
     return c.bad ? 0 : 1;
 }

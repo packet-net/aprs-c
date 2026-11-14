@@ -11,10 +11,15 @@
  *     the encoder wrote, as hex, and written_destination the Mic-E
  *     destination it computed; api is the packet as the library's own API
  *     gives it.
- *   --encode: {"n", "data", "exact"} lines in (data in the neutral form);
- *     {"n", "result", "info", "destination", "again", "reason", "refusal"} out.
+ *   --encode: {"n", "data", "exact"} lines in (data in the neutral form; NaN,
+ *     Infinity and -Infinity are read, as generate.py --nonfinite writes them);
+ *     {"n", "result", "info", "destination", "again", "reason", "refusal"} out;
+ *     result is written, refused, unsupported (the C data cannot hold it) or
+ *     implementation-limit (it needs more than the library's fixed capacity).
  *   --build: builder recipes in; {"n", "result", "tnc2", "again", "reason", "refusal"}
- *     out.
+ *     out; result is built, refused, unsupported or implementation-limit. Only
+ *     the keys a recipe gives are passed: an absent one is the builder's own
+ *     default, never filled in here.
  *
  *   zcat lines.hex.gz | pdn_aprs_diffdump [-n first-line-number] | gzip > c.jsonl.gz
  *   zcat data.jsonl.gz | pdn_aprs_diffdump --encode | gzip > c.jsonl.gz
@@ -31,8 +36,9 @@
 #include "neutral.h"
 #include "pdn_aprs.h"
 
-/* The encoder writes a field of any length; this is room for the longest
-   the library's data makes. */
+/* The encoder refuses a field over 256 bytes; this is room for what a decode of
+   a line of any length is written back as, and for the longest line a
+   builder takes. */
 #define OUT_ROOM (8 * PDN_APRS_MAX_INFO + 1024)
 
 static pdn_aprs_packet lenient_pkt, strict_pkt, again_pkt, header_pkt;
@@ -349,7 +355,7 @@ static void encode_line(long fallback_n, const char *text, size_t tl)
     conv = neutral_to_data(json_get(in, "data"), &d, err, sizeof err);
     json_free(in);
     if (conv <= 0) {
-        json_set(out, "result", json_str(conv == 0 ? "unsupported" : "refused"));
+        json_set(out, "result", json_str(conv < 0 ? "refused" : neutral_limit() ? "implementation-limit" : "unsupported"));
         json_set(out, "reason", json_str(err));
         if (conv < 0 && neutral_refusal() && pdn_aprs_refusal_name(neutral_refusal()))
             json_set(out, "refusal", json_str(pdn_aprs_refusal_name(neutral_refusal())));
@@ -387,12 +393,22 @@ static void encode_line(long fallback_n, const char *text, size_t tl)
 /* Why the recipe cannot be built: the first key the builder has no way to
    take, if any. */
 static char why[256];
+/* 1 if the first thing was more than a fixed capacity holds, not something
+   the builder has no way to say */
+static int why_limit;
 
 static int cannot(const char *key, const char *what)
 {
     if (!why[0])
         snprintf(why, sizeof why, "%s: %s", key, what);
     return 0;
+}
+
+static int cannot_limit(const char *key, const char *what)
+{
+    if (!why[0])
+        why_limit = 1;
+    return cannot(key, what);
 }
 
 /* Text for the builder, which takes NUL-terminated strings: one holding a
@@ -408,7 +424,7 @@ static const char *text_item(const char *key, const jval *v)
     /* the builder writes through the data the decoder fills, whose text
        holds twice the longest information field it takes */
     if (v->len >= PDN_APRS_TEXT_SIZE) {
-        cannot(key, "longer than the C data's text holds (1024 bytes)");
+        cannot_limit(key, "longer than the C data's text holds (1024 bytes)");
         return NULL;
     }
     return v->str;
@@ -459,6 +475,8 @@ static int whole(const jval *o, const char *k, double lo, double hi, long *out)
     double v;
     if (!num(o, k, &v))
         return 0;
+    if (!(v - v == 0.0)) /* NaN or an infinity */
+        return cannot(k, "not a finite number, which the builder's whole-number field cannot hold");
     v = floor(v + 0.5);
     if (v < lo || v > hi)
         return cannot(k, "out of the range the builder's field holds");
@@ -705,10 +723,15 @@ static int build_positioned(const char *report, const jval *a, const pdn_aprs_st
                 cannot(none[e], "the Mic-E builder takes none");
         keys_only(a, positioned_keys, more);
         options(a, &p);
-        for (e = 0; e < 15 && (!msg || strcmp(names[e], msg) != 0); e++)
-            ;
-        if (e == 15)
-            cannot("mic_e_message", "a message the builder does not know");
+        /* absent: the builder's own default (off duty), not filled in here */
+        if (!json_get(a, "mic_e_message")) {
+            e = 0;
+        } else {
+            for (e = 0; e < 15 && (!msg || strcmp(names[e], msg) != 0); e++)
+                ;
+            if (e == 15)
+                cannot("mic_e_message", "a message the builder does not know");
+        }
         if (why[0])
             return 0;
         memset(&m, 0, sizeof m);
@@ -721,8 +744,8 @@ static int build_positioned(const char *report, const jval *a, const pdn_aprs_st
         m.course_degrees = p.pos.course_degrees;
         m.has_speed = p.pos.has_speed;
         m.speed_knots = p.pos.speed_knots;
-        /* the Mic-E builder takes metres, for the Mic-E altitude bytes, and
-           feet, for a /A= */
+        /* the Mic-E builder takes metres or feet, and writes either in the Mic-E
+           altitude bytes */
         if (!left_out(a, "altitude_m") && num(a, "altitude_m", &m.altitude_m))
             m.has_altitude_m = 1;
         else if (p.pos.has_altitude) {
@@ -863,8 +886,13 @@ static int build_other(const char *report, const jval *a, const pdn_aprs_station
         long sq = 0;
         memset(&t, 0, sizeof t);
         keys_only(a, keys, NULL);
-        if (!an || an->t != J_ARR || an->count != 5)
+        if (!an) {
+            /* no values given: none are sent, all five channels empty */
+            for (k = 0; k < 5; k++)
+                t.empty[k] = 1;
+        } else if (an->t != J_ARR || an->count != 5) {
             cannot("analog", "the builder takes five values");
+        }
         for (k = 0; an && an->t == J_ARR && k < an->count && k < 5; k++) {
             if (an->items[k]->t == J_NULL)
                 t.empty[k] = 1;
@@ -873,8 +901,11 @@ static int build_other(const char *report, const jval *a, const pdn_aprs_station
             else
                 t.analog[k] = an->items[k]->num;
         }
-        if (!whole(a, "sequence", 0, 2147483647.0, &sq))
-            cannot("sequence", "missing");
+        /* no sequence is the builder's to refuse (missing-field) */
+        if (!json_get(a, "sequence"))
+            t.no_sequence = 1;
+        else
+            whole(a, "sequence", 0, 2147483647.0, &sq);
         if (why[0])
             return 0;
         /* a number over 999 is the library's to refuse (ruling B6) */
@@ -949,6 +980,7 @@ static void build_line(long fallback_n, const char *text, size_t tl)
     jval *nv = in ? json_get(in, "n") : NULL;
     int rc;
     why[0] = 0;
+    why_limit = 0;
     memset(&built, 0, sizeof built);
     unit_pick = 0;
     json_set(out, "n", json_int(nv && nv->t == J_NUM ? (long)nv->num : fallback_n));
@@ -978,11 +1010,11 @@ static void build_line(long fallback_n, const char *text, size_t tl)
     }
     json_free(in);
     if (why[0]) {
-        json_set(out, "result", json_str("unsupported"));
+        json_set(out, "result", json_str(why_limit ? "implementation-limit" : "unsupported"));
         json_set(out, "reason", json_str(why));
     } else if (rc == PDN_APRS_ERR_UNSUPPORTED) {
-        /* APRS allows it, but the library's fixed buffers cannot hold it */
-        json_set(out, "result", json_str("unsupported"));
+        /* the library's fixed buffers cannot hold it */
+        json_set(out, "result", json_str("implementation-limit"));
         json_set(out, "reason", json_str(built.reason ? built.reason : pdn_aprs_strerror(rc)));
     } else if (rc < 0) {
         json_set(out, "result", json_str("refused"));

@@ -11,6 +11,7 @@ PDN_APRS__PRIVATE void pdn_aprs__buf_init(pdn_aprs__buf *b, void *p, size_t cap)
     b->p = (uint8_t *)p;
     b->cap = p ? cap : 0;
     b->len = 0;
+    b->total = 0;
     b->overflow = 0;
 }
 
@@ -18,6 +19,7 @@ PDN_APRS__PRIVATE void pdn_aprs__put(pdn_aprs__buf *b, const void *s, size_t n)
 {
     if (n == 0)
         return;
+    b->total += n;
     if (b->overflow || n > b->cap - b->len) {
         b->overflow = 1;
         return;
