@@ -828,6 +828,25 @@ static void test_round3(void)
     names[15] = "N";
     w = pdn_aprs_build_telemetry_names(&me, NULL, names, 16, line, sizeof line, &enc);
     CHECK(w == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+
+    /* a compressed GGA weather altitude of 1 foot or less is written as !!,
+       however far below */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_POSITION;
+    d.as.report.latitude = 43.46125756708652;
+    d.as.report.longitude = -1.36065272520122;
+    d.as.report.symbol = pdn_aprs_symbol_make('/', '_');
+    d.as.report.compressed = 1;
+    d.as.report.has_compression = 1;
+    d.as.report.compression.fix = PDN_APRS_FIX_CURRENT;
+    d.as.report.compression.source = PDN_APRS_SOURCE_GGA;
+    d.as.report.compression.origin = PDN_APRS_ORIGIN_COMPRESSED;
+    d.as.report.has_altitude = 1;
+    d.as.report.altitude_feet = -99999.4;
+    d.as.report.has_weather = 1;
+    pdn_aprs_weather_set(&d.as.report.weather, PDN_APRS_WX_TEMPERATURE_F, 81);
+    w = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
+    CHECK(w > 0 && memcmp(line, "!/8Ph1N.a/_!!Q", 14) == 0);
 }
 
 /* Refusals carry a reason code: one from each group, and zero when nothing

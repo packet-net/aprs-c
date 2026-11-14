@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-The round 3 rulings of the shared vectors (aprs-vectors `round-3`, pinned at f2f6ab5).
+The round 3 rulings of the shared vectors (aprs-vectors `round-3`, pinned at 10d4e25).
 
 ### Behaviour changes for 1.x callers
 
@@ -28,6 +28,9 @@ The round 3 rulings of the shared vectors (aprs-vectors `round-3`, pinned at f2f
 - Builders: telemetry names, units, bits and a project title the data cannot hold (a 14th name, a name past the buffer, an over-long title or bits) are noted as `too-long` or `malformed` and ranked with what the encoder finds, so a bad addressee or a comma in a 16th name is named first.
 - No float-to-integer cast overflows on huge or infinite values (a Mic-E speed or course, a GGA altitude).
 - Third-party data nested more than four deep is refused as `invalid-third-party-header` by the neutral conversion, which counts the levels by walking before it converts any. The C data holds a third-party packet as its raw text, so a chain in it is the received form of four levels whose innermost data is unrecognized, and it is written back as received; the decoder reads it one level at a time and stops at the fifth.
+- A compressed GGA weather report's altitude of 1 foot or less, however far below, is written as `!!` (1 foot) and re-encodes rounded; -99999 feet was refused.
+- A GGA altitude beside wind on a compressed report with a non-weather symbol is `extension-conflict`, named before field-not-allowed and symbol-mismatch.
+- Tests: the neutral conversion checks a third-party header's addresses (source, destination and path) before the inner data, so a bad header is `invalid-third-party-header` whatever is wrong inside. The dump tool builds a recipe that gives one quantity in two units once with each unit and refuses it with the first code among both results and `value-given-twice` (README Builder rules), instead of building from one unit.
 - Decoder: third-party packets nest at most four deep. `pdn_aprs_third_party` gains `uint8_t depth` at the end, set by the decoder, and `pdn_aprs_decode_third_party()` reads a fifth `}` as unrecognized with `invalid-third-party`. New `PDN_APRS_MAX_THIRD_PARTY_DEPTH` (4).
 - Decoder: an AX.25 address is upper-case letters and digits padded with spaces. A lower-case letter stays tolerated (`invalid-ax25-address-characters`); any other character, a space before the last character included, is now `invalid-address`. A call of spaces only is empty: a destination is `empty-destination` and a digipeater `empty-path-entry` (left out of the path), both tolerated.
 - Tests: the vectors runner compares refusal codes (`refusal`, `reencode_refusal`) and reads `precedence.json`. The neutral converter refuses a third-party path entry before a used one that is not marked used as `invalid-third-party-header`, before the inner data, and lets the encoder's own checks run beside a fault the C data cannot carry (a message ID on an ack). `third-party/nested-2000-deep` is a known difference: its line is 10,017 bytes, past the 512 the decoder takes.

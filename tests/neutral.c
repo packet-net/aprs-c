@@ -974,7 +974,7 @@ int neutral_refusal(void)
     return last_refusal;
 }
 
-static int refusal_rank(int code)
+int neutral_refusal_rank(int code)
 {
     static const int order[] = {
         PDN_APRS_REFUSAL_NOT_ENCODABLE,       PDN_APRS_REFUSAL_INVALID_ADDRESS,
@@ -999,7 +999,7 @@ static int refusal_rank(int code)
 
 static void note_pending(int code, const char *why)
 {
-    if (!pending_refusal || refusal_rank(code) < refusal_rank(pending_refusal)) {
+    if (!pending_refusal || neutral_refusal_rank(code) < neutral_refusal_rank(pending_refusal)) {
         pending_refusal = code;
         pending_why = why;
     }
@@ -1013,11 +1013,23 @@ int neutral_encode(const pdn_aprs_data *d, const pdn_aprs_encode_options *o, voi
     pending_refusal = 0;
     if (!code)
         return rc;
-    if (rc != PDN_APRS_ERR_REFUSED || refusal_rank(code) < refusal_rank(enc->refusal)) {
+    if (rc != PDN_APRS_ERR_REFUSED || neutral_refusal_rank(code) < neutral_refusal_rank(enc->refusal)) {
         enc->refusal = code;
         enc->reason = why;
     }
     return PDN_APRS_ERR_REFUSED;
+}
+
+static int tnc2_address_ok(const char *a, size_t n)
+{
+    size_t q;
+    if (n < 1 || n > 9)
+        return 0;
+    for (q = 0; q < n; q++)
+        if (!((a[q] >= 'A' && a[q] <= 'Z') || (a[q] >= 'a' && a[q] <= 'z') || (a[q] >= '0' && a[q] <= '9') ||
+              a[q] == '-'))
+            return 0;
+    return 1;
 }
 
 /* A third-party packet's inner packet, written as its TNC2 form: the header,
@@ -1056,6 +1068,23 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
     /* a header with no destination (Mic-E computes its own) */
     if (!dst[0] && !(json_gets(data, "type") && strcmp(json_gets(data, "type"), "mic-e") == 0))
         header_fault = "inner packet: the header has no destination";
+    /* the addresses (README Addresses rule): a source of 1-9 printable
+       characters other than > and :, a destination and path entries of 1-9
+       letters, digits or - */
+    {
+        size_t sl = strlen(src), q;
+        int ok = sl >= 1 && sl <= 9;
+        for (q = 0; ok && q < sl; q++)
+            ok = src[q] >= 0x20 && src[q] <= 0x7E && src[q] != '>' && src[q] != ':';
+        if (!ok || (dst[0] && !tnc2_address_ok(dst, strlen(dst))))
+            header_fault = "inner packet: the header has an address that is not one";
+        for (k = 0; path && path->t == J_ARR && k < path->count; k++) {
+            const jval *e = path->items[k];
+            size_t el = e->t == J_STR && e->len && e->str[e->len - 1] == '*' ? e->len - 1 : e->len;
+            if (e->t != J_STR || !tnc2_address_ok(e->str, el))
+                header_fault = "inner packet: a path entry is not an address";
+        }
+    }
     /* a path entry before a used one reads back used, so one not marked
        cannot be written as given (README Refusal reasons) */
     for (k = 0; path && path->t == J_ARR && k < path->count; k++)

@@ -4584,9 +4584,15 @@ static int report_eq(const pdn_aprs_report *a, const pdn_aprs_report *b, int typ
                (a->has_speed && !near(a->speed_knots, b->speed_knots, 0.51, 0.041, loose))) {
         return 0;
     }
-    if (!a->has_altitude != !b->has_altitude ||
-        (a->has_altitude && !near(a->altitude_feet, b->altitude_feet, 1.65, 0.0011, loose)))
+    /* loose: a compressed weather report's GGA altitude of 1 foot or less is
+       written as the nearest cs value, 1 foot, alone (README Encoding rule) */
+    if (loose && b->compressed && b->has_weather && a->has_altitude && b->has_altitude && a->altitude_feet == 1.0 &&
+        b->altitude_feet <= 1.0) {
+        /* the same data, rounded */
+    } else if (!a->has_altitude != !b->has_altitude ||
+               (a->has_altitude && !near(a->altitude_feet, b->altitude_feet, 1.65, 0.0011, loose))) {
         return 0;
+    }
     if (!a->has_phg != !b->has_phg ||
         (a->has_phg && memcmp(&a->phg, &b->phg, sizeof a->phg) != 0))
         return 0;
@@ -5901,7 +5907,7 @@ static int weather_rules(pdn_aprs__ectx *e, const pdn_aprs_report *r, int range_
     if (!r->compressed && (r->has_course || r->has_speed || r->has_phg || r->has_dfs || r->has_area ||
                            r->has_df_bearing || r->has_storm || r->has_range))
         defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "the wind of a weather report holds the data extension");
-    if (r->compressed && (r->has_course || r->has_speed))
+    if (r->compressed && (r->has_course || r->has_speed || (gga_in_cs && wind)))
         defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed weather report has room for the wind alone in the cs bytes");
     if (r->compressed && r->has_range && (!range_in_cs || wind))
         defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed weather report has room for the wind alone in the cs bytes");

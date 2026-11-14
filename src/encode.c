@@ -1096,7 +1096,7 @@ static int weather_rules(pdn_aprs__ectx *e, const pdn_aprs_report *r, int range_
     if (!r->compressed && (r->has_course || r->has_speed || r->has_phg || r->has_dfs || r->has_area ||
                            r->has_df_bearing || r->has_storm || r->has_range))
         defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "the wind of a weather report holds the data extension");
-    if (r->compressed && (r->has_course || r->has_speed))
+    if (r->compressed && (r->has_course || r->has_speed || (gga_in_cs && wind)))
         defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed weather report has room for the wind alone in the cs bytes");
     if (r->compressed && r->has_range && (!range_in_cs || wind))
         defer(e, PDN_APRS_REFUSAL_EXTENSION_CONFLICT, "a compressed weather report has room for the wind alone in the cs bytes");
