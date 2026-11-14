@@ -16,6 +16,7 @@
 #include "json.h"
 #include "neutral.h"
 #include "pdn_aprs.h"
+#include "devtable.h"
 #include "recipe.h"
 
 static int verbose = 0;
@@ -23,7 +24,7 @@ static int verbose = 0;
 static const char *const kinds[] = {"lenient", "strict", "tolerance", "reencode", "encode", "build"};
 static int kind_passed[6];
 static const char *filter = NULL;
-static int passed = 0, failed = 0, skipped = 0, skipped_limit = 0;
+static int passed = 0, failed = 0, skipped = 0, skipped_limit = 0, skipped_device = 0;
 static char **known = NULL;
 static size_t known_count = 0;
 
@@ -436,7 +437,7 @@ static int needs_more_than(const jval *c, const input_t *in, int limit)
 
 /* ---- checks ---- */
 
-static const pdn_aprs_device_table *devices(void) { return pdn_aprs_devices(); }
+static const pdn_aprs_device_table *devices(void) { return dev_table(); }
 
 static void check_decode_case(const jval *c, const char *id)
 {
@@ -481,7 +482,10 @@ static void check_decode_case(const jval *c, const char *id)
         return;
     }
     ok = result_matches(got, expect, why, sizeof why);
-    if (ok && json_get(expect, "device")) {
+    if (ok && json_get(expect, "device") && !TEST_HAVE_DEVICES) {
+        /* the names are in the optional table, which this build leaves out */
+        skipped_device++;
+    } else if (ok && json_get(expect, "device")) {
         pdn_aprs_device dev;
         jval *wd = json_get(expect, "device");
         pdn_aprs_identify_device(devices(), &pkt, &dev);
@@ -753,5 +757,7 @@ int main(int argc, char **argv)
            kind_passed[0], kind_passed[1], kind_passed[2], kind_passed[3], kind_passed[4], kind_passed[5]);
     printf("%d passed, %d failed, %d skipped (known differences), %d cases skipped (implementation limit)\n", passed,
            failed, skipped, skipped_limit);
+    if (!TEST_HAVE_DEVICES)
+        printf("built without the device table: %d device expectations not checked\n", skipped_device);
     return failed ? 1 : 0;
 }

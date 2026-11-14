@@ -44,7 +44,7 @@ if(PDN_APRS_AMALGAMATION)
   set(PDN_APRS_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/dist)
 else()
   set(PDN_APRS_SOURCES
-      src/util.c src/decode.c src/header.c src/position.c src/comment.c src/weather.c src/mice.c
+      src/util.c src/decode.c src/header.c src/position.c src/comment.c src/weather.c src/mice.c src/mice_codes.c
       src/message.c src/other.c src/device.c src/equal.c src/encode.c src/build.c src/symbols.c)
   set(PDN_APRS_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 endif()
@@ -54,6 +54,11 @@ if(PDN_APRS_DEVICEID)
   else()
     list(APPEND PDN_APRS_SOURCES src/pdn_aprs_deviceid.c)
   endif()
+endif()
+
+if(NOT PDN_APRS_DEVICEID)
+  # the tests, tools and fuzz target then run without the table; only the device names go unchecked
+  add_compile_definitions(PDN_APRS_TEST_NO_DEVICEID)
 endif()
 
 # Always static: 1.x promises source compatibility only (struct sizes follow
@@ -126,9 +131,6 @@ endif()
 
 if(PDN_APRS_BUILD_TESTS)
   enable_testing()
-  if(NOT PDN_APRS_DEVICEID)
-    message(FATAL_ERROR "The tests need the device table: PDN_APRS_DEVICEID=ON")
-  endif()
   add_executable(pdn_aprs_vectors tests/vectors.c)
   target_link_libraries(pdn_aprs_vectors PRIVATE pdn_aprs_test_support)
   target_compile_options(pdn_aprs_vectors PRIVATE ${PDN_APRS_WARNINGS})
@@ -157,7 +159,7 @@ if(PDN_APRS_BUILD_TESTS)
   if(NOT PDN_APRS_AMALGAMATION)
     # the fuzz target's checks over inputs that once failed, on every platform
     add_executable(pdn_aprs_fuzz_replay fuzz/replay.c fuzz/fuzz_decode.c ${PDN_APRS_SOURCES})
-    target_include_directories(pdn_aprs_fuzz_replay PRIVATE ${PDN_APRS_INCLUDE} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_include_directories(pdn_aprs_fuzz_replay PRIVATE ${PDN_APRS_INCLUDE} ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     target_compile_options(pdn_aprs_fuzz_replay PRIVATE ${PDN_APRS_WARNINGS})
     if(MSVC)
       target_compile_definitions(pdn_aprs_fuzz_replay PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -207,7 +209,7 @@ if(PDN_APRS_BUILD_FUZZ)
     message(FATAL_ERROR "The fuzz target needs clang (libFuzzer)")
   endif()
   add_executable(pdn_aprs_fuzz fuzz/fuzz_decode.c ${PDN_APRS_SOURCES})
-  target_include_directories(pdn_aprs_fuzz PRIVATE ${PDN_APRS_INCLUDE} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_include_directories(pdn_aprs_fuzz PRIVATE ${PDN_APRS_INCLUDE} ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
   target_compile_options(pdn_aprs_fuzz PRIVATE -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all)
   target_link_options(pdn_aprs_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
   target_link_libraries(pdn_aprs_fuzz PRIVATE m)

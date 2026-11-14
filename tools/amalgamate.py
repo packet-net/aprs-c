@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ORDER = ["util", "decode", "header", "position", "comment", "weather", "mice", "message", "other",
-         "device", "equal", "encode", "build", "symbols"]
+         "device", "mice_codes", "equal", "encode", "build", "symbols"]
 
 
 def version():

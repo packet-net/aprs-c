@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "pdn_aprs.h"
+#include "devtable.h"
 
 /* The library's own comparison, as the encoder uses it (src/equal.c). */
 int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_aprs_data *b, int loose);
@@ -220,7 +221,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     exercise_hostile(data, size);
     exercise_builder(data, size);
     memset(&lenient, 0, sizeof lenient);
-    lenient.devices = pdn_aprs_devices();
+    lenient.devices = dev_table();
     strict = lenient;
     strict.strict = 1;
     one = lenient;

@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "pdn_aprs.h"
+#include "devtable.h"
 
 static int failures = 0, checks = 0;
 
@@ -31,7 +32,7 @@ static int decode(const char *line)
 {
     pdn_aprs_decode_options o;
     memset(&o, 0, sizeof o);
-    o.devices = pdn_aprs_devices();
+    o.devices = dev_table();
     return pdn_aprs_decode_tnc2(line, strlen(line), &o, &pkt);
 }
 
@@ -109,16 +110,19 @@ static void test_devices(void)
     /* a Mic-E radio by its type code and suffix */
     CHECK(decode("N1JCM-9>TRQP7T:`c'wl|+>/`\"4-}_%") == PDN_APRS_OK);
     CHECK(strcmp(pkt.data.as.report.device_suffix, "_%") == 0);
-    CHECK(pdn_aprs_identify_device(pdn_aprs_devices(), &pkt, &dev) && strcmp(dev.vendor, "Yaesu") == 0 &&
-          strcmp(dev.model, "FTM-400DR") == 0);
-    /* without a table the suffix stays in the comment and no device is known */
+    if (TEST_HAVE_DEVICES) {
+        CHECK(pdn_aprs_identify_device(dev_table(), &pkt, &dev) && strcmp(dev.vendor, "Yaesu") == 0 &&
+              strcmp(dev.model, "FTM-400DR") == 0);
+    }
+    /* with no table the suffix is lifted all the same, and no device is known */
     memset(&none, 0, sizeof none);
     pdn_aprs_decode_tnc2("N1JCM-9>TRQP7T:`c'wl|+>/`\"4-}_%", 31, &none, &pkt);
-    CHECK(pkt.data.as.report.device_suffix[0] == 0 && strcmp(pkt.data.as.report.comment, "_%") == 0);
+    CHECK(strcmp(pkt.data.as.report.device_suffix, "_%") == 0 && pkt.data.as.report.comment_len == 0);
     CHECK(!pdn_aprs_identify_device(NULL, &pkt, &dev) && dev.vendor == NULL);
     /* software by its tocall */
     CHECK(decode("M0LTE>APDR16:>hi") == PDN_APRS_OK);
-    CHECK(pdn_aprs_identify_device(pdn_aprs_devices(), &pkt, &dev) && dev.model && strstr(dev.model, "APRSdroid"));
+    if (TEST_HAVE_DEVICES)
+        CHECK(pdn_aprs_identify_device(dev_table(), &pkt, &dev) && dev.model && strstr(dev.model, "APRSdroid"));
 }
 
 static void test_encoding(void)
@@ -1245,7 +1249,7 @@ static void test_refusal_codes(void)
         static const char line_in[] = "LA7DHA-8>U9UR55,LD1OE*,WIDE2-1,qAS,LB1HG-10:`&>]l#MPY/>\"3}";
         pdn_aprs_encode_options opt;
         memset(&opt, 0, sizeof opt);
-        opt.devices = pdn_aprs_devices();
+        opt.devices = dev_table();
         CHECK(decode(line_in) == PDN_APRS_OK && pkt.data.type == PDN_APRS_TYPE_MIC_E);
         n = pdn_aprs_encode_info(&pkt.data, &opt, line, sizeof line, &enc);
         CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM);
@@ -1854,7 +1858,7 @@ static void test_round5(void)
         "N0CALL>U95U3Q:`@Ikl+\x7f" "j/>IO91/G 145.500MHz toff +000=",
     };
     memset(&eo, 0, sizeof eo);
-    eo.devices = pdn_aprs_devices();
+    eo.devices = dev_table();
     for (i = 0; i < sizeof mice / sizeof mice[0]; i++) {
         const char *tnc2 = mice[i];
         int n;
@@ -1892,6 +1896,161 @@ static void test_round5(void)
           !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_OUT_OF_RANGE_VALUE, -1));
 }
 
+/* A Mic-E info field decoded with no device table. */
+static int decode_mice_bare(char type_code, const char *tail)
+{
+    char line[64];
+    pdn_aprs_decode_options o;
+    memset(&o, 0, sizeof o);
+    snprintf(line, sizeof line, "N0CALL>U95U3Q:`@Ikl+\x7f" "j/%c%s", type_code, tail);
+    return pdn_aprs_decode_tnc2(line, strlen(line), &o, &pkt);
+}
+
+/* The Mic-E suffix codes are built into the core: a build with and a build
+   without pdn_aprs_deviceid.c read and write the same bytes, and the optional
+   table agrees with the core's list. */
+static void test_mic_e_codes(void)
+{
+    static const char tcs[] = {'`', '\'', '>', ']'};
+    unsigned t, c1, c2;
+    int lifted[4] = {0, 0, 0, 0};
+    /* every one- and two-byte ending is lifted with no table exactly when the
+       optional table (if built in) lists it, and never otherwise */
+    for (t = 0; t < 4; t++) {
+        int two = t < 2;
+        for (c1 = 0x20; c1 < 0x7f; c1++)
+            for (c2 = two ? 0x20 : 0x7f; c2 < (two ? 0x7fu : 0x80u); c2++) {
+                char tail[3];
+                int bare, listed = 0;
+                const pdn_aprs_device_table *dt = dev_table();
+                size_t i;
+                tail[0] = (char)c1;
+                tail[1] = two ? (char)c2 : 0;
+                tail[2] = 0;
+                bare = decode_mice_bare(tcs[t], tail) == PDN_APRS_OK && pkt.data.type == PDN_APRS_TYPE_MIC_E &&
+                       pkt.data.as.report.device_suffix[0] != 0;
+                if (bare) {
+                    lifted[t]++;
+                    CHECK(strcmp(pkt.data.as.report.device_suffix, tail) == 0 && pkt.data.as.report.comment_len == 0);
+                }
+                if (!TEST_HAVE_DEVICES)
+                    continue;
+                if (two) {
+                    for (i = 0; i < dt->mice_count; i++)
+                        if (dt->mice[i].key && strcmp(dt->mice[i].key, tail) == 0)
+                            listed = 1;
+                } else {
+                    for (i = 0; i < dt->mice_legacy_count; i++)
+                        if (dt->mice_legacy[i].key && strlen(dt->mice_legacy[i].key) == 2 &&
+                            dt->mice_legacy[i].key[0] == tcs[t] && dt->mice_legacy[i].key[1] == tail[0])
+                            listed = 1;
+                }
+                if (bare != listed)
+                    printf("core and optional table disagree on type code %c suffix \"%s\"\n", tcs[t], tail);
+                CHECK(bare == listed);
+            }
+    }
+    /* the numbers a build has, with or without the table */
+    CHECK(lifted[0] == 26 && lifted[1] == 26 && lifted[2] == 3 && lifted[3] == 1);
+
+    /* lifted in both configurations, and the names only with the table */
+    {
+        pdn_aprs_device dev;
+        CHECK(decode("N1JCM-9>TRQP7T:`c'wl|+>/`\"4-}_3") == PDN_APRS_OK && strcmp(pkt.data.as.report.device_suffix, "_3") == 0);
+        if (TEST_HAVE_DEVICES)
+            CHECK(pdn_aprs_identify_device(dev_table(), &pkt, &dev) && strcmp(dev.model, "FT5D") == 0);
+        CHECK(decode_mice_bare('>', "=") == PDN_APRS_OK && strcmp(pkt.data.as.report.device_suffix, "=") == 0);
+        CHECK(decode_mice_bare(']', "=") == PDN_APRS_OK && strcmp(pkt.data.as.report.device_suffix, "=") == 0);
+        CHECK(decode_mice_bare('`', "IO91/G X") == PDN_APRS_OK && strcmp(pkt.data.as.report.device_suffix, " X") == 0 &&
+              strcmp(pkt.data.as.report.locator, "IO91") == 0);
+        /* a one-byte legacy code is not a suffix after a backtick, nor a two-byte one after > */
+        CHECK(decode_mice_bare('`', "=") == PDN_APRS_OK && pkt.data.as.report.device_suffix[0] == 0);
+        CHECK(decode_mice_bare('>', "_%") == PDN_APRS_OK && pkt.data.as.report.device_suffix[0] == 0);
+    }
+
+    /* the same Mic-E packets built with and without the table are the same bytes (or both refused) */
+    {
+        static const struct {
+            char type_code;
+            const char *locator;
+            const char *comment;
+            const char *suffix;
+            int want; /* 1 written, 0 refused, -1 not pinned */
+            const char *has;
+        } cases[] = {
+            {0, "IO91", "X", NULL, 1, " /X"},
+            {0, NULL, "_3", NULL, 0, NULL},
+            {0, NULL, " X", NULL, 0, NULL},
+            {0, NULL, "Hello _%", NULL, 0, NULL},
+            {'>', NULL, "=", NULL, 0, NULL},
+            {'>', NULL, "^", NULL, 0, NULL},
+            {']', NULL, "=", NULL, 0, NULL},
+            {'>', NULL, "&", NULL, 0, NULL},
+            {0, NULL, "Hello", NULL, 1, NULL},
+            {0, NULL, "Hello _", NULL, 1, NULL},
+            {0, "IO91", "Hello", NULL, 1, NULL},
+            {0, NULL, "(5", NULL, 0, NULL},
+            {0, NULL, "Hi", "_%", 1, "Hi_%"},
+            {0, NULL, NULL, "_%", 1, NULL},
+            {0, NULL, NULL, "_9", 0, NULL},
+            {0, NULL, NULL, "=", 0, NULL},
+            {'>', NULL, "Hi", "=", 1, "Hi="},
+            {'>', NULL, NULL, "_%", 0, NULL},
+            {']', NULL, "Hi", "=", 1, "Hi="},
+            {']', NULL, "X", NULL, 1, NULL},
+            {'>', NULL, "Hello ^", NULL, 0, NULL},
+            {0, "IO91", "ok _%", NULL, 0, NULL},
+        };
+        unsigned i;
+        for (i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+            char with[300], without[300];
+            pdn_aprs_station a = {"N0CALL", NULL, NULL, 0, NULL}, b = {"N0CALL", NULL, NULL, 0, NULL};
+            pdn_aprs_mic_e_args mic;
+            int rw, ro;
+            memset(&mic, 0, sizeof mic);
+            mic.latitude = 33.427333;
+            mic.longitude = -112.129;
+            mic.symbol = pdn_aprs_symbol_make('/', 'j');
+            mic.mic_e_message = PDN_APRS_MIC_E_RETURNING;
+            mic.type_code = cases[i].type_code;
+            mic.device_suffix = cases[i].suffix;
+            mic.locator = cases[i].locator;
+            mic.comment = cases[i].comment;
+            a.devices = dev_table();
+            b.devices = NULL;
+            memset(with, 0, sizeof with);
+            memset(without, 0, sizeof without);
+            rw = pdn_aprs_build_mic_e(&a, &mic, with, sizeof with, NULL);
+            ro = pdn_aprs_build_mic_e(&b, &mic, without, sizeof without, NULL);
+            CHECK(rw == ro && memcmp(with, without, sizeof with) == 0);
+            if (cases[i].want >= 0)
+                CHECK((ro > 0) == cases[i].want);
+            if (ro > 0 && cases[i].has)
+                CHECK(strstr(without, cases[i].has) != NULL);
+            if (ro > 0) {
+                /* and it reads back as the same data, with no table */
+                pdn_aprs_decode_options o;
+                memset(&o, 0, sizeof o);
+                CHECK(pdn_aprs_decode_tnc2(without, (size_t)ro, &o, &pkt) == PDN_APRS_OK &&
+                      !pdn_aprs_has_diagnostic(&pkt, -1, PDN_APRS_SEVERITY_WARNING));
+            }
+        }
+    }
+    /* encode_info likewise, from decoded data */
+    {
+        static char out_a[512], out_b[512];
+        pdn_aprs_encode_options ea, eb;
+        int na, nb;
+        memset(&ea, 0, sizeof ea);
+        memset(&eb, 0, sizeof eb);
+        ea.devices = dev_table();
+        CHECK(decode("N0CALL>U95U3Q:`@Ikl+\x7f" "j/`IO91/G /X") == PDN_APRS_OK);
+        na = pdn_aprs_encode_info(&pkt.data, &ea, out_a, sizeof out_a, NULL);
+        nb = pdn_aprs_encode_info(&pkt.data, &eb, out_b, sizeof out_b, NULL);
+        CHECK(na > 0 && na == nb && memcmp(out_a, out_b, (size_t)na) == 0 && strcmp(out_a + na - 3, " /X") == 0);
+    }
+}
+
 int main(void)
 {
     test_basics();
@@ -1916,6 +2075,7 @@ int main(void)
     test_capability_without_value();
     test_round4();
     test_round5();
+    test_mic_e_codes();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

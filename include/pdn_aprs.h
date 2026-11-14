@@ -1020,8 +1020,9 @@ typedef struct pdn_aprs_data {
  * A device identification table, in the form of the aprs-deviceid database
  * (github.com/aprsorg/aprs-deviceid). The optional pdn_aprs_deviceid.c
  * provides one generated from it; an application may also build its own.
- * Mic-E device suffixes are only recognised against a table: without one
- * they stay in the comment.
+ * The table only names devices: the Mic-E device suffix codes themselves are
+ * built into the library, so a build without the table lifts the same
+ * suffixes and writes the same bytes.
  */
 typedef struct pdn_aprs_device_entry {
     /* tocalls: the destination pattern ('?' any character, 'n' a digit,
@@ -1051,8 +1052,9 @@ typedef struct pdn_aprs_decode_options {
     uint8_t strict;
     /* Reject individual tolerable defects: reject[PDN_APRS_CODE_X] = 1. */
     uint8_t reject[PDN_APRS_MAX_CODES];
-    /* The device table, for Mic-E device suffixes; NULL for none. The
-       optional pdn_aprs_deviceid.c provides pdn_aprs_devices(). */
+    /* Unused by the decoder, which knows the Mic-E device suffix codes
+       itself; kept so existing code compiles. Pass the table to
+       pdn_aprs_identify_device() to name the device. */
     const pdn_aprs_device_table *devices;
 } pdn_aprs_decode_options;
 
@@ -1155,12 +1157,11 @@ PDN_APRS_API const pdn_aprs_device_table *pdn_aprs_devices(void);
 
 /* Encode options. A zeroed struct (or NULL) is the default. */
 typedef struct pdn_aprs_encode_options {
-    /* The device table the packet's readers use. The encoder checks what it
-       writes by decoding it; with the table, a Mic-E comment that would read
-       back as a known device suffix is written after a "/" where that makes
-       it read back as comment text, and refused where nothing does. NULL
-       checks only the report's own suffix (see the note at
-       pdn_aprs_build_mic_e()). */
+    /* Unused by the encoder, which knows the Mic-E device suffix codes
+       itself (a Mic-E comment that would read back as one is written after a
+       "/" where that makes it read back as comment text, and refused where
+       nothing does, with or without pdn_aprs_deviceid.c); kept so existing
+       code compiles. */
     const pdn_aprs_device_table *devices;
 } pdn_aprs_encode_options;
 
@@ -1230,12 +1231,10 @@ typedef struct pdn_aprs_encoded {
  * encoded may be NULL, though a Mic-E report needs encoded for its
  * destination address.
  *
- * Mic-E and the device table: without the table (pdn_aprs_deviceid.c) the
- * encoder cannot tell a Mic-E device suffix from comment text, so it can
- * write a Mic-E comment that other implementations read as a device suffix;
- * the decoder leaves suffixes in the comment. The shared test cases are run
- * with the table; build with the table for Mic-E that reads the same
- * everywhere.
+ * Mic-E device suffixes: the library knows the Mic-E suffix codes itself, so
+ * the encoder writes a Mic-E comment that would read back as a suffix after
+ * a "/" (or refuses it) whether or not pdn_aprs_deviceid.c, which only adds
+ * the device names, is built in.
  */
 PDN_APRS_API int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf,
                                       size_t cap, pdn_aprs_encoded *encoded);
@@ -1266,8 +1265,7 @@ typedef struct pdn_aprs_station {
     const char *destination; /* NULL for "APZ001" (experimental software) */
     const char *path;        /* "WIDE1-1,WIDE2-1", or NULL for none */
     uint8_t ax25;            /* 1: write an AX.25 frame; 0: a TNC2 line */
-    /* The device table, for checking Mic-E comments (see
-       pdn_aprs_encode_options); NULL for none. */
+    /* Unused by the builders (see pdn_aprs_encode_options); NULL is fine. */
     const pdn_aprs_device_table *devices;
 } pdn_aprs_station;
 
@@ -1377,12 +1375,9 @@ typedef struct pdn_aprs_mic_e_args {
     const char *comment;
 } pdn_aprs_mic_e_args;
 
-/* Without the device table (pdn_aprs_deviceid.c) the library cannot tell a
-   Mic-E device suffix from comment text, so the decoder leaves suffixes in
-   the comment and the encoder can write a Mic-E comment that other
-   implementations read as a device suffix. The shared test cases are run
-   with the table; build with the table for Mic-E that reads the same
-   everywhere. */
+/* The library knows the Mic-E device suffix codes, so a comment that would
+   read back as one is written after a "/" (or refused) with or without
+   pdn_aprs_deviceid.c, which only adds the device names. */
 PDN_APRS_API int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_args *args, void *buf,
                                       size_t cap, pdn_aprs_encoded *result);
 

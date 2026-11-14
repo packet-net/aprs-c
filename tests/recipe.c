@@ -12,6 +12,7 @@
 #include "json.h"
 #include "neutral.h"
 #include "pdn_aprs.h"
+#include "devtable.h"
 #include "recipe.h"
 
 static char why[256];
@@ -647,7 +648,7 @@ static int build(const jval *r, uint8_t *buf, size_t cap)
     memset(&station, 0, sizeof station);
     station.source = text_arg(st, "source");
     station.destination = text_arg(st, "destination");
-    station.devices = pdn_aprs_devices();
+    station.devices = dev_table();
     if ((pv = json_get(st, "path")) != NULL && pv->t == J_ARR) {
         size_t o = 0;
         for (k = 0; k < pv->count && o < sizeof path; k++)

@@ -88,38 +88,16 @@ static void defer(pdn_aprs__ectx *e, int code, const char *why)
 
 /* Decodes what was written and checks it reads back as the same data, with
    no warnings or errors. */
-static int reads_back(const pdn_aprs_data *d, const uint8_t *info, size_t n, const char *dest,
-                      const pdn_aprs_device_table *devices)
+static int reads_back(const pdn_aprs_data *d, const uint8_t *info, size_t n, const char *dest)
 {
     pdn_aprs_packet p;
     pdn_aprs_header h;
     pdn_aprs_decode_options o;
-    pdn_aprs_device_entry mice, legacy;
-    pdn_aprs_device_table table;
-    char legacy_key[4];
     int i;
     memset(&o, 0, sizeof o);
     pdn_aprs__header_default(&h);
-    if (d->type == PDN_APRS_TYPE_MIC_E) {
-        const pdn_aprs_report *r = &d->as.report;
+    if (d->type == PDN_APRS_TYPE_MIC_E)
         pdn_aprs__strlcpy(h.destination, dest, sizeof h.destination);
-        if (devices) {
-            o.devices = devices;
-        } else if (r->device_suffix[0]) {
-            memset(&mice, 0, sizeof mice);
-            memset(&legacy, 0, sizeof legacy);
-            mice.key = r->device_suffix;
-            legacy_key[0] = r->type_code;
-            pdn_aprs__strlcpy(legacy_key + 1, r->device_suffix, 3);
-            legacy.key = legacy_key;
-            memset(&table, 0, sizeof table);
-            table.mice = &mice;
-            table.mice_count = 1;
-            table.mice_legacy = &legacy;
-            table.mice_legacy_count = 1;
-            o.devices = &table;
-        }
-    }
     if (pdn_aprs_decode_info_unbounded(&h, info, n, &o, &p) != PDN_APRS_OK)
         return 0;
     for (i = 0; i < p.diagnostic_count; i++)
@@ -880,7 +858,7 @@ static int put_comment_part(pdn_aprs__ectx *e, const pdn_aprs_report *r, int at_
             memcpy(tail + tl, c, n);
             tl += n;
         }
-        if (tl >= want && pdn_aprs__mic_e_suffix_known(e->devices, r->type_code, (const uint8_t *)tail + tl - want, want))
+        if (tl >= want && pdn_aprs__mic_e_suffix_known(r->type_code, (const uint8_t *)tail + tl - want, want))
             slash = 1;
     }
     if (slash)
@@ -1674,16 +1652,9 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     if (r->device_suffix[0] && !r->type_code) {
         defer(e, PDN_APRS_REFUSAL_MISSING_FIELD, "a device suffix needs a type code");
     } else if (r->device_suffix[0]) {
-        /* a suffix is read back only when the device table knows it for the
-           type code (rulings 2 and 3) */
-        size_t sl = strlen(r->device_suffix);
-        int known;
-        if (e->devices)
-            known = pdn_aprs__mic_e_suffix_known(e->devices, r->type_code, (const uint8_t *)r->device_suffix, sl);
-        else
-            known = ((r->type_code == '`' || r->type_code == '\'') && sl == 2) ||
-                    ((r->type_code == '>' || r->type_code == ']') && sl == 1);
-        if (!known)
+        /* a suffix is read back only when it is one of the built-in Mic-E
+           suffix codes for the type code (rulings 2 and 3) */
+        if (!pdn_aprs__mic_e_suffix_known(r->type_code, (const uint8_t *)r->device_suffix, strlen(r->device_suffix)))
             pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CODE, "the device suffix is not one the device table knows for this type code");
     }
     {
@@ -2219,7 +2190,7 @@ static int encode_nmea(pdn_aprs__ectx *e, const pdn_aprs_nmea *m)
         t.as.nmea.comment[0] = 0;
         tmp[0] = '$';
         memcpy(tmp + 1, m->sentence, n);
-        if (!reads_back(&t, tmp, n + 1, "", NULL))
+        if (!reads_back(&t, tmp, n + 1, ""))
             pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_NMEA, "a field given with an NMEA sentence disagrees with it");
     }
     pdn_aprs__putc(e->b, '$');
@@ -2738,14 +2709,14 @@ static PDN_APRS__NOINLINE int judge_oversize(const pdn_aprs_data *data, const pd
 {
     uint8_t scratch[PDN_APRS_ENCODE_SCRATCH];
     pdn_aprs__buf b;
+    (void)options;
     memset(e, 0, sizeof *e);
     pdn_aprs__buf_init(&b, scratch, sizeof scratch);
     e->b = &b;
     e->variant = variant;
-    e->devices = options ? options->devices : NULL;
     if (!pdn_aprs__encode_data(e, data))
         return 1;
-    if (b.overflow || reads_back(data, scratch, b.len, e->dest, options ? options->devices : NULL)) {
+    if (b.overflow || reads_back(data, scratch, b.len, e->dest)) {
         pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG, PDN_APRS__SIZE_REASON);
         return 1;
     }
@@ -2778,7 +2749,6 @@ static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options 
         pdn_aprs__buf_init(&b, buf, cap);
         e.b = &b;
         e.variant = variant;
-        e.devices = options ? options->devices : NULL;
         ok = pdn_aprs__encode_data(&e, data);
         if (!ok)
             break;
@@ -2795,7 +2765,7 @@ static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options 
             full = 1;
             break;
         }
-        if (reads_back(data, (const uint8_t *)buf, b.len, e.dest, options ? options->devices : NULL)) {
+        if (reads_back(data, (const uint8_t *)buf, b.len, e.dest)) {
             if (b.total > PDN_APRS_MAX_FIELD)
                 ok = pdn_aprs__refuse(&e, PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG, PDN_APRS__SIZE_REASON);
             break;

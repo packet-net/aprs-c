@@ -242,9 +242,9 @@ PDN_APRS__PRIVATE int pdn_aprs__mic_e_dest(const char *dest, double *lat, int *m
    letters in either case), or 0. */
 PDN_APRS__PRIVATE size_t pdn_aprs__mic_e_locator_len(const uint8_t *s, size_t n);
 
-/* Devices (device.c). */
-PDN_APRS__PRIVATE int pdn_aprs__mic_e_suffix_known(const pdn_aprs_device_table *t, char type_code,
-                                                   const uint8_t *s, size_t n);
+/* Whether the n (1 or 2) bytes at s are a Mic-E device suffix code for the
+   type code (mice_codes.c, built in: no device table needed). */
+PDN_APRS__PRIVATE int pdn_aprs__mic_e_suffix_known(char type_code, const uint8_t *s, size_t n);
 
 /* Headers (header.c). Parses a TNC2 header [s, s+n) up to its ':'. Returns
    the offset just past the ':' or 0 on failure (errors recorded as header
@@ -265,7 +265,6 @@ typedef struct pdn_aprs__ectx {
     int refusal;
     int deferred; /* a refusal noted and not yet raised (encode.c) */
     const char *deferred_why;
-    const pdn_aprs_device_table *devices; /* the options' table, or NULL */
     char dest[PDN_APRS_ADDR_SIZE];
     int variant; /* 1: put a / before any comment, 2: a space */
 } pdn_aprs__ectx;

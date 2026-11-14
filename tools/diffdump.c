@@ -35,6 +35,7 @@
 #include "json.h"
 #include "neutral.h"
 #include "pdn_aprs.h"
+#include "devtable.h"
 #include "recipe.h"
 
 /* The encoder refuses a field over 256 bytes; this is room for what a decode of
@@ -449,7 +450,7 @@ int main(int argc, char **argv)
         }
     }
     memset(&lenient, 0, sizeof lenient);
-    lenient.devices = pdn_aprs_devices();
+    lenient.devices = dev_table();
     strict = lenient;
     strict.strict = 1;
     while ((text = read_line(&tl)) != NULL) {
