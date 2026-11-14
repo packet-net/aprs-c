@@ -42,12 +42,15 @@ static void check_encoding(const pdn_aprs_packet *p, const pdn_aprs_decode_optio
         require(enc.reason != NULL);
         return;
     }
+    /* nothing an encoder writes is over 256 bytes: it refuses (as
+       information-field-too-long) instead */
+    require(n <= PDN_APRS_MAX_FIELD);
     h = p->header;
     if (p->data.type == PDN_APRS_TYPE_MIC_E)
         memcpy(h.destination, enc.destination, sizeof h.destination);
-    /* text received as Latin-1 is written back as UTF-8, so what was
-       written may be longer than the decoder takes off the air */
-    rc = pdn_aprs_decode_info_unbounded(&h, buf, (size_t)n, o, &again);
+    /* text received as Latin-1 is written back as UTF-8, which is longer,
+       but never past the 256 bytes an encoder allows, so it is read whole */
+    rc = pdn_aprs_decode_info(&h, buf, (size_t)n, o, &again);
     require(rc == PDN_APRS_OK);
     require(again.data.type == p->data.type);
     for (i = 0; i < again.diagnostic_count; i++)
@@ -56,7 +59,10 @@ static void check_encoding(const pdn_aprs_packet *p, const pdn_aprs_decode_optio
     /* a whole TNC2 line, when the header is one a line can carry */
     n = pdn_aprs_encode_tnc2(&p->header, &p->data, &eo, line, sizeof line, &enc);
     if (n > 0) {
+        const char *colon = (const char *)memchr(line, ':', (size_t)n);
         require((size_t)n < sizeof line && line[n] == 0);
+        /* the information field after the header is at most 256 bytes */
+        require(colon != NULL && (size_t)n - (size_t)(colon - line) - 1 <= PDN_APRS_MAX_FIELD);
         rc = pdn_aprs_decode_tnc2(line, (size_t)n, o, &again);
         require(rc == PDN_APRS_OK || rc == PDN_APRS_ERR_TOO_LONG);
         require(rc != PDN_APRS_OK || again.data.type == p->data.type);
@@ -175,7 +181,36 @@ static void exercise_hostile(const uint8_t *data, size_t size)
     }
     n = pdn_aprs_encode_info(d, NULL, buf, sizeof buf, &enc);
     require(n >= 0 || n == PDN_APRS_ERR_REFUSED || n == PDN_APRS_ERR_ARGUMENT || n == PDN_APRS_ERR_BUFFER);
+    require(n <= PDN_APRS_MAX_FIELD);
     free(d);
+}
+
+/* A builder, given the input's bytes as status text: whatever it writes holds
+   an information field of at most 256 bytes. */
+static void exercise_builder(const uint8_t *data, size_t size)
+{
+    static char text[4 * PDN_APRS_MAX_INFO + 1];
+    static char line[4 * PDN_APRS_MAX_INFO + 256];
+    pdn_aprs_station st;
+    pdn_aprs_status_args a;
+    pdn_aprs_encoded enc;
+    size_t n = size < sizeof text - 1 ? size : sizeof text - 1, i;
+    int w;
+    memcpy(text, data, n);
+    for (i = 0; i < n; i++)
+        if (text[i] == 0)
+            text[i] = 'a';
+    text[n] = 0;
+    memset(&st, 0, sizeof st);
+    st.source = "N0CALL";
+    memset(&a, 0, sizeof a);
+    a.text = text;
+    w = pdn_aprs_build_status(&st, &a, line, sizeof line, &enc);
+    require(w >= 0 || w == PDN_APRS_ERR_REFUSED || w == PDN_APRS_ERR_UNSUPPORTED || w == PDN_APRS_ERR_BUFFER);
+    if (w > 0) {
+        const char *colon = (const char *)memchr(line, ':', (size_t)w);
+        require(colon != NULL && (size_t)w - (size_t)(colon - line) - 1 <= PDN_APRS_MAX_FIELD);
+    }
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
@@ -183,6 +218,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     static pdn_aprs_packet p;
     pdn_aprs_decode_options lenient, strict, one;
     exercise_hostile(data, size);
+    exercise_builder(data, size);
     memset(&lenient, 0, sizeof lenient);
     lenient.devices = pdn_aprs_devices();
     strict = lenient;

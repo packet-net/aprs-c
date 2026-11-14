@@ -18,6 +18,11 @@ static char why[256];
 /* 1 if the first thing was more than a fixed capacity holds, not something
    the builder has no way to say */
 static int why_limit;
+/* the capacity (a pdn_aprs_limit) that was met, for a RECIPE_LIMIT result */
+static int why_limit_kind;
+/* 1 if a NUL in some text was given to the builder as another control
+   character, so a refusal as an invalid character is this reader's */
+static int nul_swapped;
 
 static int cannot(const char *key, const char *what)
 {
@@ -28,8 +33,10 @@ static int cannot(const char *key, const char *what)
 
 static int cannot_limit(const char *key, const char *what)
 {
-    if (!why[0])
+    if (!why[0]) {
         why_limit = 1;
+        why_limit_kind = PDN_APRS_LIMIT_INFORMATION_FIELD;
+    }
     return cannot(key, what);
 }
 
@@ -60,6 +67,7 @@ static const char *text_item(const char *key, const jval *v)
     if (strlen(v->str) != v->len && v->len < PDN_APRS_TEXT_SIZE) {
         char *c = pool[next++ % 32];
         size_t i;
+        nul_swapped = 1;
         memcpy(c, v->str, v->len);
         for (i = 0; i < v->len; i++)
             if (c[i] == 0)
@@ -656,11 +664,20 @@ static int build(const jval *r, uint8_t *buf, size_t cap)
     return build_other(report, a, &station, buf, cap);
 }
 
+/* The number of entries in the recipe's station path. */
+static size_t recipe_path_count(const jval *in)
+{
+    const jval *pv = json_get(json_get(in, "station"), "path");
+    return pv && pv->t == J_ARR ? pv->count : 0;
+}
+
 int recipe_build(const jval *in, uint8_t *buf, size_t cap, recipe_result *res)
 {
     int rc;
     why[0] = 0;
     why_limit = 0;
+    why_limit_kind = 0;
+    nul_swapped = 0;
     extra_code = 0;
     extra_why = NULL;
     memset(&built, 0, sizeof built);
@@ -680,8 +697,7 @@ int recipe_build(const jval *in, uint8_t *buf, size_t cap, recipe_result *res)
             }
             /* a result refused only for the information field's 256 bytes
                counts after value-given-twice */
-            int size = rc == PDN_APRS_ERR_REFUSED && built.refusal == PDN_APRS_REFUSAL_TOO_LONG && built.reason &&
-                       strcmp(built.reason, "an information field is at most 256 bytes") == 0;
+            int size = rc == PDN_APRS_ERR_REFUSED && built.refusal == PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG;
             if (rc == PDN_APRS_ERR_REFUSED && built.refusal && !size &&
                 neutral_refusal_rank(built.refusal) < neutral_refusal_rank(code)) {
                 code = built.refusal;
@@ -699,8 +715,7 @@ int recipe_build(const jval *in, uint8_t *buf, size_t cap, recipe_result *res)
         /* a fault of the recipe's own stands unless the builder named one
            earlier in the order; the size of a record with a fault is not
            judged */
-        int size = rc == PDN_APRS_ERR_REFUSED && built.refusal == PDN_APRS_REFUSAL_TOO_LONG && built.reason &&
-                   strcmp(built.reason, "an information field is at most 256 bytes") == 0;
+        int size = rc == PDN_APRS_ERR_REFUSED && built.refusal == PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG;
         if (rc >= 0 || rc == PDN_APRS_ERR_BUFFER || size ||
             (rc == PDN_APRS_ERR_REFUSED && neutral_refusal_rank(extra_code) < neutral_refusal_rank(built.refusal))) {
             memset(&built, 0, sizeof built);
@@ -712,15 +727,21 @@ int recipe_build(const jval *in, uint8_t *buf, size_t cap, recipe_result *res)
     }
     if (why[0]) {
         res->kind = why_limit ? RECIPE_LIMIT : RECIPE_UNSUPPORTED;
+        res->limit = why_limit ? why_limit_kind : 0;
         res->reason = why;
     } else if (rc == PDN_APRS_ERR_UNSUPPORTED) {
         /* the library's fixed buffers cannot hold it */
         res->kind = RECIPE_LIMIT;
+        res->limit = recipe_path_count(in) > PDN_APRS_MAX_PATH ? PDN_APRS_LIMIT_PATH : PDN_APRS_LIMIT_INFORMATION_FIELD;
         res->reason = built.reason ? built.reason : pdn_aprs_strerror(rc);
     } else if (rc < 0) {
         res->kind = RECIPE_REFUSED;
         res->reason = built.reason ? built.reason : pdn_aprs_strerror(rc);
         res->refusal = built.refusal && pdn_aprs_refusal_name(built.refusal) ? pdn_aprs_refusal_name(built.refusal) : NULL;
+        /* a NUL was swapped for 0x01 to reach the builder, whose refusal of
+           that byte is this reader's, not the library's */
+        if (nul_swapped && built.refusal == PDN_APRS_REFUSAL_INVALID_CHARACTER)
+            res->via_tool = 1;
     } else {
         res->kind = RECIPE_BUILT;
         res->len = (size_t)rc;

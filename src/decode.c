@@ -65,11 +65,36 @@ PDN_APRS__PRIVATE int pdn_aprs__check_text(pdn_aprs__dctx *c, const uint8_t *s, 
     return pdn_aprs__check_encoding(c, s, n) && pdn_aprs__check_controls(c, s, n);
 }
 
-PDN_APRS__PRIVATE int pdn_aprs__overflow(pdn_aprs__dctx *c)
+PDN_APRS__PRIVATE int pdn_aprs__overflow_limit(pdn_aprs__dctx *c, int limit)
 {
     c->too_long = 1;
     c->failed = 1;
+    if (!c->limit)
+        c->limit = limit;
     return 0;
+}
+
+PDN_APRS__PRIVATE int pdn_aprs__overflow(pdn_aprs__dctx *c)
+{
+    return pdn_aprs__overflow_limit(c, PDN_APRS_LIMIT_INFORMATION_FIELD);
+}
+
+const char *pdn_aprs_limit_name(int limit)
+{
+    switch (limit) {
+    case PDN_APRS_LIMIT_INFORMATION_FIELD:
+        return "information-field";
+    case PDN_APRS_LIMIT_PATH:
+        return "path";
+    case PDN_APRS_LIMIT_CAPABILITIES:
+        return "capabilities";
+    case PDN_APRS_LIMIT_WEATHER_EXTRAS:
+        return "weather-extras";
+    case PDN_APRS_LIMIT_WEATHER_EXTRA_VALUE:
+        return "weather-extra-value";
+    default:
+        return NULL;
+    }
 }
 
 PDN_APRS__PRIVATE size_t pdn_aprs__take(pdn_aprs__dctx *c, char *dst, size_t cap, const uint8_t *s, size_t n,
@@ -217,7 +242,8 @@ const char *pdn_aprs_refusal_name(int refusal)
         "invalid-code",
         "invalid-nmea",
         "not-encodable",
-        "does-not-read-back"};
+        "does-not-read-back",
+        "information-field-too-long"};
     if (refusal < 1 || refusal > (int)(sizeof names / sizeof names[0]))
         return NULL;
     return names[refusal - 1];
@@ -512,6 +538,7 @@ static int decode_info_into(pdn_aprs_packet *packet, const pdn_aprs_decode_optio
     /* the cap is on the field, so one line end (CR LF, CR or LF) is not counted */
     if (keep && len > PDN_APRS_MAX_INFO + line_end_len(info, len)) {
         packet->info_dropped = 1;
+        packet->limit = PDN_APRS_LIMIT_INFORMATION_FIELD;
         packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
         packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
         limit_diagnostic(packet);
@@ -533,6 +560,7 @@ static int decode_info_into(pdn_aprs_packet *packet, const pdn_aprs_decode_optio
     if (c.too_long) {
         /* whether or not a copy was kept, the writers refuse the packet */
         packet->info_dropped = 1;
+        packet->limit = (uint8_t)(c.limit ? c.limit : PDN_APRS_LIMIT_INFORMATION_FIELD);
         memset(&packet->data, 0, sizeof packet->data);
         packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
         packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
@@ -558,6 +586,7 @@ int pdn_aprs_decode_tnc2(const void *line, size_t len, const pdn_aprs_decode_opt
     c.data = &packet->data;
     at = pdn_aprs__parse_tnc2_header(&c, s, len, &packet->header, 0);
     if (!at) {
+        packet->limit = (uint8_t)c.limit;
         packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
         packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
         return PDN_APRS_ERR_HEADER;
@@ -621,6 +650,7 @@ int pdn_aprs_decode_third_party(const pdn_aprs_data *outer, const pdn_aprs_decod
     c.data = &inner->data;
     at = pdn_aprs__parse_tnc2_header(&c, t->packet, t->len, &inner->header, 1);
     if (!at) {
+        inner->limit = (uint8_t)c.limit;
         inner->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
         inner->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
         return PDN_APRS_ERR_HEADER;

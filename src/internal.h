@@ -21,10 +21,11 @@
 
 #define PDN_APRS__UNUSED(x) ((void)(x))
 
-/* The reason given when an information field is over 256 bytes and nothing
-   else is wrong. The size is judged last, so a caller that has noted a fault
-   of its own (the builder, the tests' neutral conversion) recognises this
-   refusal by it and lets its own fault stand. */
+/* The message given with PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG, the
+   code for an information field over 256 bytes when nothing else is wrong.
+   The size is judged last, so a caller that has noted a fault of its own (the
+   builder, the tests' neutral conversion) recognises the refusal by its code
+   and lets its own fault stand. Nothing reads the message. */
 #define PDN_APRS__SIZE_REASON "an information field is at most 256 bytes"
 #define PDN_APRS__KNOTS_TO_MPH (1852.0 / 1609.344)
 
@@ -108,6 +109,7 @@ typedef struct pdn_aprs__dctx {
     int latin1;          /* the text being taken is not UTF-8 and is read as Latin-1 */
     int failed;          /* an error stopped decoding */
     int too_long;        /* a part of the field is longer than the packet holds */
+    int limit;           /* which capacity (pdn_aprs_limit) too_long or a header limit is about */
     const char *dest;    /* the destination address, for Mic-E */
     int depth;           /* third-party packets the field is inside */
 } pdn_aprs__dctx;
@@ -138,6 +140,8 @@ PDN_APRS__PRIVATE size_t pdn_aprs__take(pdn_aprs__dctx *c, char *dst, size_t cap
    longer than PDN_APRS_MAX_INFO can be (pdn_aprs_decode_info_unbounded): decoding
    stops, and the result is PDN_APRS_ERR_TOO_LONG. Returns 0. */
 PDN_APRS__PRIVATE int pdn_aprs__overflow(pdn_aprs__dctx *c);
+/* The same, for a capacity with its own name (pdn_aprs_limit). */
+PDN_APRS__PRIVATE int pdn_aprs__overflow_limit(pdn_aprs__dctx *c, int limit);
 
 /* Diagnostic-count checkpoints, for trial decodes. */
 PDN_APRS__PRIVATE int pdn_aprs__mark(pdn_aprs__dctx *c);
@@ -184,11 +188,23 @@ typedef struct pdn_aprs__cbuf {
     int gaps;
 } pdn_aprs__cbuf;
 
+/* What the comment's start lifts: base-91 telemetry (from its first | to
+   just after its last) and a !DAO!, found without taking them out. */
+typedef struct pdn_aprs__lifted {
+    int have_tlm, have_dao;
+    size_t tstart, tend, dao_pos;
+} pdn_aprs__lifted;
+
 /* Returns 1, or 0 (after pdn_aprs__overflow) if [s, s+n) does not fit. */
 PDN_APRS__PRIVATE int pdn_aprs__cbuf_set(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, const uint8_t *s, size_t n);
 PDN_APRS__PRIVATE void pdn_aprs__cbuf_cut(pdn_aprs__cbuf *cb, size_t at, size_t n);
 /* Lifts base-91 telemetry (between the last two |) and the last !DAO!
    outside it. */
+PDN_APRS__PRIVATE void pdn_aprs__find_telemetry_dao(const pdn_aprs__cbuf *cb, pdn_aprs__lifted *f);
+/* 1 if from at to the end of the text there is nothing but what the start of
+   a positioned report's comment lifts (telemetry, a !DAO!): the "end" of the
+   weather text for the run-on rule. */
+PDN_APRS__PRIVATE int pdn_aprs__lifted_run_to_end(const pdn_aprs__cbuf *cb, size_t at);
 PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs_report *r, uint8_t dao[5]);
 /* Lifts a /A= altitude; returns 1 if found. */
 PDN_APRS__PRIVATE int pdn_aprs__lift_altitude(pdn_aprs__cbuf *cb, double *feet);

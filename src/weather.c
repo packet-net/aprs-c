@@ -195,11 +195,16 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
                 break;
             while (run < avail && (A_DIGIT(v[run]) || v[run] == '.' || v[run] == '-'))
                 run++;
-            if (run < 2 || !A_DIGIT(v[run - 1]) || run >= sizeof w->extra[0].value)
+            if (run < 2 || !A_DIGIT(v[run - 1]))
                 break;
+            if (run >= sizeof w->extra[0].value) {
+                /* an extra field's value longer than the 23 characters the
+                   data holds: the capacity, not a comment */
+                return pdn_aprs__overflow_limit(c, PDN_APRS_LIMIT_WEATHER_EXTRA_VALUE);
+            }
             if (w->extra_count >= PDN_APRS_MAX_WEATHER_EXTRA) {
                 /* one more than the report holds: the capacity, not a comment */
-                return pdn_aprs__overflow(c);
+                return pdn_aprs__overflow_limit(c, PDN_APRS_LIMIT_WEATHER_EXTRAS);
             }
             w->extra[w->extra_count].letter = (char)L;
             memcpy(w->extra[w->extra_count].value, v, run);
@@ -265,7 +270,8 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
             if (d == lead)
                 break;
             if (d >= (size_t)width + 2) {
-                if (i + 1 + d == n || field_follows(s, n, i + 1 + d, mode, wind_known, present, idx)) {
+                if (i + 1 + d == n || (r && pdn_aprs__lifted_run_to_end(cb, i + 1 + d)) ||
+                    field_follows(s, n, i + 1 + d, mode, wind_known, present, idx)) {
                     /* a value that runs on: out of range, dropped, and the
                        fields carry on after the run */
                     used = d;

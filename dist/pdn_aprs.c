@@ -28,10 +28,11 @@
 
 #define PDN_APRS__UNUSED(x) ((void)(x))
 
-/* The reason given when an information field is over 256 bytes and nothing
-   else is wrong. The size is judged last, so a caller that has noted a fault
-   of its own (the builder, the tests' neutral conversion) recognises this
-   refusal by it and lets its own fault stand. */
+/* The message given with PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG, the
+   code for an information field over 256 bytes when nothing else is wrong.
+   The size is judged last, so a caller that has noted a fault of its own (the
+   builder, the tests' neutral conversion) recognises the refusal by its code
+   and lets its own fault stand. Nothing reads the message. */
 #define PDN_APRS__SIZE_REASON "an information field is at most 256 bytes"
 #define PDN_APRS__KNOTS_TO_MPH (1852.0 / 1609.344)
 
@@ -115,6 +116,7 @@ typedef struct pdn_aprs__dctx {
     int latin1;          /* the text being taken is not UTF-8 and is read as Latin-1 */
     int failed;          /* an error stopped decoding */
     int too_long;        /* a part of the field is longer than the packet holds */
+    int limit;           /* which capacity (pdn_aprs_limit) too_long or a header limit is about */
     const char *dest;    /* the destination address, for Mic-E */
     int depth;           /* third-party packets the field is inside */
 } pdn_aprs__dctx;
@@ -145,6 +147,8 @@ PDN_APRS__PRIVATE size_t pdn_aprs__take(pdn_aprs__dctx *c, char *dst, size_t cap
    longer than PDN_APRS_MAX_INFO can be (pdn_aprs_decode_info_unbounded): decoding
    stops, and the result is PDN_APRS_ERR_TOO_LONG. Returns 0. */
 PDN_APRS__PRIVATE int pdn_aprs__overflow(pdn_aprs__dctx *c);
+/* The same, for a capacity with its own name (pdn_aprs_limit). */
+PDN_APRS__PRIVATE int pdn_aprs__overflow_limit(pdn_aprs__dctx *c, int limit);
 
 /* Diagnostic-count checkpoints, for trial decodes. */
 PDN_APRS__PRIVATE int pdn_aprs__mark(pdn_aprs__dctx *c);
@@ -191,11 +195,23 @@ typedef struct pdn_aprs__cbuf {
     int gaps;
 } pdn_aprs__cbuf;
 
+/* What the comment's start lifts: base-91 telemetry (from its first | to
+   just after its last) and a !DAO!, found without taking them out. */
+typedef struct pdn_aprs__lifted {
+    int have_tlm, have_dao;
+    size_t tstart, tend, dao_pos;
+} pdn_aprs__lifted;
+
 /* Returns 1, or 0 (after pdn_aprs__overflow) if [s, s+n) does not fit. */
 PDN_APRS__PRIVATE int pdn_aprs__cbuf_set(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, const uint8_t *s, size_t n);
 PDN_APRS__PRIVATE void pdn_aprs__cbuf_cut(pdn_aprs__cbuf *cb, size_t at, size_t n);
 /* Lifts base-91 telemetry (between the last two |) and the last !DAO!
    outside it. */
+PDN_APRS__PRIVATE void pdn_aprs__find_telemetry_dao(const pdn_aprs__cbuf *cb, pdn_aprs__lifted *f);
+/* 1 if from at to the end of the text there is nothing but what the start of
+   a positioned report's comment lifts (telemetry, a !DAO!): the "end" of the
+   weather text for the run-on rule. */
+PDN_APRS__PRIVATE int pdn_aprs__lifted_run_to_end(const pdn_aprs__cbuf *cb, size_t at);
 PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs_report *r, uint8_t dao[5]);
 /* Lifts a /A= altitude; returns 1 if found. */
 PDN_APRS__PRIVATE int pdn_aprs__lift_altitude(pdn_aprs__cbuf *cb, double *feet);
@@ -691,11 +707,36 @@ PDN_APRS__PRIVATE int pdn_aprs__check_text(pdn_aprs__dctx *c, const uint8_t *s, 
     return pdn_aprs__check_encoding(c, s, n) && pdn_aprs__check_controls(c, s, n);
 }
 
-PDN_APRS__PRIVATE int pdn_aprs__overflow(pdn_aprs__dctx *c)
+PDN_APRS__PRIVATE int pdn_aprs__overflow_limit(pdn_aprs__dctx *c, int limit)
 {
     c->too_long = 1;
     c->failed = 1;
+    if (!c->limit)
+        c->limit = limit;
     return 0;
+}
+
+PDN_APRS__PRIVATE int pdn_aprs__overflow(pdn_aprs__dctx *c)
+{
+    return pdn_aprs__overflow_limit(c, PDN_APRS_LIMIT_INFORMATION_FIELD);
+}
+
+const char *pdn_aprs_limit_name(int limit)
+{
+    switch (limit) {
+    case PDN_APRS_LIMIT_INFORMATION_FIELD:
+        return "information-field";
+    case PDN_APRS_LIMIT_PATH:
+        return "path";
+    case PDN_APRS_LIMIT_CAPABILITIES:
+        return "capabilities";
+    case PDN_APRS_LIMIT_WEATHER_EXTRAS:
+        return "weather-extras";
+    case PDN_APRS_LIMIT_WEATHER_EXTRA_VALUE:
+        return "weather-extra-value";
+    default:
+        return NULL;
+    }
 }
 
 PDN_APRS__PRIVATE size_t pdn_aprs__take(pdn_aprs__dctx *c, char *dst, size_t cap, const uint8_t *s, size_t n,
@@ -843,7 +884,8 @@ const char *pdn_aprs_refusal_name(int refusal)
         "invalid-code",
         "invalid-nmea",
         "not-encodable",
-        "does-not-read-back"};
+        "does-not-read-back",
+        "information-field-too-long"};
     if (refusal < 1 || refusal > (int)(sizeof names / sizeof names[0]))
         return NULL;
     return names[refusal - 1];
@@ -1138,6 +1180,7 @@ static int decode_info_into(pdn_aprs_packet *packet, const pdn_aprs_decode_optio
     /* the cap is on the field, so one line end (CR LF, CR or LF) is not counted */
     if (keep && len > PDN_APRS_MAX_INFO + line_end_len(info, len)) {
         packet->info_dropped = 1;
+        packet->limit = PDN_APRS_LIMIT_INFORMATION_FIELD;
         packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
         packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
         limit_diagnostic(packet);
@@ -1159,6 +1202,7 @@ static int decode_info_into(pdn_aprs_packet *packet, const pdn_aprs_decode_optio
     if (c.too_long) {
         /* whether or not a copy was kept, the writers refuse the packet */
         packet->info_dropped = 1;
+        packet->limit = (uint8_t)(c.limit ? c.limit : PDN_APRS_LIMIT_INFORMATION_FIELD);
         memset(&packet->data, 0, sizeof packet->data);
         packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
         packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
@@ -1184,6 +1228,7 @@ int pdn_aprs_decode_tnc2(const void *line, size_t len, const pdn_aprs_decode_opt
     c.data = &packet->data;
     at = pdn_aprs__parse_tnc2_header(&c, s, len, &packet->header, 0);
     if (!at) {
+        packet->limit = (uint8_t)c.limit;
         packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
         packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
         return PDN_APRS_ERR_HEADER;
@@ -1247,6 +1292,7 @@ int pdn_aprs_decode_third_party(const pdn_aprs_data *outer, const pdn_aprs_decod
     c.data = &inner->data;
     at = pdn_aprs__parse_tnc2_header(&c, t->packet, t->len, &inner->header, 1);
     if (!at) {
+        inner->limit = (uint8_t)c.limit;
         inner->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
         inner->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
         return PDN_APRS_ERR_HEADER;
@@ -1484,6 +1530,7 @@ PDN_APRS__PRIVATE size_t pdn_aprs__parse_tnc2_header(pdn_aprs__dctx *c, const ui
                 }
                 if (h->path_count >= PDN_APRS_MAX_PATH) {
                     /* a capacity, not a defect of the header */
+                    c->limit = PDN_APRS_LIMIT_PATH;
                     pdn_aprs__fail(c, PDN_APRS_CODE_IMPLEMENTATION_LIMIT);
                     return 0;
                 }
@@ -2321,12 +2368,13 @@ static int dao_at(const uint8_t *s)
     return 0;
 }
 
-PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs_report *r, uint8_t dao[5])
+/* Finds, without taking anything out, the base-91 telemetry and the !DAO! the
+   comment's start lifts: the last two | around a valid telemetry body, and
+   the last !DAO! outside it. */
+PDN_APRS__PRIVATE void pdn_aprs__find_telemetry_dao(const pdn_aprs__cbuf *cb, pdn_aprs__lifted *f)
 {
-    size_t last = cb->n, prev = cb->n, i, tstart = 0, tend = 0;
-    int have_tlm = 0;
-    size_t dao_pos = 0;
-    int have_dao = 0;
+    size_t last = cb->n, prev = cb->n, i;
+    memset(f, 0, sizeof *f);
     for (i = cb->n; i > 0; i--) {
         if (cb->b[i - 1] == '|') {
             if (last == cb->n) {
@@ -2344,40 +2392,75 @@ PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs
             if (!A_B91(cb->b[k]))
                 ok = 0;
         if (ok) {
-            const uint8_t *t = cb->b + prev + 1;
-            size_t pairs = len / 2, p;
-            memset(&r->telemetry, 0, sizeof r->telemetry);
-            r->has_telemetry = 1;
-            r->telemetry.sequence = (uint16_t)pdn_aprs__b91(t, 2);
-            for (p = 1; p < pairs && p <= PDN_APRS_MAX_ANALOG; p++)
-                r->telemetry.analog[r->telemetry.analog_count++] = (uint16_t)pdn_aprs__b91(t + 2 * p, 2);
-            if (pairs == 7) {
-                /* eight binary channels; bits 9-13 are reserved (APRS12c ch. 13) */
-                r->telemetry.has_digital = 1;
-                r->telemetry.digital = (uint16_t)(pdn_aprs__b91(t + 12, 2) & 0xFF);
-            }
-            have_tlm = 1;
-            tstart = prev;
-            tend = last + 1;
+            f->have_tlm = 1;
+            f->tstart = prev;
+            f->tend = last + 1;
         }
     }
     /* the last !DAO! outside the telemetry */
     if (cb->n >= 5) {
         for (i = cb->n - 5 + 1; i > 0; i--) {
             size_t k = i - 1;
-            if (have_tlm && k + 5 > tstart && k < tend)
+            if (f->have_tlm && k + 5 > f->tstart && k < f->tend)
                 continue;
             /* bytes either side of what was taken out never join into one */
             if (cb->cut && k + 1 < cb->cut && cb->cut - 1 < k + 5)
                 continue;
             if (dao_at(cb->b + k)) {
-                memcpy(dao, cb->b + k, 5);
-                dao_pos = k;
-                have_dao = 1;
+                f->dao_pos = k;
+                f->have_dao = 1;
                 break;
             }
         }
     }
+}
+
+PDN_APRS__PRIVATE int pdn_aprs__lifted_run_to_end(const pdn_aprs__cbuf *cb, size_t at)
+{
+    pdn_aprs__lifted f;
+    pdn_aprs__find_telemetry_dao(cb, &f);
+    for (;;) {
+        if (at == cb->n)
+            return 1;
+        if (f.have_tlm && at == f.tstart) {
+            at = f.tend;
+            f.have_tlm = 0;
+        } else if (f.have_dao && at == f.dao_pos) {
+            at += 5;
+            f.have_dao = 0;
+        } else {
+            return 0;
+        }
+    }
+}
+
+PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs_report *r, uint8_t dao[5])
+{
+    pdn_aprs__lifted f;
+    size_t tstart, tend, dao_pos;
+    int have_tlm, have_dao;
+    pdn_aprs__find_telemetry_dao(cb, &f);
+    have_tlm = f.have_tlm;
+    have_dao = f.have_dao;
+    tstart = f.tstart;
+    tend = f.tend;
+    dao_pos = f.dao_pos;
+    if (have_tlm) {
+        const uint8_t *t = cb->b + tstart + 1;
+        size_t pairs = (tend - tstart - 2) / 2, p;
+        memset(&r->telemetry, 0, sizeof r->telemetry);
+        r->has_telemetry = 1;
+        r->telemetry.sequence = (uint16_t)pdn_aprs__b91(t, 2);
+        for (p = 1; p < pairs && p <= PDN_APRS_MAX_ANALOG; p++)
+            r->telemetry.analog[r->telemetry.analog_count++] = (uint16_t)pdn_aprs__b91(t + 2 * p, 2);
+        if (pairs == 7) {
+            /* eight binary channels; bits 9-13 are reserved (APRS12c ch. 13) */
+            r->telemetry.has_digital = 1;
+            r->telemetry.digital = (uint16_t)(pdn_aprs__b91(t + 12, 2) & 0xFF);
+        }
+    }
+    if (have_dao)
+        memcpy(dao, cb->b + dao_pos, 5);
     cb->gaps = 0;
     if (have_dao && have_tlm && dao_pos > tstart) {
         pdn_aprs__cbuf_cut(cb, dao_pos, 5);
@@ -2861,11 +2944,16 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
                 break;
             while (run < avail && (A_DIGIT(v[run]) || v[run] == '.' || v[run] == '-'))
                 run++;
-            if (run < 2 || !A_DIGIT(v[run - 1]) || run >= sizeof w->extra[0].value)
+            if (run < 2 || !A_DIGIT(v[run - 1]))
                 break;
+            if (run >= sizeof w->extra[0].value) {
+                /* an extra field's value longer than the 23 characters the
+                   data holds: the capacity, not a comment */
+                return pdn_aprs__overflow_limit(c, PDN_APRS_LIMIT_WEATHER_EXTRA_VALUE);
+            }
             if (w->extra_count >= PDN_APRS_MAX_WEATHER_EXTRA) {
                 /* one more than the report holds: the capacity, not a comment */
-                return pdn_aprs__overflow(c);
+                return pdn_aprs__overflow_limit(c, PDN_APRS_LIMIT_WEATHER_EXTRAS);
             }
             w->extra[w->extra_count].letter = (char)L;
             memcpy(w->extra[w->extra_count].value, v, run);
@@ -2931,7 +3019,8 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
             if (d == lead)
                 break;
             if (d >= (size_t)width + 2) {
-                if (i + 1 + d == n || field_follows(s, n, i + 1 + d, mode, wind_known, present, idx)) {
+                if (i + 1 + d == n || (r && pdn_aprs__lifted_run_to_end(cb, i + 1 + d)) ||
+                    field_follows(s, n, i + 1 + d, mode, wind_known, present, idx)) {
                     /* a value that runs on: out of range, dropped, and the
                        fields carry on after the run */
                     used = d;
@@ -4356,7 +4445,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_capabilities(pdn_aprs__dctx *c)
     }
     /* more than the report holds: the capacity, whatever the text's encoding */
     if (full) {
-        pdn_aprs__overflow(c);
+        pdn_aprs__overflow_limit(c, PDN_APRS_LIMIT_CAPABILITIES);
         return;
     }
     /* the text's encoding is checked before free text */
@@ -4365,7 +4454,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_capabilities(pdn_aprs__dctx *c)
     if (c->latin1)
         split_capabilities(s, n, 1, cap, &free_text, &full);
     if (full) {
-        pdn_aprs__overflow(c);
+        pdn_aprs__overflow_limit(c, PDN_APRS_LIMIT_CAPABILITIES);
         return;
     }
     if (free_text && !pdn_aprs__tolerate(c, PDN_APRS_CODE_FREE_TEXT_CAPABILITIES))
@@ -4473,7 +4562,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_third_party(pdn_aprs__dctx *c)
     pdn_aprs_header h;
     const pdn_aprs_decode_options *saved = c->opt;
     size_t at;
-    int mark, k, rejected = 0;
+    int mark, k, rejected = 0, at_limit = 0;
     c->data->type = PDN_APRS_TYPE_THIRD_PARTY;
     /* Third-party packets nest at most four deep: a fifth } is not read
        (vectors interpretation "third-party packets nest at most four deep"). */
@@ -4491,7 +4580,17 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_third_party(pdn_aprs__dctx *c)
     for (k = mark & 0xFF; at && k < c->pkt->diagnostic_count; k++)
         if (pdn_aprs__rejects(c, c->pkt->diagnostics[k].code))
             rejected = 1;
+    /* a capacity of the library (a 17th path entry in the inner header) is
+       not a defect of the packet: the rewind below must not turn it into
+       invalid-third-party, which would be a different reading */
+    for (k = mark & 0xFF; k < c->pkt->diagnostic_count; k++)
+        if (c->pkt->diagnostics[k].code == PDN_APRS_CODE_IMPLEMENTATION_LIMIT)
+            at_limit = 1;
     pdn_aprs__rewind(c, mark);
+    if (at_limit) {
+        pdn_aprs__overflow_limit(c, PDN_APRS_LIMIT_PATH);
+        return;
+    }
     if (!at || rejected) {
         pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_THIRD_PARTY);
         return;
@@ -5031,7 +5130,8 @@ PDN_APRS__PRIVATE int pdn_aprs__refusal_rank(int code)
         PDN_APRS_REFUSAL_INVALID_NMEA,       PDN_APRS_REFUSAL_EXTENSION_CONFLICT,
         PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED,  PDN_APRS_REFUSAL_SYMBOL_MISMATCH,
         PDN_APRS_REFUSAL_MISSING_FIELD,      PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE,
-        PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD, PDN_APRS_REFUSAL_DOES_NOT_READ_BACK};
+        PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD, PDN_APRS_REFUSAL_DOES_NOT_READ_BACK,
+        PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG};
     int i;
     for (i = 0; i < (int)(sizeof order / sizeof order[0]); i++)
         if (order[i] == code)
@@ -7030,6 +7130,10 @@ static int encode_telemetry(pdn_aprs__ectx *e, const pdn_aprs_telemetry *t)
     for (i = 0; i < sl; i++)
         if (!A_ALNUM(t->sequence[i]))
             pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a telemetry sequence is letters and digits");
+    /* a sequence that starts MIC is MIC itself: any other would read back as
+       MIC and a value */
+    if (sl > 3 && memcmp(t->sequence, "MIC", 3) == 0)
+        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a telemetry sequence that starts MIC is MIC itself");
     /* more than five analog values is too-long, fewer malformed (README
        Refusal reasons); an analog_count over PDN_APRS_MAX_ANALOG says there
        were more than the data holds */
@@ -7700,14 +7804,48 @@ static int data_bounds_ok(const pdn_aprs_data *d)
 /* room to write a field that does not fit the caller's buffer, to judge it */
 #define PDN_APRS_ENCODE_SCRATCH 4096
 
+#if defined(__GNUC__) || defined(__clang__)
+#define PDN_APRS__NOINLINE __attribute__((noinline))
+#elif defined(_MSC_VER)
+#define PDN_APRS__NOINLINE __declspec(noinline)
+#else
+#define PDN_APRS__NOINLINE
+#endif
+
+/* The caller's buffer was too small for a field of over 256 bytes: the bytes
+   are written again somewhere that holds them and judged like any other (the
+   size is the last check). Kept out of encode_info, in a function of its own,
+   so the 4 KB of room is in a frame only when a caller's buffer overflowed.
+   Returns 1 when the encoder's answer is final, a refusal in e (the size
+   when nothing else is wrong), and 0 when this variant's bytes do not read
+   back (the reason is in e) and the next variant is to be tried. */
+static PDN_APRS__NOINLINE int judge_oversize(const pdn_aprs_data *data, const pdn_aprs_encode_options *options,
+                                             int variant, pdn_aprs__ectx *e)
+{
+    uint8_t scratch[PDN_APRS_ENCODE_SCRATCH];
+    pdn_aprs__buf b;
+    memset(e, 0, sizeof *e);
+    pdn_aprs__buf_init(&b, scratch, sizeof scratch);
+    e->b = &b;
+    e->variant = variant;
+    e->devices = options ? options->devices : NULL;
+    if (!pdn_aprs__encode_data(e, data))
+        return 1;
+    if (b.overflow || reads_back(data, scratch, b.len, e->dest, options ? options->devices : NULL)) {
+        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG, PDN_APRS__SIZE_REASON);
+        return 1;
+    }
+    e->reason = "what the encoder would write does not read back as the same data";
+    e->refusal = read_back_refusal(data);
+    return 0;
+}
+
 static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf, size_t cap,
                        pdn_aprs_encoded *encoded)
 {
     pdn_aprs__buf b;
     pdn_aprs__ectx e;
-    const uint8_t *out;
     int ok = 0, full = 0, variant;
-    uint8_t scratch[PDN_APRS_ENCODE_SCRATCH];
     if (encoded) {
         encoded->len = 0;
         encoded->destination[0] = 0;
@@ -7730,33 +7868,22 @@ static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options 
         ok = pdn_aprs__encode_data(&e, data);
         if (!ok)
             break;
-        out = (const uint8_t *)buf;
         if (b.overflow && b.total > PDN_APRS_MAX_FIELD) {
             /* more than buf holds, and over the 256 bytes: the size is judged
-               last, so the bytes are written again somewhere that holds them
-               and checked like any other */
-            memset(&e, 0, sizeof e);
-            pdn_aprs__buf_init(&b, scratch, sizeof scratch);
-            e.b = &b;
-            e.variant = variant;
-            e.devices = options ? options->devices : NULL;
-            ok = pdn_aprs__encode_data(&e, data);
-            if (!ok)
+               last, so the bytes are checked somewhere that holds them */
+            ok = 0;
+            if (judge_oversize(data, options, variant, &e))
                 break;
-            out = scratch;
+            continue;
         }
         if (b.overflow) {
-            if (b.total > PDN_APRS_MAX_FIELD) {
-                ok = pdn_aprs__refuse(&e, PDN_APRS_REFUSAL_TOO_LONG, PDN_APRS__SIZE_REASON);
-                break;
-            }
             /* too long for buf, and so for checking */
             full = 1;
             break;
         }
-        if (reads_back(data, out, b.len, e.dest, options ? options->devices : NULL)) {
+        if (reads_back(data, (const uint8_t *)buf, b.len, e.dest, options ? options->devices : NULL)) {
             if (b.total > PDN_APRS_MAX_FIELD)
-                ok = pdn_aprs__refuse(&e, PDN_APRS_REFUSAL_TOO_LONG, PDN_APRS__SIZE_REASON);
+                ok = pdn_aprs__refuse(&e, PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG, PDN_APRS__SIZE_REASON);
             break;
         }
         ok = 0;
@@ -7995,7 +8122,7 @@ static int station_header(const pdn_aprs_station *st, pdn_aprs_header *h, pdn_ap
         size_t n = comma ? (size_t)(comma - p) : strlen(p);
         pdn_aprs_path_entry *e;
         if (h->path_count >= PDN_APRS_MAX_PATH)
-            return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESS, "the path has more entries than a header can hold");
+            return fail(result, PDN_APRS_ERR_UNSUPPORTED, 0, "the path has more entries than this library's header holds (PDN_APRS_MAX_PATH)");
         e = &h->path[h->path_count];
         if (n > 0 && p[n - 1] == '*') {
             e->marked = 1;
@@ -8086,7 +8213,7 @@ static void note_text(pending *p, const char *s, int list)
 /* 1 if the encoder refused only for the 256 bytes of the information field */
 static int size_refusal(const pdn_aprs_encoded *r)
 {
-    return r->refusal == PDN_APRS_REFUSAL_TOO_LONG && r->reason && strcmp(r->reason, PDN_APRS__SIZE_REASON) == 0;
+    return r->refusal == PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG;
 }
 
 static int build_with(const pdn_aprs_station *station, const pdn_aprs_data *d, void *buf, size_t cap,
@@ -8963,6 +9090,7 @@ int pdn_aprs_symbol_overlay(pdn_aprs_symbol symbol, char overlay, pdn_aprs_symbo
 #undef DAO_DATUM_REFUSAL
 #undef TERMINATED
 #undef PDN_APRS_ENCODE_SCRATCH
+#undef PDN_APRS__NOINLINE
 #undef HEADER_ROOM
 #undef NO_STATION
 #undef NO_ARGS

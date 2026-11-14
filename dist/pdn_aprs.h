@@ -218,6 +218,21 @@ typedef enum pdn_aprs_code {
     PDN_APRS_CODE_COUNT
 } pdn_aprs_code;
 
+/* Which fixed capacity a decode met when it gave PDN_APRS_CODE_IMPLEMENTATION_LIMIT
+   (pdn_aprs_packet.limit). The names are the keys of limits.json in the
+   repository, which lists each capacity. */
+typedef enum pdn_aprs_limit {
+    PDN_APRS_LIMIT_NONE = 0,
+    PDN_APRS_LIMIT_INFORMATION_FIELD, /* PDN_APRS_MAX_INFO: the field, or a text in it */
+    PDN_APRS_LIMIT_PATH,              /* PDN_APRS_MAX_PATH: path entries, in the header or an inner one */
+    PDN_APRS_LIMIT_CAPABILITIES,      /* PDN_APRS_MAX_CAPABILITIES */
+    PDN_APRS_LIMIT_WEATHER_EXTRAS,    /* PDN_APRS_MAX_WEATHER_EXTRA */
+    PDN_APRS_LIMIT_WEATHER_EXTRA_VALUE /* an extra field's value of more than 23 characters */
+} pdn_aprs_limit;
+
+/* The limits.json key for a pdn_aprs_limit ("path"), or NULL for none or out of range. */
+PDN_APRS_API const char *pdn_aprs_limit_name(int limit);
+
 typedef struct pdn_aprs_diagnostic {
     uint8_t severity; /* pdn_aprs_severity */
     uint8_t code;     /* pdn_aprs_code */
@@ -1055,6 +1070,9 @@ typedef struct pdn_aprs_packet {
        way an unbounded decode gets here). pdn_aprs_write_tnc2() and
        pdn_aprs_write_ax25() refuse the packet. */
     uint8_t info_dropped;
+    /* Which capacity the diagnostic PDN_APRS_CODE_IMPLEMENTATION_LIMIT is
+       about (a pdn_aprs_limit), zero when there is none. */
+    uint8_t limit;
     pdn_aprs_data data;
     /* Every diagnostic, the header's first. */
     uint8_t diagnostic_count;
@@ -1176,7 +1194,8 @@ typedef enum pdn_aprs_refusal {
     PDN_APRS_REFUSAL_INVALID_CODE,
     PDN_APRS_REFUSAL_INVALID_NMEA,
     PDN_APRS_REFUSAL_NOT_ENCODABLE,
-    PDN_APRS_REFUSAL_DOES_NOT_READ_BACK
+    PDN_APRS_REFUSAL_DOES_NOT_READ_BACK,
+    PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG /* the whole field is over 256 bytes: judged last */
 } pdn_aprs_refusal;
 
 /* The vectors' id for a refusal code ("too-long"), or NULL if out of range or
@@ -1197,7 +1216,10 @@ typedef struct pdn_aprs_encoded {
 /*
  * Encodes data as an information field. Writes at most cap bytes and no NUL.
  * A field of more than PDN_APRS_MAX_FIELD (256) bytes is refused, whatever
- * cap is, as PDN_APRS_REFUSAL_TOO_LONG: the bytes written count, number text
+ * cap is, as PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG (PDN_APRS_REFUSAL_TOO_LONG
+ * now means only a field over its own limit, message text over 67
+ * characters and the like): it is the last check, after the read-back, and
+ * the bytes written count, number text
  * and any delimiter included, and for third-party data the outermost field.
  * Text with a byte below 0x20 or 0x7F is refused as
  * PDN_APRS_REFUSAL_INVALID_CHARACTER. Returns the
@@ -1480,7 +1502,10 @@ PDN_APRS_API int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_
    packet whose decode returned PDN_APRS_ERR_TOO_LONG has info_dropped set and
    is not written: PDN_APRS_ERR_TOO_LONG. A packet decoded with
    pdn_aprs_decode_info_unbounded keeps no information field, so only its
-   header is written (unless it returned TOO_LONG, as above). */
+   header is written (unless it returned TOO_LONG, as above). These pass
+   the information field through as received, even over 256 bytes: they write
+   a packet the program already holds and are not encoders, so they make no
+   size check. */
 PDN_APRS_API int pdn_aprs_write_tnc2(const pdn_aprs_packet *packet, char *buf, size_t cap);
 PDN_APRS_API int pdn_aprs_write_ax25(const pdn_aprs_packet *packet, void *buf, size_t cap);
 

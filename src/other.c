@@ -494,7 +494,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_capabilities(pdn_aprs__dctx *c)
     }
     /* more than the report holds: the capacity, whatever the text's encoding */
     if (full) {
-        pdn_aprs__overflow(c);
+        pdn_aprs__overflow_limit(c, PDN_APRS_LIMIT_CAPABILITIES);
         return;
     }
     /* the text's encoding is checked before free text */
@@ -503,7 +503,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_capabilities(pdn_aprs__dctx *c)
     if (c->latin1)
         split_capabilities(s, n, 1, cap, &free_text, &full);
     if (full) {
-        pdn_aprs__overflow(c);
+        pdn_aprs__overflow_limit(c, PDN_APRS_LIMIT_CAPABILITIES);
         return;
     }
     if (free_text && !pdn_aprs__tolerate(c, PDN_APRS_CODE_FREE_TEXT_CAPABILITIES))
@@ -611,7 +611,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_third_party(pdn_aprs__dctx *c)
     pdn_aprs_header h;
     const pdn_aprs_decode_options *saved = c->opt;
     size_t at;
-    int mark, k, rejected = 0;
+    int mark, k, rejected = 0, at_limit = 0;
     c->data->type = PDN_APRS_TYPE_THIRD_PARTY;
     /* Third-party packets nest at most four deep: a fifth } is not read
        (vectors interpretation "third-party packets nest at most four deep"). */
@@ -629,7 +629,17 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_third_party(pdn_aprs__dctx *c)
     for (k = mark & 0xFF; at && k < c->pkt->diagnostic_count; k++)
         if (pdn_aprs__rejects(c, c->pkt->diagnostics[k].code))
             rejected = 1;
+    /* a capacity of the library (a 17th path entry in the inner header) is
+       not a defect of the packet: the rewind below must not turn it into
+       invalid-third-party, which would be a different reading */
+    for (k = mark & 0xFF; k < c->pkt->diagnostic_count; k++)
+        if (c->pkt->diagnostics[k].code == PDN_APRS_CODE_IMPLEMENTATION_LIMIT)
+            at_limit = 1;
     pdn_aprs__rewind(c, mark);
+    if (at_limit) {
+        pdn_aprs__overflow_limit(c, PDN_APRS_LIMIT_PATH);
+        return;
+    }
     if (!at || rejected) {
         pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_THIRD_PARTY);
         return;

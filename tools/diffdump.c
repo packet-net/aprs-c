@@ -327,6 +327,9 @@ static void decode_line(long n, const char *text, size_t tl)
         json_set(out, "written_destination", json_str(dest));
     json_set(out, "lenient", lr);
     json_set(out, "strict", sr);
+    /* a result that is the library's capacity names it (README, Implementation limits) */
+    if (pdn_aprs_limit_name(neutral_result_limit(&lenient_pkt, &lenient)))
+        json_set(out, "limit", json_str(pdn_aprs_limit_name(neutral_result_limit(&lenient_pkt, &lenient))));
     if (lenient_pkt.header_ok)
         json_set(out, "api", api_view(&lenient_pkt, 0));
     emit(out);
@@ -358,6 +361,8 @@ static void encode_line(long fallback_n, const char *text, size_t tl)
     if (conv <= 0) {
         json_set(out, "result", json_str(conv < 0 ? "refused" : neutral_limit() ? "implementation-limit" : "unsupported"));
         json_set(out, "reason", json_str(err));
+        if (conv == 0 && neutral_limit())
+            json_set(out, "limit", json_str(pdn_aprs_limit_name(neutral_limit())));
         if (conv < 0 && neutral_refusal() && pdn_aprs_refusal_name(neutral_refusal()))
             json_set(out, "refusal", json_str(pdn_aprs_refusal_name(neutral_refusal())));
         if (conv < 0 && neutral_via_tool())
@@ -408,6 +413,8 @@ static void build_line(long fallback_n, const char *text, size_t tl)
     if (res.kind == RECIPE_UNSUPPORTED || res.kind == RECIPE_LIMIT) {
         json_set(out, "result", json_str(res.kind == RECIPE_LIMIT ? "implementation-limit" : "unsupported"));
         json_set(out, "reason", json_str(res.reason));
+        if (res.kind == RECIPE_LIMIT && pdn_aprs_limit_name(res.limit))
+            json_set(out, "limit", json_str(pdn_aprs_limit_name(res.limit)));
     } else if (res.kind == RECIPE_REFUSED) {
         json_set(out, "result", json_str("refused"));
         json_set(out, "reason", json_str(res.reason));

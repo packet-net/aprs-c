@@ -2,11 +2,11 @@
 
 ## Unreleased
 
-Round 4 of the shared vectors (aprs-vectors `round-4`, pinned at 0c625fc, version 1.2), and the fixes from the November 2026 review. The vectors are now CC0 (their tools MIT); the library stays MIT.
+Round 4 of the shared vectors (aprs-vectors `round-4`, pinned at 11e59dfcb730e5e5846629459b081bc26d2395cd, version 1.2), and the fixes from the November 2026 review. Licence: this library has always been MIT and still is (it was never AGPL-3.0-or-later, unlike the other libraries' versions up to 1.1.0); the vectors it is tested against are now CC0 (their tools MIT).
 
 ### Breaking changes for callers
 
-- An encoder or builder refuses an information field over 256 bytes (`too-long`), counted in bytes, number text included; for a third-party packet the outermost field. It was written at any length. The size is the last check, on the bytes actually written after the read-back: data any other rule refuses gets that rule's code, even when its field would also be over 256 bytes (it never measures data it refuses), and only otherwise sound data over 256 bytes is `too-long` for its size. A field over its own limit (message text over 67 characters and the like) stays `too-long` at its place in the order. A decoded packet over 256 bytes (up to the 512 the decoder holds) re-encodes refused. `PDN_APRS_MAX_FIELD` (256) is new.
+- An encoder or builder refuses an information field over 256 bytes as the new `information-field-too-long` (`PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG`, appended to `pdn_aprs_refusal`; `too-long` now means only a field over its own limit), counted in bytes, number text included; for a third-party packet the outermost field. It was written at any length. The size is the last check, on the bytes actually written after the read-back: data any other rule refuses gets that rule's code, even when its field would also be over 256 bytes (it never measures data it refuses), and only otherwise sound data over 256 bytes is `too-long` for its size. A field over its own limit (message text over 67 characters and the like) stays `too-long` at its place in the order. A decoded packet over 256 bytes (up to the 512 the decoder holds) re-encodes refused. `PDN_APRS_MAX_FIELD` (256) is new.
 - Text with a control character (a byte below 0x20 or 0x7F, a tab or a line break inside it included) is refused with `invalid-character`, where only a line break was. A Mic-E status text starting with 0x1D is refused too, not written after a `/`. Test data (the `,` type) keeps its own rule. The decoder gives the tolerable warning `control-character-in-text` (`PDN_APRS_CODE_CONTROL_CHARACTER_IN_TEXT`), so a strict decode now rejects such a packet.
 - A weather value that runs on by two or more digits (`t2147483647r000`) before the end of the field or a defined field it goes on to read is dropped with `out-of-range-value` and the fields carry on, where it ended the fields and the rest became comment text. The run's own field counts as read: a run followed by its own field's letter (`t05700t057`, `g00504g005`) is not a run-on and keeps the 1.1.0 reading.
 - A packet beyond a fixed capacity is `implementation-limit` (`PDN_APRS_CODE_IMPLEMENTATION_LIMIT`, an error) instead of the readings it gave at 1.1.0: an information field over 512 bytes, a 65th capability and a ninth extra weather field are `unrecognized` data (`malformed`) and return `PDN_APRS_ERR_TOO_LONG`, lenient and strict alike; a 17th path entry is an unusable header (`PDN_APRS_ERR_HEADER`). Before, a 65th capability was `invalid-capabilities`, a 17th path entry `invalid-header`, and a ninth extra field ended the weather fields and went into the comment.
@@ -16,6 +16,13 @@ Round 4 of the shared vectors (aprs-vectors `round-4`, pinned at 0c625fc, versio
 - NaN or an infinity in a weather value (wind direction and speed, gust, temperature and the rest, whether in the cs bytes, `DDD/SSS` or a letter field) is `not-a-number` before the position's range is judged, as it is in a course, speed, range or altitude.
 - NaN or an infinity in a course, speed, range or altitude (and in an NMEA report's fields) is `not-a-number` before any other fault of the report, as the refusal order says; a compressed GGA altitude that is infinite is refused instead of written as `{{`.
 - A positionless weather report built or encoded with no timestamp is `missing-field` (it was `invalid-timestamp`). Nothing in the library reads the clock, and it has no "now" helper: pass a time of your own (`pdn_aprs_format_timestamp()` formats one).
+
+- A weather value that runs on is also dropped when the run ends where trailing base-91 telemetry or a `!DAO!` starts in a positioned report (`t2147483647!W12!`), as at the end of the field.
+- A telemetry sequence that starts `MIC` and is not `MIC` (`MIC1`) is `malformed` for an encoder or builder; it was `text-reads-as-field` or `does-not-read-back`.
+- The inner header of a third-party packet with a 17th path entry is `implementation-limit` (the data is `unrecognized`, the decode returns `PDN_APRS_ERR_TOO_LONG`), not `invalid-third-party`, which was a different reading. An extra weather field whose value is over 23 characters is `implementation-limit` too (it was comment text). A station path of more than 16 entries given to a builder is `PDN_APRS_ERR_UNSUPPORTED`, not an `invalid-address` refusal.
+- The dump tool: storm data missing a required field is refused `missing-field` (`"via": "tool"`, the C struct has no absent field and the library would write `000`); a NUL swapped for another control character to reach the builder marks its refusal `"via": "tool"`; every `implementation-limit` record names its capacity in `limit`; a third-party packet whose inner packet needs more than a capacity is that limit as a whole, not an empty `packet`.
+- Public API additions: `PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG`, `pdn_aprs_packet.limit` with `pdn_aprs_limit` and `pdn_aprs_limit_name()` (which capacity a limit result is about), and `limits.json` at the repository root, checked against the header by `tools/check_limits.py`. `sizeof(pdn_aprs_packet)` is unchanged.
+- `pdn_aprs_write_tnc2()` and `pdn_aprs_write_ax25()` write a decoded packet's information field as it stands, even over 256 bytes: they are not encoders and make no size check (documented; the encoder's limit does not apply to a packet the program already holds).
 
 ### Changes
 
@@ -29,6 +36,9 @@ Round 4 of the shared vectors (aprs-vectors `round-4`, pinned at 0c625fc, versio
 - README: the encoder's 256-byte limit, the capacities and `implementation-limit`, the builder defaults, control characters in text, the Mic-E altitude; the claim of no size limit is gone.
 
 ### Fixes from the November 2026 review
+
+- Stack: the 4 KB room the encoder needs to judge a field that did not fit the caller's buffer moved out of `encode_info` into a function of its own, used only then. Peak stack for one short `pdn_aprs_build_position` is back to 14,464 bytes (gcc -O2) from 21,216, against 14,704 at 1.1.0.
+- The vectors runner fails, not skips, a case that gives `implementation-limit` for input within the capacities; the libFuzzer target asserts nothing an encoder or builder writes is over 256 bytes.
 
 No decode result changes except for the line end in the second item.
 

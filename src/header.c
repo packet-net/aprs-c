@@ -108,6 +108,7 @@ PDN_APRS__PRIVATE size_t pdn_aprs__parse_tnc2_header(pdn_aprs__dctx *c, const ui
                 }
                 if (h->path_count >= PDN_APRS_MAX_PATH) {
                     /* a capacity, not a defect of the header */
+                    c->limit = PDN_APRS_LIMIT_PATH;
                     pdn_aprs__fail(c, PDN_APRS_CODE_IMPLEMENTATION_LIMIT);
                     return 0;
                 }

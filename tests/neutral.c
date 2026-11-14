@@ -522,14 +522,57 @@ jval *neutral_data(const pdn_aprs_data *d, const pdn_aprs_decode_options *opt)
     return o;
 }
 
+/* The capacity (a pdn_aprs_limit) a third-party packet's inner packets need
+   more than the library holds of, or 0: the outer packet decodes, but the
+   inner one is only read on request, and a packet needing more than the
+   library holds is that capacity's result as a whole, never a reading of
+   the part that fits. */
+static int third_party_limit(const pdn_aprs_data *d, const pdn_aprs_decode_options *o, int depth)
+{
+    static pdn_aprs_packet inner_storage[8];
+    pdn_aprs_packet *inner;
+    int rc, lim = 0;
+    if (d->type != PDN_APRS_TYPE_THIRD_PARTY || depth >= 8)
+        return 0;
+    inner = &inner_storage[depth];
+    rc = pdn_aprs_decode_third_party(d, o, inner);
+    if (rc == PDN_APRS_ERR_TOO_LONG || (rc == PDN_APRS_ERR_HEADER && inner->limit))
+        lim = inner->limit;
+    else if (rc == PDN_APRS_OK)
+        lim = third_party_limit(&inner->data, o, depth + 1);
+    return lim;
+}
+
+int neutral_result_limit(const pdn_aprs_packet *p, const pdn_aprs_decode_options *o)
+{
+    if (p->limit)
+        return p->limit;
+    if (p->header_ok)
+        return third_party_limit(&p->data, o, 0);
+    return 0;
+}
+
 jval *neutral_result(const pdn_aprs_packet *p, int rc, const pdn_aprs_decode_options *o)
 {
     jval *r = json_obj();
+    int lim;
     if (rc == PDN_APRS_ERR_HEADER || !p->header_ok) {
         json_set(r, "header_error", neutral_diagnostics(p));
         return r;
     }
     json_set(r, "header", neutral_header(&p->header));
+    lim = p->limit ? 0 : neutral_result_limit(p, o);
+    if (lim) {
+        /* an inner packet needs more than the library holds: the data is
+           unrecognized, with the capacity's error, as for any other packet */
+        jval *d = json_obj(), *diags = neutral_diagnostics(p);
+        json_set(d, "type", json_str("unrecognized"));
+        json_set(d, "reason", json_str("malformed"));
+        json_set(r, "data", d);
+        json_push(diags, json_str("error:implementation-limit"));
+        json_set(r, "diagnostics", diags);
+        return r;
+    }
     json_set(r, "data", neutral_data(&p->data, o));
     json_set(r, "diagnostics", neutral_diagnostics(p));
     return r;
@@ -542,7 +585,7 @@ typedef struct conv {
     char *err;
     size_t errlen;
     int bad;
-    int limit;        /* the first thing the C data could not hold was a fixed capacity */
+    int limit;        /* the first thing the C data could not hold was a fixed capacity: its pdn_aprs_limit */
     int short_legacy; /* Mic-E legacy telemetry of fewer than five values: refused */
 } conv;
 
@@ -560,10 +603,10 @@ static int last_limit;
 
 /* The same, for a thing that is more than a fixed capacity of the library
    holds (a text, a list), not something its data has no field for. */
-static int cannot_limit(conv *cv, const char *what, const char *key)
+static int cannot_limit(conv *cv, int limit, const char *what, const char *key)
 {
     if (!cv->bad)
-        cv->limit = 1;
+        cv->limit = limit;
     return cannot(cv, what, key);
 }
 
@@ -688,7 +731,7 @@ static int str_in(conv *cv, const jval *o, const char *k, char *dst, size_t cap,
     if (v->t != J_STR)
         return cannot(cv, "is not text", k);
     if (v->len >= cap)
-        return cap >= PDN_APRS_TEXT_SIZE ? cannot_limit(cv, "is longer than the C field holds", k)
+        return cap >= PDN_APRS_TEXT_SIZE ? cannot_limit(cv, PDN_APRS_LIMIT_INFORMATION_FIELD, "is longer than the C field holds", k)
                                          : cannot(cv, "is longer than the C field holds", k);
     memcpy(dst, v->str, v->len);
     dst[v->len] = 0;
@@ -802,7 +845,7 @@ static void weather_in(conv *cv, const jval *o, pdn_aprs_weather *w)
     if (extra) {
         size_t k;
         if (extra->t != J_ARR || extra->count > PDN_APRS_MAX_WEATHER_EXTRA) {
-            cannot_limit(cv, "has more fields than the C data holds", "extra");
+            cannot_limit(cv, PDN_APRS_LIMIT_WEATHER_EXTRAS, "has more fields than the C data holds", "extra");
             return;
         }
         for (k = 0; k < extra->count; k++) {
@@ -918,6 +961,12 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
                                          NULL};
         keys_only(cv, v, sk);
         r->has_storm = 1;
+        /* the C struct has no "absent" for a storm field and the encoder
+           must not write a value that was not given: the tool names the
+           refusal (via tool) */
+        for (n = 0; n < 6; n++)
+            if (!json_get(v, sk[n]))
+                note_pending(PDN_APRS_REFUSAL_MISSING_FIELD, "storm data is missing a required field");
         enum_in(cv, v, "type", storm_names, 3, &e);
         r->storm.type = (uint8_t)e;
         int_in(cv, v, "sustained_wind_knots", 0, 65535, &n);
@@ -1045,7 +1094,7 @@ static void meta_strings_in(conv *cv, const jval *a, const char *k, pdn_aprs_tel
             return;
         }
         if (out + v->len + 1 > sizeof m->text) {
-            cannot_limit(cv, "is longer than the C field holds", k);
+            cannot_limit(cv, PDN_APRS_LIMIT_INFORMATION_FIELD, "is longer than the C field holds", k);
             return;
         }
         memcpy(m->text + out, v->str, v->len);
@@ -1092,7 +1141,8 @@ int neutral_refusal_rank(int code)
         PDN_APRS_REFUSAL_INVALID_NMEA,        PDN_APRS_REFUSAL_EXTENSION_CONFLICT,
         PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED,   PDN_APRS_REFUSAL_SYMBOL_MISMATCH,
         PDN_APRS_REFUSAL_MISSING_FIELD,       PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE,
-        PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD, PDN_APRS_REFUSAL_DOES_NOT_READ_BACK};
+        PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD, PDN_APRS_REFUSAL_DOES_NOT_READ_BACK,
+        PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG};
     int i;
     for (i = 0; i < (int)(sizeof order / sizeof order[0]); i++)
         if (order[i] == code)
@@ -1120,8 +1170,7 @@ int neutral_encode(const pdn_aprs_data *d, const pdn_aprs_encode_options *o, voi
     /* the 256 bytes of the field are judged only for a record with no other
        fault, and this one has the noted fault (the encoder's reason text) */
     if (rc != PDN_APRS_ERR_REFUSED || neutral_refusal_rank(code) < neutral_refusal_rank(enc->refusal) ||
-        (enc->refusal == PDN_APRS_REFUSAL_TOO_LONG && enc->reason &&
-         strcmp(enc->reason, "an information field is at most 256 bytes") == 0)) {
+        enc->refusal == PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG) {
         enc->refusal = code;
         enc->reason = why;
         last_via_tool = 1;
@@ -1263,7 +1312,7 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         }
         free(inner);
         if (h + 1 + (size_t)i > sizeof t->packet)
-            return cannot_limit(cv, "is longer than the C field holds", "packet");
+            return cannot_limit(cv, PDN_APRS_LIMIT_INFORMATION_FIELD, "is longer than the C field holds", "packet");
         memcpy(t->packet, head, h);
         t->packet[h] = ':';
         memcpy(t->packet + h + 1, line + 2 * PDN_APRS_MAX_INFO, (size_t)i);
@@ -1501,7 +1550,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         size_t k, out = 0;
         keys_only(cv, j, keys);
         if (a && (a->t != J_ARR || a->count > PDN_APRS_MAX_CAPABILITIES)) {
-            cannot_limit(cv, "has more items than the C data holds", "capabilities");
+            cannot_limit(cv, PDN_APRS_LIMIT_CAPABILITIES, "has more items than the C data holds", "capabilities");
             break;
         }
         for (k = 0; a && k < a->count; k++) {
@@ -1514,7 +1563,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
             for (f = 0; f < item->count; f++) {
                 if (item->items[f]->t != J_STR || out + item->items[f]->len + 1 > sizeof cp->text) {
                     if (item->items[f]->t == J_STR)
-                        cannot_limit(cv, "is longer than the C field holds", "capabilities");
+                        cannot_limit(cv, PDN_APRS_LIMIT_INFORMATION_FIELD, "is longer than the C field holds", "capabilities");
                     else
                         cannot(cv, "is longer than the C field holds", "capabilities");
                     break;
@@ -1585,7 +1634,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         if (len < 0) {
             jval *dv = json_get(j, "data");
             if (dv && dv->t == J_STR && dv->len > sizeof u->data)
-                cannot_limit(cv, "is not text U+0000-U+00FF of a length the C field holds", "data");
+                cannot_limit(cv, PDN_APRS_LIMIT_INFORMATION_FIELD, "is not text U+0000-U+00FF of a length the C field holds", "data");
             else
                 cannot(cv, "is not text U+0000-U+00FF of a length the C field holds", "data");
         } else {
@@ -1618,6 +1667,6 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         snprintf(err, errlen, "legacy_telemetry has fewer than five values");
         note_pending(PDN_APRS_REFUSAL_MALFORMED, "obsolete Mic-E telemetry has five values");
     }
-    last_limit = c.bad && c.limit;
+    last_limit = c.bad ? c.limit : 0;
     return c.bad ? 0 : 1;
 }

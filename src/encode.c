@@ -23,7 +23,8 @@ PDN_APRS__PRIVATE int pdn_aprs__refusal_rank(int code)
         PDN_APRS_REFUSAL_INVALID_NMEA,       PDN_APRS_REFUSAL_EXTENSION_CONFLICT,
         PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED,  PDN_APRS_REFUSAL_SYMBOL_MISMATCH,
         PDN_APRS_REFUSAL_MISSING_FIELD,      PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE,
-        PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD, PDN_APRS_REFUSAL_DOES_NOT_READ_BACK};
+        PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD, PDN_APRS_REFUSAL_DOES_NOT_READ_BACK,
+        PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG};
     int i;
     for (i = 0; i < (int)(sizeof order / sizeof order[0]); i++)
         if (order[i] == code)
@@ -2022,6 +2023,10 @@ static int encode_telemetry(pdn_aprs__ectx *e, const pdn_aprs_telemetry *t)
     for (i = 0; i < sl; i++)
         if (!A_ALNUM(t->sequence[i]))
             pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a telemetry sequence is letters and digits");
+    /* a sequence that starts MIC is MIC itself: any other would read back as
+       MIC and a value */
+    if (sl > 3 && memcmp(t->sequence, "MIC", 3) == 0)
+        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_MALFORMED, "a telemetry sequence that starts MIC is MIC itself");
     /* more than five analog values is too-long, fewer malformed (README
        Refusal reasons); an analog_count over PDN_APRS_MAX_ANALOG says there
        were more than the data holds */
@@ -2692,14 +2697,48 @@ static int data_bounds_ok(const pdn_aprs_data *d)
 /* room to write a field that does not fit the caller's buffer, to judge it */
 #define PDN_APRS_ENCODE_SCRATCH 4096
 
+#if defined(__GNUC__) || defined(__clang__)
+#define PDN_APRS__NOINLINE __attribute__((noinline))
+#elif defined(_MSC_VER)
+#define PDN_APRS__NOINLINE __declspec(noinline)
+#else
+#define PDN_APRS__NOINLINE
+#endif
+
+/* The caller's buffer was too small for a field of over 256 bytes: the bytes
+   are written again somewhere that holds them and judged like any other (the
+   size is the last check). Kept out of encode_info, in a function of its own,
+   so the 4 KB of room is in a frame only when a caller's buffer overflowed.
+   Returns 1 when the encoder's answer is final, a refusal in e (the size
+   when nothing else is wrong), and 0 when this variant's bytes do not read
+   back (the reason is in e) and the next variant is to be tried. */
+static PDN_APRS__NOINLINE int judge_oversize(const pdn_aprs_data *data, const pdn_aprs_encode_options *options,
+                                             int variant, pdn_aprs__ectx *e)
+{
+    uint8_t scratch[PDN_APRS_ENCODE_SCRATCH];
+    pdn_aprs__buf b;
+    memset(e, 0, sizeof *e);
+    pdn_aprs__buf_init(&b, scratch, sizeof scratch);
+    e->b = &b;
+    e->variant = variant;
+    e->devices = options ? options->devices : NULL;
+    if (!pdn_aprs__encode_data(e, data))
+        return 1;
+    if (b.overflow || reads_back(data, scratch, b.len, e->dest, options ? options->devices : NULL)) {
+        pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG, PDN_APRS__SIZE_REASON);
+        return 1;
+    }
+    e->reason = "what the encoder would write does not read back as the same data";
+    e->refusal = read_back_refusal(data);
+    return 0;
+}
+
 static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf, size_t cap,
                        pdn_aprs_encoded *encoded)
 {
     pdn_aprs__buf b;
     pdn_aprs__ectx e;
-    const uint8_t *out;
     int ok = 0, full = 0, variant;
-    uint8_t scratch[PDN_APRS_ENCODE_SCRATCH];
     if (encoded) {
         encoded->len = 0;
         encoded->destination[0] = 0;
@@ -2722,33 +2761,22 @@ static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options 
         ok = pdn_aprs__encode_data(&e, data);
         if (!ok)
             break;
-        out = (const uint8_t *)buf;
         if (b.overflow && b.total > PDN_APRS_MAX_FIELD) {
             /* more than buf holds, and over the 256 bytes: the size is judged
-               last, so the bytes are written again somewhere that holds them
-               and checked like any other */
-            memset(&e, 0, sizeof e);
-            pdn_aprs__buf_init(&b, scratch, sizeof scratch);
-            e.b = &b;
-            e.variant = variant;
-            e.devices = options ? options->devices : NULL;
-            ok = pdn_aprs__encode_data(&e, data);
-            if (!ok)
+               last, so the bytes are checked somewhere that holds them */
+            ok = 0;
+            if (judge_oversize(data, options, variant, &e))
                 break;
-            out = scratch;
+            continue;
         }
         if (b.overflow) {
-            if (b.total > PDN_APRS_MAX_FIELD) {
-                ok = pdn_aprs__refuse(&e, PDN_APRS_REFUSAL_TOO_LONG, PDN_APRS__SIZE_REASON);
-                break;
-            }
             /* too long for buf, and so for checking */
             full = 1;
             break;
         }
-        if (reads_back(data, out, b.len, e.dest, options ? options->devices : NULL)) {
+        if (reads_back(data, (const uint8_t *)buf, b.len, e.dest, options ? options->devices : NULL)) {
             if (b.total > PDN_APRS_MAX_FIELD)
-                ok = pdn_aprs__refuse(&e, PDN_APRS_REFUSAL_TOO_LONG, PDN_APRS__SIZE_REASON);
+                ok = pdn_aprs__refuse(&e, PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG, PDN_APRS__SIZE_REASON);
             break;
         }
         ok = 0;

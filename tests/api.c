@@ -147,6 +147,33 @@ static void test_encoding(void)
     d.as.report.latitude = 91;
     CHECK(pdn_aprs_encode_info(&d, NULL, frame, sizeof frame, &enc) == PDN_APRS_ERR_REFUSED && enc.reason != NULL);
 
+    /* the capacity of an inner header is a limit, never a different reading */
+    {
+        static char l[600];
+        static pdn_aprs_packet q;
+        int k, o = snprintf(l, sizeof l, "N0CALL>APZ001:}SRC>APZ001");
+        for (k = 0; k < 17; k++)
+            o += snprintf(l + o, sizeof l - (size_t)o, ",WIDE%d", k % 8);
+        snprintf(l + o, sizeof l - (size_t)o, ":>hi");
+        CHECK(pdn_aprs_decode_tnc2(l, strlen(l), NULL, &q) == PDN_APRS_ERR_TOO_LONG);
+        CHECK(q.data.type == PDN_APRS_TYPE_UNRECOGNIZED && q.limit == PDN_APRS_LIMIT_PATH &&
+              q.diagnostics[q.diagnostic_count - 1].code == PDN_APRS_CODE_IMPLEMENTATION_LIMIT);
+        CHECK(strcmp(pdn_aprs_limit_name(q.limit), "path") == 0);
+        CHECK(strcmp(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG), "information-field-too-long") == 0);
+    }
+    /* a telemetry sequence that starts MIC and is not MIC is malformed */
+    {
+        pdn_aprs_data t;
+        uint8_t o[300];
+        memset(&t, 0, sizeof t);
+        t.type = PDN_APRS_TYPE_TELEMETRY;
+        memcpy(t.as.telemetry.sequence, "MIC1", 5);
+        memcpy(t.as.telemetry.bits, "00000000", 9);
+        t.as.telemetry.has_bits = 1;
+        t.as.telemetry.analog_count = 5;
+        CHECK(pdn_aprs_encode_info(&t, NULL, o, sizeof o, &enc) == PDN_APRS_ERR_REFUSED &&
+              enc.refusal == PDN_APRS_REFUSAL_MALFORMED);
+    }
     /* the encoder refuses a field over 256 bytes (too-long), however it came by
        the data; the decoder sets no limit but the packet's own, and
        pdn_aprs_decode_info_unbounded reads a field longer than that back */
@@ -161,12 +188,12 @@ static void test_encoding(void)
         CHECK(pdn_aprs_decode_tnc2(in, 15 + PDN_APRS_MAX_INFO - 1, NULL, &pkt) == PDN_APRS_OK);
         d = pkt.data;
         n = pdn_aprs_encode_info(&d, NULL, out, sizeof out, &enc);
-        CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+        CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG);
         n = pdn_aprs_encode_tnc2(&pkt.header, &d, NULL, line, sizeof line, &enc);
-        CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+        CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG);
         /* with a buffer too small to hold the field the size still decides */
         CHECK(pdn_aprs_encode_info(&d, NULL, out, 100, &enc) == PDN_APRS_ERR_REFUSED &&
-              enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+              enc.refusal == PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG);
         /* a field of 255 bytes and one of 256 are written, 257 is refused */
         for (k = 254; k <= 256; k++) {
             pdn_aprs_data st;
@@ -178,7 +205,7 @@ static void test_encoding(void)
             if (k < 256)
                 CHECK(n == (int)k + 1);
             else
-                CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+                CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG);
         }
         /* a field over 512 bytes is the library's capacity: the data is
            unrecognized and the diagnostic says so */
@@ -1057,10 +1084,10 @@ static void test_refusal_codes(void)
     memcpy(d.as.telemetry.bits, "00000000", 9);
     d.as.telemetry.has_bits = 1;
     n = pdn_aprs_encode_info(&d, NULL, line, sizeof line, &enc);
-    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG);
     /* ... also into a buffer too small to hold the field */
     n = pdn_aprs_encode_info(&d, NULL, line, 32, &enc);
-    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+    CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG);
 
     /* a 1-character addressee with over-long text reads no further than it is */
     {
@@ -1800,7 +1827,7 @@ static void test_round4(void)
         comment[256 - 20] = 'x';
         comment[257 - 20] = 0;
         CHECK(pdn_aprs_build_position(&me, &pos, line, sizeof line, &res) == PDN_APRS_ERR_REFUSED &&
-              res.refusal == PDN_APRS_REFUSAL_TOO_LONG);
+              res.refusal == PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG);
     }
 }
 

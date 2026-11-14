@@ -50,7 +50,7 @@ static int station_header(const pdn_aprs_station *st, pdn_aprs_header *h, pdn_ap
         size_t n = comma ? (size_t)(comma - p) : strlen(p);
         pdn_aprs_path_entry *e;
         if (h->path_count >= PDN_APRS_MAX_PATH)
-            return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESS, "the path has more entries than a header can hold");
+            return fail(result, PDN_APRS_ERR_UNSUPPORTED, 0, "the path has more entries than this library's header holds (PDN_APRS_MAX_PATH)");
         e = &h->path[h->path_count];
         if (n > 0 && p[n - 1] == '*') {
             e->marked = 1;
@@ -141,7 +141,7 @@ static void note_text(pending *p, const char *s, int list)
 /* 1 if the encoder refused only for the 256 bytes of the information field */
 static int size_refusal(const pdn_aprs_encoded *r)
 {
-    return r->refusal == PDN_APRS_REFUSAL_TOO_LONG && r->reason && strcmp(r->reason, PDN_APRS__SIZE_REASON) == 0;
+    return r->refusal == PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG;
 }
 
 static int build_with(const pdn_aprs_station *station, const pdn_aprs_data *d, void *buf, size_t cap,

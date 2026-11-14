@@ -320,6 +320,120 @@ static int strict_matches(const jval *got, const jval *c, char *why, size_t whyl
     return result_matches(got, st, why, whylen);
 }
 
+
+/* ---- implementation limits: the library's capacity may stand in for a
+   reading only where the case really needs more than it holds ---- */
+
+/* The longest array under key, anywhere in v. */
+static size_t max_array(const jval *v, const char *key)
+{
+    size_t i, best = 0, k;
+    if (!v)
+        return 0;
+    if (v->t == J_OBJ) {
+        for (i = 0; i < v->count; i++) {
+            const jval *x = v->items[i];
+            if (strcmp(v->keys[i], key) == 0 && x->t == J_ARR && x->count > best)
+                best = x->count;
+            k = max_array(x, key);
+            if (k > best)
+                best = k;
+        }
+    } else if (v->t == J_ARR) {
+        for (i = 0; i < v->count; i++) {
+            k = max_array(v->items[i], key);
+            if (k > best)
+                best = k;
+        }
+    }
+    return best;
+}
+
+/* The longest "value" of an item of a weather "extra" list, anywhere in v. */
+static size_t max_extra_value(const jval *v)
+{
+    size_t i, j, best = 0, k;
+    if (!v)
+        return 0;
+    if (v->t == J_OBJ) {
+        for (i = 0; i < v->count; i++) {
+            const jval *x = v->items[i];
+            if (strcmp(v->keys[i], "extra") == 0 && x->t == J_ARR)
+                for (j = 0; j < x->count; j++) {
+                    const jval *s = json_get(x->items[j], "value");
+                    if (s && s->t == J_STR && s->len > best)
+                        best = s->len;
+                }
+            k = max_extra_value(x);
+            if (k > best)
+                best = k;
+        }
+    } else if (v->t == J_ARR) {
+        for (i = 0; i < v->count; i++) {
+            k = max_extra_value(v->items[i]);
+            if (k > best)
+                best = k;
+        }
+    }
+    return best;
+}
+
+/* The longest string anywhere in v. */
+static size_t max_string(const jval *v)
+{
+    size_t i, best = 0, k;
+    if (!v)
+        return 0;
+    if (v->t == J_STR)
+        return v->len;
+    if (v->t == J_OBJ || v->t == J_ARR)
+        for (i = 0; i < v->count; i++) {
+            k = max_string(v->items[i]);
+            if (k > best)
+                best = k;
+        }
+    return best;
+}
+
+/* 1 if the case needs more than the library's capacity named by limit
+   (pdn_aprs_limit) holds, so that a result of implementation-limit is the
+   library's own and not a failure to read what it could. For a decode case
+   in is the input; for a build case it is NULL. */
+static int needs_more_than(const jval *c, const input_t *in, int limit)
+{
+    const jval *expect = json_get(c, "expect");
+    switch (limit) {
+    case PDN_APRS_LIMIT_INFORMATION_FIELD:
+        if (in) {
+            size_t len = in->len > in->info_at ? in->len - in->info_at : 0;
+            if (len >= 2 && in->bytes[in->info_at + len - 2] == '\r' && in->bytes[in->info_at + len - 1] == '\n')
+                len -= 2;
+            else if (len >= 1 && (in->bytes[in->info_at + len - 1] == '\r' || in->bytes[in->info_at + len - 1] == '\n'))
+                len--;
+            return len > PDN_APRS_MAX_INFO;
+        }
+        return max_string(json_get(c, "input")) > PDN_APRS_MAX_INFO;
+    case PDN_APRS_LIMIT_PATH: {
+        size_t commas = 0, i;
+        if (in)
+            for (i = 0; i < in->len && i < in->info_at && in->bytes[i] != ':'; i++)
+                commas += in->bytes[i] == ',';
+        return commas > PDN_APRS_MAX_PATH || max_array(expect, "path") > PDN_APRS_MAX_PATH ||
+               max_array(json_get(c, "input"), "path") > PDN_APRS_MAX_PATH;
+    }
+    case PDN_APRS_LIMIT_CAPABILITIES:
+        return max_array(expect, "capabilities") > PDN_APRS_MAX_CAPABILITIES ||
+               max_array(json_get(c, "input"), "capabilities") > PDN_APRS_MAX_CAPABILITIES;
+    case PDN_APRS_LIMIT_WEATHER_EXTRAS:
+        return max_array(expect, "extra") > PDN_APRS_MAX_WEATHER_EXTRA ||
+               max_array(json_get(c, "input"), "extra") > PDN_APRS_MAX_WEATHER_EXTRA;
+    case PDN_APRS_LIMIT_WEATHER_EXTRA_VALUE:
+        return max_extra_value(expect) >= sizeof((pdn_aprs_weather_extra *)0)->value;
+    default:
+        return 0;
+    }
+}
+
 /* ---- checks ---- */
 
 static const pdn_aprs_device_table *devices(void) { return pdn_aprs_devices(); }
@@ -350,9 +464,19 @@ static void check_decode_case(const jval *c, const char *id)
        limits) */
     if (has_diag(json_get(got, "header_error"), "error:implementation-limit") ||
         has_diag(json_get(got, "diagnostics"), "error:implementation-limit")) {
+        int lim = neutral_result_limit(&pkt, &lenient);
+        /* ... but only where the case really needs more than the capacity:
+           a claim of a limit for input within it is a failure, not a skip */
+        if (!lim || !needs_more_than(c, &in, lim)) {
+            snprintf(why, sizeof why, "implementation-limit (%s) for input within the library's capacity",
+                     lim ? pdn_aprs_limit_name(lim) : "no limit named");
+            report(id, "lenient", 0, why, got, NULL);
+            json_free(got);
+            return;
+        }
         skipped_limit++;
         if (verbose)
-            printf("skip %s: implementation-limit\n", id);
+            printf("skip %s: implementation-limit (%s)\n", id, pdn_aprs_limit_name(lim));
         json_free(got);
         return;
     }
@@ -534,7 +658,14 @@ static void check_build_case(const jval *c, const char *id)
     recipe_result res;
     char why[512];
     if (recipe_build(json_get(json_get(c, "input"), "build"), buf, sizeof buf - 1, &res) == RECIPE_LIMIT) {
-        /* the library's fixed capacity, not a reading (README Implementation limits) */
+        /* the library's fixed capacity, not a reading (README Implementation
+           limits), where the recipe really needs more than it holds */
+        if (!needs_more_than(c, NULL, res.limit)) {
+            snprintf(why, sizeof why, "implementation-limit (%s) for input within the library's capacity",
+                     pdn_aprs_limit_name(res.limit) ? pdn_aprs_limit_name(res.limit) : "no limit named");
+            report(id, "build", 0, why, NULL, NULL);
+            return;
+        }
         skipped_limit++;
         return;
     }
