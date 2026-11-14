@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 (2026-11-14)
 
-Round 4 of the shared vectors (aprs-vectors `round-4`, pinned at a405bac71a35a134a955c556d40c3ea23d497ef5, version 1.2), and the fixes from the November 2026 review. Licence: this library has always been MIT and still is (it was never AGPL-3.0-or-later, unlike the other libraries' versions up to 1.1.0); the vectors it is tested against are now CC0 (their tools MIT).
+Round 4 of the shared vectors (aprs-vectors `round-4`, pinned at 656d583a521a2c0d9b743a18a35e19496274b40f, version 1.2), and the fixes from the November 2026 review. Licence: this library has always been MIT and still is (it was never AGPL-3.0-or-later, unlike the other libraries' versions up to 1.1.0); the vectors it is tested against are now CC0 (their tools MIT).
 
 ### Breaking changes for callers
 
