@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "pdn_aprs.h"
+#include "devtable.h"
 
 #define THREADS 8
 #define ROUNDS 300
@@ -37,7 +38,7 @@ static int encode_line(size_t i, pdn_aprs_packet *p, uint8_t *out, size_t cap)
     pdn_aprs_decode_options o;
     pdn_aprs_encode_options eo;
     memset(&o, 0, sizeof o);
-    o.devices = pdn_aprs_devices();
+    o.devices = dev_table();
     eo.devices = o.devices;
     if (pdn_aprs_decode_tnc2(lines[i], strlen(lines[i]), &o, p) != PDN_APRS_OK)
         return -100;

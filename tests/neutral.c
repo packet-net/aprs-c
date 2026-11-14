@@ -522,14 +522,57 @@ jval *neutral_data(const pdn_aprs_data *d, const pdn_aprs_decode_options *opt)
     return o;
 }
 
+/* The capacity (a pdn_aprs_limit) a third-party packet's inner packets need
+   more than the library holds of, or 0: the outer packet decodes, but the
+   inner one is only read on request, and a packet needing more than the
+   library holds is that capacity's result as a whole, never a reading of
+   the part that fits. */
+static int third_party_limit(const pdn_aprs_data *d, const pdn_aprs_decode_options *o, int depth)
+{
+    static pdn_aprs_packet inner_storage[8];
+    pdn_aprs_packet *inner;
+    int rc, lim = 0;
+    if (d->type != PDN_APRS_TYPE_THIRD_PARTY || depth >= 8)
+        return 0;
+    inner = &inner_storage[depth];
+    rc = pdn_aprs_decode_third_party(d, o, inner);
+    if (rc == PDN_APRS_ERR_TOO_LONG || (rc == PDN_APRS_ERR_HEADER && inner->limit))
+        lim = inner->limit;
+    else if (rc == PDN_APRS_OK)
+        lim = third_party_limit(&inner->data, o, depth + 1);
+    return lim;
+}
+
+int neutral_result_limit(const pdn_aprs_packet *p, const pdn_aprs_decode_options *o)
+{
+    if (p->limit)
+        return p->limit;
+    if (p->header_ok)
+        return third_party_limit(&p->data, o, 0);
+    return 0;
+}
+
 jval *neutral_result(const pdn_aprs_packet *p, int rc, const pdn_aprs_decode_options *o)
 {
     jval *r = json_obj();
+    int lim;
     if (rc == PDN_APRS_ERR_HEADER || !p->header_ok) {
         json_set(r, "header_error", neutral_diagnostics(p));
         return r;
     }
     json_set(r, "header", neutral_header(&p->header));
+    lim = p->limit ? 0 : neutral_result_limit(p, o);
+    if (lim) {
+        /* an inner packet needs more than the library holds: the data is
+           unrecognized, with the capacity's error, as for any other packet */
+        jval *d = json_obj(), *diags = neutral_diagnostics(p);
+        json_set(d, "type", json_str("unrecognized"));
+        json_set(d, "reason", json_str("malformed"));
+        json_set(r, "data", d);
+        json_push(diags, json_str("error:implementation-limit"));
+        json_set(r, "diagnostics", diags);
+        return r;
+    }
     json_set(r, "data", neutral_data(&p->data, o));
     json_set(r, "diagnostics", neutral_diagnostics(p));
     return r;
@@ -542,6 +585,7 @@ typedef struct conv {
     char *err;
     size_t errlen;
     int bad;
+    int limit;        /* the first thing the C data could not hold was a fixed capacity: its pdn_aprs_limit */
     int short_legacy; /* Mic-E legacy telemetry of fewer than five values: refused */
 } conv;
 
@@ -553,6 +597,26 @@ static int cannot(conv *cv, const char *what, const char *key)
     }
     return 0;
 }
+
+/* Whether the last neutral_to_data stopped at a fixed capacity. */
+static int last_limit;
+
+/* The same, for a thing that is more than a fixed capacity of the library
+   holds (a text, a list), not something its data has no field for. */
+static int cannot_limit(conv *cv, int limit, const char *what, const char *key)
+{
+    if (!cv->bad)
+        cv->limit = limit;
+    return cannot(cv, what, key);
+}
+
+int neutral_limit(void)
+{
+    return last_limit;
+}
+
+static void note_pending(int code, const char *why);
+static int int_in(conv *cv, const jval *o, const char *k, double lo, double hi, long *out);
 
 /* Every key of o is one of keys (NULL-terminated). */
 static void keys_only(conv *cv, const jval *o, const char *const *keys)
@@ -583,6 +647,53 @@ static int num_in(conv *cv, const jval *o, const char *k, double *out)
         return cannot(cv, "is not a number", k);
     *out = v->num;
     return 1;
+}
+
+/* A whole number for a field whose type is narrower than the range APRS
+   allows: one outside the type is out of the field's range, which the
+   encoder would refuse as value-out-of-range, so it is noted and the field
+   left 0. */
+static int int_ranged(conv *cv, const jval *o, const char *k, double lo, double hi, long *out)
+{
+    jval *v = json_get(o, k);
+    *out = 0;
+    if (v && v->t == J_NUM && !(v->num - v->num == 0.0)) {
+        note_pending(PDN_APRS_REFUSAL_NOT_A_NUMBER, "NaN or an infinity");
+        return 1;
+    }
+    if (v && v->t == J_NUM && v->num == floor(v->num) && (v->num < lo || v->num > hi)) {
+        note_pending(PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "out of range");
+        return 1;
+    }
+    return int_in(cv, o, k, lo, hi, out);
+}
+
+/* An Agrelo bearing: degrees, rounded to the nearest degree like a course
+   (half away from zero) and then range-checked, so 12.5 is 13 and 360.5 is
+   361, past 360. The C field is whole degrees: a rounded value it cannot
+   hold is noted for the refusal its value alone decides (value-out-of-range),
+   and NaN or an infinity is not-a-number. */
+static void bearing_in(conv *cv, const jval *o, const char *k, long *out)
+{
+    jval *v = json_get(o, k);
+    double r;
+    *out = 0;
+    if (!v)
+        return;
+    if (v->t != J_NUM) {
+        cannot(cv, "is not a number", k);
+        return;
+    }
+    if (!(v->num - v->num == 0.0)) {
+        note_pending(PDN_APRS_REFUSAL_NOT_A_NUMBER, "an Agrelo bearing is not a number");
+        return;
+    }
+    r = round(v->num);
+    if (r < 0 || r > 65535) {
+        note_pending(PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "an Agrelo bearing is 0 to 360 degrees");
+        return;
+    }
+    *out = (long)r;
 }
 
 /* A whole number the C field's type holds, lo to hi. */
@@ -620,12 +731,29 @@ static int str_in(conv *cv, const jval *o, const char *k, char *dst, size_t cap,
     if (v->t != J_STR)
         return cannot(cv, "is not text", k);
     if (v->len >= cap)
-        return cannot(cv, "is longer than the C field holds", k);
+        return cap >= PDN_APRS_TEXT_SIZE ? cannot_limit(cv, PDN_APRS_LIMIT_INFORMATION_FIELD, "is longer than the C field holds", k)
+                                         : cannot(cv, "is longer than the C field holds", k);
     memcpy(dst, v->str, v->len);
     dst[v->len] = 0;
     if (len)
         *len = (uint16_t)v->len;
     return 1;
+}
+
+/* Text for a small fixed field whose rule names a refusal when the text does
+   not fit: a timestamp, the telemetry bits. The text is kept cut to the field
+   and the refusal noted, so the encoder's own faults are still found and the
+   first in the README's order is named. */
+static int str_fixed(conv *cv, const jval *o, const char *k, char *dst, size_t cap, int code, const char *why)
+{
+    jval *v = json_get(o, k);
+    if (v && v->t == J_STR && v->len >= cap && cap < PDN_APRS_TEXT_SIZE) {
+        memcpy(dst, v->str, cap - 1);
+        dst[cap - 1] = 0;
+        note_pending(code, why);
+        return 1;
+    }
+    return str_in(cv, o, k, dst, cap, NULL);
 }
 
 /* One character: a string of exactly one byte. */
@@ -682,7 +810,17 @@ static int symbol_in(conv *cv, const jval *o, pdn_aprs_symbol *s)
     jval *v = json_get(o, "symbol");
     if (!v)
         return 0;
-    if (v->t != J_STR || latin1_bytes(v, b, 2) != 2)
+    if (v->t == J_STR && v->len == 0)
+        return 0; /* absent text is empty text */
+    if (v->t == J_STR && latin1_bytes(v, b, 2) != 2) {
+        /* a symbol is a table and a code: this is neither, however it is
+           cut (a code no symbol has is what the encoder refuses as one) */
+        s->table = '/';
+        s->code = 1;
+        note_pending(PDN_APRS_REFUSAL_INVALID_SYMBOL, "a symbol is a table character and a code character");
+        return 1;
+    }
+    if (v->t != J_STR)
         return cannot(cv, "is not two characters U+0000-U+00FF", "symbol");
     s->table = (char)b[0];
     s->code = (char)b[1];
@@ -707,7 +845,7 @@ static void weather_in(conv *cv, const jval *o, pdn_aprs_weather *w)
     if (extra) {
         size_t k;
         if (extra->t != J_ARR || extra->count > PDN_APRS_MAX_WEATHER_EXTRA) {
-            cannot(cv, "has more fields than the C data holds", "extra");
+            cannot_limit(cv, PDN_APRS_LIMIT_WEATHER_EXTRAS, "has more fields than the C data holds", "extra");
             return;
         }
         for (k = 0; k < extra->count; k++) {
@@ -808,13 +946,13 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
         static const char *const bk[] = {"bearing_degrees", "number", "range", "quality", NULL};
         keys_only(cv, v, bk);
         r->has_df_bearing = 1;
-        int_in(cv, v, "bearing_degrees", 0, 65535, &n);
+        int_ranged(cv, v, "bearing_degrees", 0, 65535, &n);
         r->df_bearing.bearing_degrees = (uint16_t)n;
         int_in(cv, v, "number", 0, 255, &n);
         r->df_bearing.number = (uint8_t)n;
         int_in(cv, v, "range", 0, 255, &n);
         r->df_bearing.range = (uint8_t)n;
-        int_in(cv, v, "quality", 0, 255, &n);
+        int_ranged(cv, v, "quality", 0, 255, &n);
         r->df_bearing.quality = (uint8_t)n;
     }
     if ((v = json_get(o, "storm")) != NULL) {
@@ -823,6 +961,12 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
                                          NULL};
         keys_only(cv, v, sk);
         r->has_storm = 1;
+        /* the C struct has no "absent" for a storm field and the encoder
+           must not write a value that was not given: the tool names the
+           refusal (via tool) */
+        for (n = 0; n < 6; n++)
+            if (!json_get(v, sk[n]))
+                note_pending(PDN_APRS_REFUSAL_MISSING_FIELD, "storm data is missing a required field");
         enum_in(cv, v, "type", storm_names, 3, &e);
         r->storm.type = (uint8_t)e;
         int_in(cv, v, "sustained_wind_knots", 0, 65535, &n);
@@ -898,7 +1042,7 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
     }
     str_in(cv, o, "signpost", r->signpost, sizeof r->signpost, NULL);
     str_in(cv, o, "comment", r->comment, sizeof r->comment, &r->comment_len);
-    str_in(cv, o, "timestamp", r->timestamp, sizeof r->timestamp, NULL);
+    str_fixed(cv, o, "timestamp", r->timestamp, sizeof r->timestamp, PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "a timestamp is 7 or 8 characters");
     r->messaging = (uint8_t)flag_in(cv, o, "messaging");
     str_in(cv, o, "name", r->name, sizeof r->name, NULL);
     r->killed = (uint8_t)flag_in(cv, o, "killed");
@@ -950,7 +1094,7 @@ static void meta_strings_in(conv *cv, const jval *a, const char *k, pdn_aprs_tel
             return;
         }
         if (out + v->len + 1 > sizeof m->text) {
-            cannot(cv, "is longer than the C field holds", k);
+            cannot_limit(cv, PDN_APRS_LIMIT_INFORMATION_FIELD, "is longer than the C field holds", k);
             return;
         }
         memcpy(m->text + out, v->str, v->len);
@@ -968,6 +1112,14 @@ static int last_refusal;
    first in the README's order. */
 static int pending_refusal;
 static const char *pending_why;
+
+/* 1 if the last refusal was made by this reader, not the library. */
+static int last_via_tool;
+
+int neutral_via_tool(void)
+{
+    return last_via_tool;
+}
 
 int neutral_refusal(void)
 {
@@ -989,7 +1141,8 @@ int neutral_refusal_rank(int code)
         PDN_APRS_REFUSAL_INVALID_NMEA,        PDN_APRS_REFUSAL_EXTENSION_CONFLICT,
         PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED,   PDN_APRS_REFUSAL_SYMBOL_MISMATCH,
         PDN_APRS_REFUSAL_MISSING_FIELD,       PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE,
-        PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD, PDN_APRS_REFUSAL_DOES_NOT_READ_BACK};
+        PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD, PDN_APRS_REFUSAL_DOES_NOT_READ_BACK,
+        PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG};
     int i;
     for (i = 0; i < (int)(sizeof order / sizeof order[0]); i++)
         if (order[i] == code)
@@ -1011,11 +1164,16 @@ int neutral_encode(const pdn_aprs_data *d, const pdn_aprs_encode_options *o, voi
     int code = pending_refusal, rc = pdn_aprs_encode_info(d, o, buf, cap, enc);
     const char *why = pending_why;
     pending_refusal = 0;
+    last_via_tool = 0;
     if (!code)
         return rc;
-    if (rc != PDN_APRS_ERR_REFUSED || neutral_refusal_rank(code) < neutral_refusal_rank(enc->refusal)) {
+    /* the 256 bytes of the field are judged only for a record with no other
+       fault, and this one has the noted fault (the encoder's reason text) */
+    if (rc != PDN_APRS_ERR_REFUSED || neutral_refusal_rank(code) < neutral_refusal_rank(enc->refusal) ||
+        enc->refusal == PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG) {
         enc->refusal = code;
         enc->reason = why;
+        last_via_tool = 1;
     }
     return PDN_APRS_ERR_REFUSED;
 }
@@ -1102,6 +1260,7 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         if (!reason || strcmp(reason, "empty") != 0) {
             snprintf(cv->err, cv->errlen, "inner packet: unrecognized data has nothing to encode");
             last_refusal = PDN_APRS_REFUSAL_NOT_ENCODABLE;
+            last_via_tool = 1;
             return -1;
         }
         inner = NULL;
@@ -1115,8 +1274,11 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         }
         if (rc != 1 && !(rc == -1 && header_fault)) {
             free(inner);
-            if (rc == 0)
+            if (rc == 0) {
+                /* the inner data's own fault of capacity, if it was that */
+                cv->limit = last_limit;
                 cv->bad = 1;
+            }
             return rc;
         }
         i = rc == 1 ? neutral_encode(inner, NULL, line + 2 * PDN_APRS_MAX_INFO, 2 * PDN_APRS_MAX_INFO, &enc)
@@ -1132,6 +1294,7 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         free(inner);
         snprintf(cv->err, cv->errlen, "%s", header_fault);
         last_refusal = PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER;
+        last_via_tool = 1;
         return -1;
     }
     for (k = 0; path && path->t == J_ARR && k < path->count; k++)
@@ -1149,7 +1312,7 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         }
         free(inner);
         if (h + 1 + (size_t)i > sizeof t->packet)
-            return cannot(cv, "is longer than the C field holds", "packet");
+            return cannot_limit(cv, PDN_APRS_LIMIT_INFORMATION_FIELD, "is longer than the C field holds", "packet");
         memcpy(t->packet, head, h);
         t->packet[h] = ':';
         memcpy(t->packet + h + 1, line + 2 * PDN_APRS_MAX_INFO, (size_t)i);
@@ -1169,9 +1332,12 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
     c.err = err;
     c.errlen = errlen;
     c.bad = 0;
+    c.limit = 0;
     c.short_legacy = 0;
     err[0] = 0;
+    last_limit = 0;
     last_refusal = 0;
+    last_via_tool = 0;
     pending_refusal = 0;
     if (!type) {
         snprintf(err, errlen, "no type");
@@ -1256,7 +1422,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
                     m->coefficient[m->count++].value = a->items[k]->num;
                 }
         } else {
-            str_in(cv, j, "bits", m->bits, sizeof m->bits, NULL);
+            str_fixed(cv, j, "bits", m->bits, sizeof m->bits, PDN_APRS_REFUSAL_MALFORMED, "telemetry bits are eight 0 or 1 characters");
             str_in(cv, j, "project", m->text, sizeof m->text, &m->project_len);
         }
         break;
@@ -1275,7 +1441,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         pdn_aprs_status *s = &d->as.status;
         jval *b;
         keys_only(cv, j, keys);
-        str_in(cv, j, "timestamp", s->timestamp, sizeof s->timestamp, NULL);
+        str_fixed(cv, j, "timestamp", s->timestamp, sizeof s->timestamp, PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "a status timestamp is DHM zulu");
         str_in(cv, j, "locator", s->locator, sizeof s->locator, NULL);
         symbol_in(cv, j, &s->symbol);
         if ((b = json_get(j, "beam")) != NULL) {
@@ -1308,14 +1474,14 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
             tl->analog[k].value = a->items[k]->num;
             tl->analog_count = (uint8_t)(k + 1);
         }
-        tl->has_bits = (uint8_t)str_in(cv, j, "bits", tl->bits, sizeof tl->bits, NULL);
+        tl->has_bits = (uint8_t)str_fixed(cv, j, "bits", tl->bits, sizeof tl->bits, PDN_APRS_REFUSAL_MALFORMED, "telemetry bits are eight 0 or 1 characters");
         str_in(cv, j, "comment", tl->comment, sizeof tl->comment, &tl->comment_len);
         break;
     }
     case PDN_APRS_TYPE_WEATHER: {
         static const char *const keys[] = {"type", "timestamp", "weather", "comment", NULL};
         keys_only(cv, j, keys);
-        str_in(cv, j, "timestamp", d->as.weather.timestamp, sizeof d->as.weather.timestamp, NULL);
+        str_fixed(cv, j, "timestamp", d->as.weather.timestamp, sizeof d->as.weather.timestamp, PDN_APRS_REFUSAL_INVALID_TIMESTAMP, "a timestamp is 8 characters");
         if (json_get(j, "weather"))
             weather_in(cv, json_get(j, "weather"), &d->as.weather.weather);
         str_in(cv, j, "comment", d->as.weather.comment, sizeof d->as.weather.comment, &d->as.weather.comment_len);
@@ -1384,7 +1550,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         size_t k, out = 0;
         keys_only(cv, j, keys);
         if (a && (a->t != J_ARR || a->count > PDN_APRS_MAX_CAPABILITIES)) {
-            cannot(cv, "has more items than the C data holds", "capabilities");
+            cannot_limit(cv, PDN_APRS_LIMIT_CAPABILITIES, "has more items than the C data holds", "capabilities");
             break;
         }
         for (k = 0; a && k < a->count; k++) {
@@ -1396,7 +1562,10 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
             }
             for (f = 0; f < item->count; f++) {
                 if (item->items[f]->t != J_STR || out + item->items[f]->len + 1 > sizeof cp->text) {
-                    cannot(cv, "is longer than the C field holds", "capabilities");
+                    if (item->items[f]->t == J_STR)
+                        cannot_limit(cv, PDN_APRS_LIMIT_INFORMATION_FIELD, "is longer than the C field holds", "capabilities");
+                    else
+                        cannot(cv, "is longer than the C field holds", "capabilities");
                     break;
                 }
                 if (f == 0) {
@@ -1434,6 +1603,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
             if (levels > PDN_APRS_MAX_THIRD_PARTY_DEPTH) {
                 snprintf(err, errlen, "third-party packets nest at most four deep");
                 last_refusal = PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER;
+                last_via_tool = 1;
                 return -1;
             }
         }
@@ -1461,10 +1631,15 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
             cannot(cv, "is not one character U+0000-U+00FF", "packet_type");
         u->packet_type = (char)b[0];
         len = latin1_bytes(json_get(j, "data"), u->data, sizeof u->data);
-        if (len < 0)
-            cannot(cv, "is not text U+0000-U+00FF of a length the C field holds", "data");
-        else
+        if (len < 0) {
+            jval *dv = json_get(j, "data");
+            if (dv && dv->t == J_STR && dv->len > sizeof u->data)
+                cannot_limit(cv, PDN_APRS_LIMIT_INFORMATION_FIELD, "is not text U+0000-U+00FF of a length the C field holds", "data");
+            else
+                cannot(cv, "is not text U+0000-U+00FF of a length the C field holds", "data");
+        } else {
             u->data_len = (uint16_t)len;
+        }
         break;
     }
     case PDN_APRS_TYPE_TEST: {
@@ -1476,9 +1651,9 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
     case PDN_APRS_TYPE_AGRELO_DF: {
         static const char *const keys[] = {"type", "bearing_degrees", "quality", NULL};
         keys_only(cv, j, keys);
-        int_in(cv, j, "bearing_degrees", 0, 65535, &n);
+        bearing_in(cv, j, "bearing_degrees", &n);
         d->as.agrelo.bearing_degrees = (uint16_t)n;
-        int_in(cv, j, "quality", 0, 255, &n);
+        int_ranged(cv, j, "quality", 0, 255, &n);
         d->as.agrelo.quality = (uint8_t)n;
         break;
     }
@@ -1492,5 +1667,6 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         snprintf(err, errlen, "legacy_telemetry has fewer than five values");
         note_pending(PDN_APRS_REFUSAL_MALFORMED, "obsolete Mic-E telemetry has five values");
     }
+    last_limit = c.bad ? c.limit : 0;
     return c.bad ? 0 : 1;
 }

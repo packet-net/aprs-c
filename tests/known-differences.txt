@@ -1,5 +1,6 @@
 # Checks the vectors runner skips on purpose, one per line as "<case id> [<check>]",
 # optionally followed by a tab and the reason. The target is none.
-third-party/nested-2000-deep [lenient]	the line is 10,017 bytes; the decoder takes an information field of at most PDN_APRS_MAX_INFO (512) bytes and refuses a longer one with PDN_APRS_ERR_TOO_LONG
-third-party/nested-2000-deep [strict]	as above
-third-party/nested-2000-deep [reencode identical]	as above: nothing was decoded to write back
+#
+# Nothing is listed: a case beyond this library's fixed capacity gives
+# error:implementation-limit, and the runner skips the whole case for that
+# (it is counted on its own line), as the README's Implementation limits say.

@@ -158,6 +158,11 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPDN_APRS_AMALGAMATION=ON -DPDN_APRS_WERROR=ON
           cmake --build build -j
           ctest --test-dir build --output-on-failure
+      - name: Full test suite without the device table
+        run: |
+          cmake -S . -B build-nodev -DCMAKE_BUILD_TYPE=Release -DPDN_APRS_DEVICEID=OFF -DPDN_APRS_WERROR=ON
+          cmake --build build-nodev -j
+          ctest --test-dir build-nodev --output-on-failure
       - name: Build the single file without the device table
         run: |
           cc -std=c99 -Wall -Wextra -Wpedantic -Wconversion -Werror -c dist/pdn_aprs.c -Idist -o pdn_aprs.o

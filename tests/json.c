@@ -376,6 +376,27 @@ static jval *parse_value_in(reader *r)
         size_t k = 0;
         int frac = 0;
         jval *v;
+        /* the tokens Python's json module writes for a number that is not
+           finite, which tools/generate.py --nonfinite uses: not JSON, but
+           the data is needed to check the encoder refuses it */
+        {
+            static const struct {
+                const char *text;
+                size_t len;
+                int kind;
+            } tokens[] = {{"NaN", 3, 0}, {"Infinity", 8, 1}, {"-Infinity", 9, 2}};
+            size_t t;
+            for (t = 0; t < sizeof tokens / sizeof tokens[0]; t++) {
+                if (r->i + tokens[t].len <= r->n && memcmp(r->s + r->i, tokens[t].text, tokens[t].len) == 0) {
+                    volatile double zero = 0.0;
+                    double nv = tokens[t].kind == 0 ? zero / zero : (tokens[t].kind == 1 ? 1.0 / zero : -1.0 / zero);
+                    r->i += tokens[t].len;
+                    v = json_num(nv);
+                    v->is_int = 0;
+                    return v;
+                }
+            }
+        }
         while (r->i < r->n && k < sizeof tmp - 1 &&
                (strchr("+-0123456789.eE", r->s[r->i]) != NULL)) {
             if (r->s[r->i] == '.' || r->s[r->i] == 'e' || r->s[r->i] == 'E')

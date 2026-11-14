@@ -58,11 +58,25 @@ static void check_values(void)
     json_free(v);
 }
 
+/* NaN, Infinity and -Infinity are read, as tools/generate.py --nonfinite writes them */
+static void check_tokens(void)
+{
+    static const char text[] = "[NaN, Infinity, -Infinity, -1.5]";
+    jval *v = json_parse(text, sizeof text - 1);
+    if (!v || v->t != J_ARR || v->count != 4 || !isnan(v->items[0]->num) || !isinf(v->items[1]->num) ||
+        v->items[1]->num < 0 || !isinf(v->items[2]->num) || v->items[2]->num > 0 || v->items[3]->num != -1.5) {
+        printf("FAIL: NaN, Infinity or -Infinity not read\n");
+        failures++;
+    }
+    json_free(v);
+}
+
 int main(void)
 {
     static const char *const locales[] = {"de_DE.UTF-8", "de_DE.utf8", "de_DE", "fr_FR.UTF-8"};
     size_t i;
     check_values();
+    check_tokens();
     /* under a locale with a decimal comma too */
     for (i = 0; i < sizeof locales / sizeof locales[0]; i++) {
         if (setlocale(LC_ALL, locales[i])) {

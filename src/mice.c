@@ -311,13 +311,13 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
         pdn_aprs__diag(c, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_MIC_E_MISSING_DEVICE_TYPE);
     }
     if (r->type_code == '`' || r->type_code == '\'') {
-        if (tl >= 2 && pdn_aprs__mic_e_suffix_known(c->opt ? c->opt->devices : NULL, r->type_code, t + tl - 2, 2)) {
+        if (tl >= 2 && pdn_aprs__mic_e_suffix_known(r->type_code, t + tl - 2, 2)) {
             memcpy(r->device_suffix, t + tl - 2, 2);
             r->device_suffix[2] = 0;
             tl -= 2;
         }
     } else if (r->type_code == '>' || r->type_code == ']') {
-        if (tl >= 1 && pdn_aprs__mic_e_suffix_known(c->opt ? c->opt->devices : NULL, r->type_code, t + tl - 1, 1)) {
+        if (tl >= 1 && pdn_aprs__mic_e_suffix_known(r->type_code, t + tl - 1, 1)) {
             r->device_suffix[0] = (char)t[tl - 1];
             r->device_suffix[1] = 0;
             tl -= 1;

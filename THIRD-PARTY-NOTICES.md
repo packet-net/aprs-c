@@ -9,6 +9,8 @@
 - Licence: [Creative Commons Attribution-ShareAlike 2.0](https://creativecommons.org/licenses/by-sa/2.0/) (CC BY-SA 2.0). In the database's own words: "you're free to use it in any of your applications, commercial, free or open source. For free. Just mention the source somewhere in the small print."
 - Changes: the YAML was converted to C tables of tocall patterns, Mic-E suffixes and legacy Mic-E type codes with their vendor, model and class. Text outside ASCII is written as octal escapes of its UTF-8 bytes; it is otherwise as published. One model name in the source data contains an em dash; it is kept, escaped, as published.
 
+The core (`mice_codes.c`) includes the list of Mic-E device suffix codes, the bytes alone: each code's type-code prefix and suffix bytes, with no vendor, model, class or other text. The codes are facts of the Mic-E protocol, not creative content, so they are part of the MIT-licensed core; the list was checked against the Mic-E section of aprs-deviceid at the commit above and against APRS12c's Mic-E type code text, and `tools/gen_deviceid.py` generates it from the same input as the table. The names, the tocall patterns and the rest of the database remain only in the optional CC BY-SA file.
+
 This file is optional. The rest of the library (`pdn_aprs.h`, `pdn_aprs.c`) is MIT-licensed and builds and works without it; a product that leaves the file out carries no CC BY-SA data.
 
 ## Named symbols

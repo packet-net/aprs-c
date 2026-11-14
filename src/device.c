@@ -1,31 +1,10 @@
 /*
  * device.c - identifying the sending device from a device table. The table
- * itself (CC BY-SA 2.0 data) is in the optional pdn_aprs_deviceid.c.
+ * itself (CC BY-SA 2.0 data) is in the optional pdn_aprs_deviceid.c; the
+ * Mic-E suffix codes the decoder and encoder use are in mice_codes.c.
  * SPDX-License-Identifier: MIT
  */
 #include "internal.h"
-
-PDN_APRS__PRIVATE int pdn_aprs__mic_e_suffix_known(const pdn_aprs_device_table *t, char type_code,
-                                                   const uint8_t *s, size_t n)
-{
-    size_t i;
-    if (!t)
-        return 0;
-    if ((type_code == '`' || type_code == '\'') && n == 2) {
-        for (i = 0; i < t->mice_count; i++) {
-            const char *k = t->mice[i].key;
-            if (k && strlen(k) == 2 && memcmp(k, s, 2) == 0)
-                return 1;
-        }
-    } else if ((type_code == '>' || type_code == ']') && n == 1) {
-        for (i = 0; i < t->mice_legacy_count; i++) {
-            const char *k = t->mice_legacy[i].key;
-            if (k && strlen(k) == 2 && k[0] == type_code && k[1] == (char)s[0])
-                return 1;
-        }
-    }
-    return 0;
-}
 
 static void fill(pdn_aprs_device *d, const pdn_aprs_device_entry *e)
 {
