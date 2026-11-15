@@ -504,35 +504,35 @@ static void test_reading(void)
     int dir, n;
     const char *line = "N1EOE>APN391,N1NCI-3*,WIDE2-1:!4216.95n/07243.20w#phg6230/ Easthampton MA";
     CHECK(decode(line) == PDN_APRS_OK);
-    n = pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2);
+    n = pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2, NULL);
     CHECK(n == (int)strlen(line) && strcmp(tnc2, line) == 0);
-    n = pdn_aprs_write_ax25(&pkt, frame, sizeof frame);
+    n = pdn_aprs_write_ax25(&pkt, frame, sizeof frame, NULL);
     CHECK(n > 0 && pdn_aprs_decode_ax25(frame, (size_t)n, NULL, &back) == PDN_APRS_OK &&
           strcmp(back.header.source, "N1EOE") == 0 && back.info_len == pkt.info_len &&
           memcmp(back.info, pkt.info, pkt.info_len) == 0 && back.header.path[0].used);
-    CHECK(pdn_aprs_write_tnc2(&pkt, tnc2, 10) == PDN_APRS_ERR_BUFFER);
+    CHECK(pdn_aprs_write_tnc2(&pkt, tnc2, 10, NULL) == PDN_APRS_ERR_BUFFER);
     /* a leading-zero SSID has no AX.25 form */
     CHECK(decode("WB4APR-00>APRS:>x") == PDN_APRS_OK &&
-          pdn_aprs_write_ax25(&pkt, frame, sizeof frame) == PDN_APRS_ERR_REFUSED &&
-          pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) > 0);
+          pdn_aprs_write_ax25(&pkt, frame, sizeof frame, NULL) == PDN_APRS_ERR_REFUSED &&
+          pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2, NULL) > 0);
     /* so has an SSID of -0, in the outer header and in a third-party inner header */
     CHECK(decode("N0ZO-0>APRS:>x") == PDN_APRS_OK &&
-          pdn_aprs_write_ax25(&pkt, frame, sizeof frame) == PDN_APRS_ERR_REFUSED &&
-          pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) > 0);
+          pdn_aprs_write_ax25(&pkt, frame, sizeof frame, NULL) == PDN_APRS_ERR_REFUSED &&
+          pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2, NULL) > 0);
     CHECK(decode("N0ZO>APX220,TCPIP*,qAC,T2RDU:}N0ZO-0>APX220,WIDE-1,WIDE2-1:!3309.71N/08643.18W_035/002g002t063r000p000P000h098b10133") == PDN_APRS_OK &&
           pdn_aprs_decode_third_party(&pkt.data, NULL, &back) == PDN_APRS_OK &&
-          pdn_aprs_write_ax25(&back, frame, sizeof frame) == PDN_APRS_ERR_REFUSED);
-    CHECK(decode("N0ZO-1>APRS:>x") == PDN_APRS_OK && pdn_aprs_write_ax25(&pkt, frame, sizeof frame) > 0);
+          pdn_aprs_write_ax25(&back, frame, sizeof frame, NULL) == PDN_APRS_ERR_REFUSED);
+    CHECK(decode("N0ZO-1>APRS:>x") == PDN_APRS_OK && pdn_aprs_write_ax25(&pkt, frame, sizeof frame, NULL) > 0);
     /* an empty destination, which the lenient decoder takes, is written back as received */
     {
         const char *e = "KB1EZZ-9>,W1IMD:>x";
-        CHECK(decode(e) == PDN_APRS_OK && pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) == (int)strlen(e) &&
+        CHECK(decode(e) == PDN_APRS_OK && pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2, NULL) == (int)strlen(e) &&
               strcmp(tnc2, e) == 0);
         pkt.info_len = (uint16_t)(sizeof pkt.info + 1);
-        CHECK(pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) == PDN_APRS_ERR_ARGUMENT);
+        CHECK(pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2, NULL) == PDN_APRS_ERR_ARGUMENT);
     }
     CHECK(pdn_aprs_decode_tnc2("bad", 3, NULL, &pkt) == PDN_APRS_ERR_HEADER &&
-          pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) == PDN_APRS_ERR_HEADER);
+          pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2, NULL) == PDN_APRS_ERR_HEADER);
     /* any code, any severity */
     CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W-\r") == PDN_APRS_OK);
     CHECK(pdn_aprs_has_diagnostic(&pkt, -1, PDN_APRS_SEVERITY_ERROR) == 0);
@@ -1530,8 +1530,8 @@ static void test_too_long_and_line_end(void)
     memset(line + n, 'x', 600);
     rc = pdn_aprs_decode_tnc2(line, n + 600, NULL, &p);
     CHECK(rc == PDN_APRS_ERR_TOO_LONG && p.header_ok && p.info_len == 0);
-    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) == PDN_APRS_ERR_TOO_LONG);
-    CHECK(pdn_aprs_write_ax25(&p, out, sizeof out) == PDN_APRS_ERR_TOO_LONG);
+    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out, NULL) == PDN_APRS_ERR_TOO_LONG);
+    CHECK(pdn_aprs_write_ax25(&p, out, sizeof out, NULL) == PDN_APRS_ERR_TOO_LONG);
 
     /* the field itself at, and one past, the cap, with and without a line end */
     for (len = PDN_APRS_MAX_INFO - 1; len <= PDN_APRS_MAX_INFO + 1; len++) {
@@ -1546,12 +1546,12 @@ static void test_too_long_and_line_end(void)
             rc = pdn_aprs_decode_tnc2(line, n + (size_t)len + el, NULL, &p);
             if (len <= PDN_APRS_MAX_INFO) {
                 CHECK(rc == PDN_APRS_OK && p.info_len == (unsigned)len + el);
-                CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) == (int)(n + (size_t)len + el));
+                CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out, NULL) == (int)(n + (size_t)len + el));
                 CHECK(memcmp(out, line, n + (size_t)len + el) == 0);
-                CHECK(pdn_aprs_write_ax25(&p, out, sizeof out) > 0);
+                CHECK(pdn_aprs_write_ax25(&p, out, sizeof out, NULL) > 0);
             } else {
                 CHECK(rc == PDN_APRS_ERR_TOO_LONG);
-                CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) == PDN_APRS_ERR_TOO_LONG);
+                CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out, NULL) == PDN_APRS_ERR_TOO_LONG);
             }
         }
     }
@@ -1569,7 +1569,7 @@ static void test_too_long_and_line_end(void)
     CHECK(pdn_aprs_decode_info(NULL, line, PDN_APRS_MAX_INFO + 3, NULL, &p) == PDN_APRS_ERR_TOO_LONG);
     CHECK(pdn_aprs_decode_info_unbounded(NULL, line, PDN_APRS_MAX_INFO + 3, NULL, &p) == PDN_APRS_OK);
     /* an unbounded decode keeps nothing by design and still writes its header */
-    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) > 0);
+    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out, NULL) > 0);
 }
 
 /* A fixed char array in caller-filled data with no NUL in it is an invalid
@@ -1696,8 +1696,8 @@ static void test_unterminated_header(void)
         CHECK(pdn_aprs_encode_ax25(h, &d, NULL, buf, sizeof buf, &enc) == PDN_APRS_ERR_ARGUMENT);
         p->header_ok = 1;
         p->header = *h;
-        CHECK(pdn_aprs_write_tnc2(p, buf, sizeof buf) == PDN_APRS_ERR_ARGUMENT);
-        CHECK(pdn_aprs_write_ax25(p, buf, sizeof buf) == PDN_APRS_ERR_ARGUMENT);
+        CHECK(pdn_aprs_write_tnc2(p, buf, sizeof buf, NULL) == PDN_APRS_ERR_ARGUMENT);
+        CHECK(pdn_aprs_write_ax25(p, buf, sizeof buf, NULL) == PDN_APRS_ERR_ARGUMENT);
     }
     /* a path call beyond path_count is not read */
     memset(h, 0, sizeof *h);
@@ -1721,11 +1721,11 @@ static void test_unbounded_too_long(void)
     big[0] = '>';
     CHECK(pdn_aprs_decode_info_unbounded(NULL, big, sizeof big, NULL, &p) == PDN_APRS_ERR_TOO_LONG);
     CHECK(p.info_dropped == 1);
-    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) == PDN_APRS_ERR_TOO_LONG);
-    CHECK(pdn_aprs_write_ax25(&p, out, sizeof out) == PDN_APRS_ERR_TOO_LONG);
+    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out, NULL) == PDN_APRS_ERR_TOO_LONG);
+    CHECK(pdn_aprs_write_ax25(&p, out, sizeof out, NULL) == PDN_APRS_ERR_TOO_LONG);
     CHECK(pdn_aprs_decode_info_unbounded(NULL, big, 100, NULL, &p) == PDN_APRS_OK);
     CHECK(p.info_dropped == 0);
-    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) > 0);
+    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out, NULL) > 0);
 }
 
 /* A capability with no value has an offset nobody reads, and none is formed from it. */

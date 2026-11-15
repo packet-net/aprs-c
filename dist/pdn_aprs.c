@@ -8610,12 +8610,20 @@ int pdn_aprs_encode_ax25(const pdn_aprs_header *header, const pdn_aprs_data *dat
    packet's origin). An empty destination, which a lenient decode takes with
    a warning, is written as it came in a line and is never written to a frame;
    a line is refused an information field with a CR or LF inside it, or a NUL. */
-static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int ax25)
+static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int ax25, pdn_aprs_encoded *result)
 {
     uint8_t head[HEADER_ROOM];
     uint8_t *out = (uint8_t *)buf;
     pdn_aprs__buf hb;
-    int rc;
+    pdn_aprs_encoded local;
+    const char *why = NULL;
+    int rc, fault;
+    if (!result)
+        result = &local;
+    result->len = 0;
+    result->destination[0] = 0;
+    result->reason = NULL;
+    result->refusal = 0;
     if (!p || (!buf && cap))
         return PDN_APRS_ERR_ARGUMENT;
     if (!p->header_ok)
@@ -8627,14 +8635,30 @@ static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int a
     /* the information field was longer than the packet holds, so none of it was kept */
     if (p->info_dropped)
         return PDN_APRS_ERR_TOO_LONG;
-    /* a path no line or frame carries (an entry not used before one that is) */
-    if (pdn_aprs__path_has_gap(&p->header))
+    /* the header is read by the outer rules, as for an encoder: an address no
+       outer header holds (a space, _ or * in a source, say) is invalid-address
+       and a path with an entry not used before one that is invalid-path, before
+       anything a form cannot carry. An empty destination, which a lenient decode
+       tolerates, is judged with the form below. */
+    fault = pdn_aprs__header_fault(&p->header, p->header.destination[0] ? p->header.destination : "APZ001", &why);
+    if (fault) {
+        result->refusal = fault;
+        result->reason = why;
         return PDN_APRS_ERR_REFUSED;
-    if (!ax25 && line_cannot_carry(p->info, p->info_len))
+    }
+    if (!ax25 && line_cannot_carry(p->info, p->info_len)) {
+        result->refusal = PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY;
+        result->reason = LINE_REASON;
         return PDN_APRS_ERR_REFUSED;
+    }
     pdn_aprs__buf_init(&hb, head, sizeof head);
     if (ax25) {
         rc = pdn_aprs__write_header_ax25(&hb, &p->header, p->header.destination);
+        if (rc != PDN_APRS_OK) {
+            result->refusal = PDN_APRS_REFUSAL_AX25_CANNOT_CARRY;
+            result->reason = FRAME_REASON;
+            return PDN_APRS_ERR_REFUSED;
+        }
     } else {
         /* a TNC2 line marks only the last entry that has been used */
         pdn_aprs_header h = p->header;
@@ -8646,8 +8670,8 @@ static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int a
         }
         if (last)
             h.path[last - 1].marked = 1;
-        /* as received: the decoded strings, with no address check (the
-           lenient decoder accepts an empty destination, say) */
+        /* as received: the decoded strings (the lenient decoder accepts an
+           empty destination, say) */
         pdn_aprs__puts(&hb, h.source);
         pdn_aprs__putc(&hb, '>');
         pdn_aprs__puts(&hb, h.destination);
@@ -8658,10 +8682,7 @@ static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int a
                 pdn_aprs__putc(&hb, '*');
         }
         pdn_aprs__putc(&hb, ':');
-        rc = PDN_APRS_OK;
     }
-    if (rc != PDN_APRS_OK)
-        return PDN_APRS_ERR_REFUSED;
     /* the information field is written as received, but the header is read
        back: it must decode to the header held, with no diagnostic the held
        packet does not carry */
@@ -8669,8 +8690,11 @@ static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int a
     if (pdn_aprs__header_fault_hook)
         pdn_aprs__header_fault_hook(head, hb.len, ax25);
 #endif
-    if (!pdn_aprs__header_reads_back(head, hb.len, ax25, &p->header, p->header.destination, !ax25))
+    if (!pdn_aprs__header_reads_back(head, hb.len, ax25, &p->header, p->header.destination, !ax25)) {
+        result->refusal = PDN_APRS_REFUSAL_DOES_NOT_READ_BACK;
+        result->reason = "the header written does not read back as the header held";
         return PDN_APRS_ERR_REFUSED;
+    }
     if (hb.overflow || hb.len > cap || p->info_len > cap - hb.len)
         return PDN_APRS_ERR_BUFFER;
     memcpy(out, head, hb.len);
@@ -8678,17 +8702,18 @@ static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int a
         memcpy(out + hb.len, p->info, p->info_len);
     if (!ax25 && hb.len + p->info_len < cap)
         out[hb.len + p->info_len] = 0;
+    result->len = hb.len + p->info_len;
     return (int)(hb.len + p->info_len);
 }
 
-int pdn_aprs_write_tnc2(const pdn_aprs_packet *packet, char *buf, size_t cap)
+int pdn_aprs_write_tnc2(const pdn_aprs_packet *packet, char *buf, size_t cap, pdn_aprs_encoded *result)
 {
-    return write_received(packet, buf, cap, 0);
+    return write_received(packet, buf, cap, 0, result);
 }
 
-int pdn_aprs_write_ax25(const pdn_aprs_packet *packet, void *buf, size_t cap)
+int pdn_aprs_write_ax25(const pdn_aprs_packet *packet, void *buf, size_t cap, pdn_aprs_encoded *result)
 {
-    return write_received(packet, buf, cap, 1);
+    return write_received(packet, buf, cap, 1, result);
 }
 
 int pdn_aprs_phg_values(const pdn_aprs_phg *phg, double *watts, double *height_feet, double *gain_db,

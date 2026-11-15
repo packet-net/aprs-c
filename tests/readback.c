@@ -492,21 +492,21 @@ static void test_header(void)
     CHECK(build_status("WIDE1-1", 0, &enc) > 0 && build_status("WIDE1-1", 1, &enc) > 0);
     /* a packet already held: its information field as received, its header read back */
     CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001,WIDE1-1*,WIDE2-1:>hi", 34, NULL, &pkt) == PDN_APRS_OK);
-    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)out, sizeof out) > 0 && pdn_aprs_write_ax25(&pkt, out, sizeof out) > 0);
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)out, sizeof out, NULL) > 0 && pdn_aprs_write_ax25(&pkt, out, sizeof out, NULL) > 0);
     g_head_at = 1;
     pdn_aprs__header_fault_hook = header_fault;
-    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)out, sizeof out) == PDN_APRS_ERR_REFUSED);
-    CHECK(pdn_aprs_write_ax25(&pkt, out, sizeof out) == PDN_APRS_ERR_REFUSED);
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)out, sizeof out, NULL) == PDN_APRS_ERR_REFUSED);
+    CHECK(pdn_aprs_write_ax25(&pkt, out, sizeof out, NULL) == PDN_APRS_ERR_REFUSED);
     no_fault();
     /* a header that is a packet's own to hold: an entry not used before one that is */
     pkt.header.path[0].used = pkt.header.path[0].marked = 0;
     pkt.header.path[1].used = pkt.header.path[1].marked = 1;
-    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)out, sizeof out) == PDN_APRS_ERR_REFUSED);
-    CHECK(pdn_aprs_write_ax25(&pkt, out, sizeof out) == PDN_APRS_ERR_REFUSED);
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)out, sizeof out, NULL) == PDN_APRS_ERR_REFUSED);
+    CHECK(pdn_aprs_write_ax25(&pkt, out, sizeof out, NULL) == PDN_APRS_ERR_REFUSED);
     /* the written line has the * on the last used entry only, though a decoded line with a * on each
        reads with both marked */
     CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001,WIDE1-1*,N0CALL-1*,WIDE2-1:>hi", 44, NULL, &pkt) == PDN_APRS_OK);
-    n = pdn_aprs_write_tnc2(&pkt, (char *)out, sizeof out);
+    n = pdn_aprs_write_tnc2(&pkt, (char *)out, sizeof out, NULL);
     CHECK(n > 0 && memcmp(out, "N0CALL>APZ001,WIDE1-1,N0CALL-1*,WIDE2-1:>hi", (size_t)n) == 0);
 }
 
@@ -709,7 +709,7 @@ static void test_buffer_cleared(void)
     /* a field a decoded packet holds that no line carries leaves nothing either */
     CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001:>hi", 17, NULL, &pkt) == PDN_APRS_OK);
     memset(buf, 0, sizeof buf);
-    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, 10) == PDN_APRS_ERR_BUFFER);
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, 10, NULL) == PDN_APRS_ERR_BUFFER);
     CHECK(all_zero(buf, sizeof buf));
 }
 
@@ -805,39 +805,39 @@ static void test_header_order_and_forms(void)
         static const uint8_t ud[] = {0x82, 0xA0, 0xB4, 0x60, 0x60, 0x62, 0xE0, 0x9C, 0x60, 0x86, 0x82, 0x98, 0x98, 0x61,
                                      0x03, 0xF0, '{', 'A', 'x', 'a', '\n', 'X', '>', 'Y', ':', '>', 'e', 'v', 'i', 'l'};
         CHECK(pdn_aprs_decode_ax25(ud, sizeof ud, NULL, &pkt) == PDN_APRS_OK && pkt.data.type == PDN_APRS_TYPE_USER_DEFINED);
-        CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf) > 0);
-        CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf) == PDN_APRS_ERR_REFUSED);
+        CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf, NULL) > 0);
+        CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, NULL) == PDN_APRS_ERR_REFUSED);
         CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001:>a\rb", 18, NULL, &pkt) == PDN_APRS_OK);
-        CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf) == PDN_APRS_ERR_REFUSED);
-        CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf) > 0);
+        CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, NULL) == PDN_APRS_ERR_REFUSED);
+        CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf, NULL) > 0);
         /* one at the very end is carried */
         CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001:>ab\r\n", 19, NULL, &pkt) == PDN_APRS_OK);
-        n = pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf);
+        n = pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, NULL);
         CHECK(n > 0 && memcmp(buf, "N0CALL>APZ001:>ab\r\n", (size_t)n) == 0);
         /* an empty destination is written as it came in a line, and never to a frame */
         CHECK(pdn_aprs_decode_tnc2("N0CALL>:>x", 10, NULL, &pkt) == PDN_APRS_OK);
-        n = pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf);
+        n = pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, NULL);
         CHECK(n == 10 && memcmp(buf, "N0CALL>:>x", 10) == 0);
-        CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf) == PDN_APRS_ERR_REFUSED);
+        CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf, NULL) == PDN_APRS_ERR_REFUSED);
         {
             static const uint8_t blank[] = {0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x60, 0x9C, 0x60, 0x86,
                                             0x82, 0x98, 0x98, 0x61, 0x03, 0xF0, 0x3E, 0x78};
             CHECK(pdn_aprs_decode_ax25(blank, sizeof blank, NULL, &pkt) == PDN_APRS_OK);
-            CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf) == PDN_APRS_ERR_REFUSED);
-            CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf) > 0);
+            CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf, NULL) == PDN_APRS_ERR_REFUSED);
+            CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, NULL) > 0);
         }
         /* an inner packet written on its own is read back by the outer header rules */
         CHECK(pdn_aprs_decode_tnc2("N0CALL>APRS:}a b>APRS,A*,B:>hi", 30, NULL, &pkt) == PDN_APRS_OK);
         CHECK(pdn_aprs_decode_third_party(&pkt.data, NULL, inner) == PDN_APRS_OK);
-        CHECK(pdn_aprs_write_tnc2(inner, (char *)buf, sizeof buf) == PDN_APRS_ERR_REFUSED);
-        CHECK(pdn_aprs_write_ax25(inner, buf, sizeof buf) == PDN_APRS_ERR_REFUSED);
+        CHECK(pdn_aprs_write_tnc2(inner, (char *)buf, sizeof buf, NULL) == PDN_APRS_ERR_REFUSED);
+        CHECK(pdn_aprs_write_ax25(inner, buf, sizeof buf, NULL) == PDN_APRS_ERR_REFUSED);
         /* an inner header written inside third-party data is still read by the third-party rules */
         CHECK(pdn_aprs_encode_tnc2(&h, &pkt.data, NULL, (char *)buf, sizeof buf, &enc) > 0);
         CHECK(pdn_aprs_decode_tnc2("N0CALL>APRS:}N0CALL>APRS,qAR,X:>hi", 34, NULL, &pkt) == PDN_APRS_OK);
         CHECK(pdn_aprs_decode_third_party(&pkt.data, NULL, inner) == PDN_APRS_OK);
-        n = pdn_aprs_write_tnc2(inner, (char *)buf, sizeof buf);
+        n = pdn_aprs_write_tnc2(inner, (char *)buf, sizeof buf, NULL);
         CHECK(n > 0 && memcmp(buf, "N0CALL>APRS,qAR,X:>hi", (size_t)n) == 0);
-        CHECK(pdn_aprs_write_ax25(inner, buf, sizeof buf) == PDN_APRS_ERR_REFUSED);
+        CHECK(pdn_aprs_write_ax25(inner, buf, sizeof buf, NULL) == PDN_APRS_ERR_REFUSED);
         free(inner);
     }
 }
@@ -876,10 +876,67 @@ static void test_header_diagnostics(void)
           enc.refusal == PDN_APRS_REFUSAL_DOES_NOT_READ_BACK);
     /* and a packet already held */
     CHECK(pdn_aprs_decode_tnc2("N0CAL>APZ001:>hi", 16, NULL, &pkt) == PDN_APRS_OK);
-    CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf) == PDN_APRS_ERR_REFUSED);
+    CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf, NULL) == PDN_APRS_ERR_REFUSED);
     no_fault();
     g_pad_at = -1;
-    CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf) > 0);
+    CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf, NULL) > 0);
+}
+
+/* ---- the writers of a packet already held name why they refuse ---- */
+
+static void test_writer_codes(void)
+{
+    pdn_aprs_encoded enc;
+    pdn_aprs_packet *inner = (pdn_aprs_packet *)malloc(sizeof *inner);
+    static uint8_t buf[512];
+    static const char *const bad_sources[] = {"PY2Sp_R-R", "AUZ ", "N*CALL", "a b"};
+    size_t i;
+    char line[128];
+    no_fault();
+    for (i = 0; i < sizeof bad_sources / sizeof bad_sources[0]; i++) {
+        /* an inner packet whose source no outer address may hold: the outer address rule first, in a line and in a frame */
+        int n = sprintf(line, "N0CALL>APRS:}%s>APRS:>hi", bad_sources[i]);
+        CHECK(pdn_aprs_decode_tnc2(line, (size_t)n, NULL, &pkt) == PDN_APRS_OK);
+        CHECK(pdn_aprs_decode_third_party(&pkt.data, NULL, inner) == PDN_APRS_OK);
+        CHECK(pdn_aprs_write_tnc2(inner, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+              enc.refusal == PDN_APRS_REFUSAL_INVALID_ADDRESS && enc.len == 0 && enc.reason);
+        CHECK(pdn_aprs_write_ax25(inner, buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+              enc.refusal == PDN_APRS_REFUSAL_INVALID_ADDRESS);
+    }
+    /* a source that is only lower case: a line, and not a frame */
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APRS:}n0call>APRS:>hi", 28, NULL, &pkt) == PDN_APRS_OK);
+    CHECK(pdn_aprs_decode_third_party(&pkt.data, NULL, inner) == PDN_APRS_OK);
+    CHECK(pdn_aprs_write_tnc2(inner, (char *)buf, sizeof buf, &enc) > 0 && enc.refusal == 0 && enc.len > 0);
+    CHECK(pdn_aprs_write_ax25(inner, buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_AX25_CANNOT_CARRY);
+    /* an empty destination, a frame's alone */
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>:>x", 10, NULL, &pkt) == PDN_APRS_OK);
+    CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_AX25_CANNOT_CARRY);
+    /* a line break inside the field: a line's alone */
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001:>a\rb", 18, NULL, &pkt) == PDN_APRS_OK);
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY);
+    CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf, &enc) > 0 && enc.refusal == 0);
+    /* a path with an entry not used before one that is */
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001,WIDE1-1,WIDE2-1*:>hi", 34, NULL, &pkt) == PDN_APRS_OK);
+    pkt.header.path[0].used = pkt.header.path[0].marked = 0;
+    pkt.header.path[1].used = pkt.header.path[1].marked = 1;
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_INVALID_PATH);
+    CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_INVALID_PATH);
+    /* a header written wrong */
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001:>hi", 17, NULL, &pkt) == PDN_APRS_OK);
+    g_head_at = 1;
+    pdn_aprs__header_fault_hook = header_fault;
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_DOES_NOT_READ_BACK);
+    no_fault();
+    /* other results carry no code, and a NULL result is allowed */
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, 3, &enc) == PDN_APRS_ERR_BUFFER && enc.refusal == 0);
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, NULL) > 0);
+    free(inner);
 }
 
 int main(void)
@@ -895,6 +952,7 @@ int main(void)
     test_buffer_cleared();
     test_header_order_and_forms();
     test_header_diagnostics();
+    test_writer_codes();
     no_fault();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

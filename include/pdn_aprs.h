@@ -1560,32 +1560,37 @@ PDN_APRS_API int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_
    through as received, even over 256 bytes, with no size check and no
    read-back of it. The header they write is read back, as a user's decode of
    that form reads it (the outer header rules, whatever the packet's origin:
-   an inner packet from pdn_aprs_decode_third_party whose source is "a b" is
-   refused as a line, since no outer header holds it), and must give the
-   header held with no diagnostic the held packet does not carry. A line marks
-   the last used path entry only and leaves out an empty path entry; an empty
+   an inner packet from pdn_aprs_decode_third_party() whose source is "a b"
+   is refused, since no outer header holds it), and must give the header held
+   with no diagnostic the held packet does not carry. A line marks the last
+   used path entry only and leaves out an empty path entry; an empty
    destination, which a lenient decode tolerates, is written as it came in a
    line and refused in a frame, which never carries one.
-   Return the length, or
-   PDN_APRS_ERR_HEADER if the packet's header was unusable,
-   PDN_APRS_ERR_REFUSED for a header the form cannot carry as read back (an
-   address as sent that the form holds no better: an AX.25 frame holds no SSID
-   with a leading zero, no empty, lower-case or over-long call, no more than
-   8 path entries; a path with an entry not used before one that is), or, for
-   a line, an information field with a CR or LF inside it (one at the very end
-   is carried) or a NUL, which a NUL-terminated line cannot hold (a frame
-   carries both), or
+
+   Return the length, or PDN_APRS_ERR_HEADER if the packet's header was
+   unusable, PDN_APRS_ERR_REFUSED for a header or field the form cannot carry,
    PDN_APRS_ERR_BUFFER, or PDN_APRS_ERR_ARGUMENT for a length or path count
    that does not fit its array, or a fixed string in the header with no NUL. A
    packet whose decode returned PDN_APRS_ERR_TOO_LONG has info_dropped set and
    is not written: PDN_APRS_ERR_TOO_LONG. A packet decoded with
    pdn_aprs_decode_info_unbounded keeps no information field, so only its
-   header is written (unless it returned TOO_LONG, as above). The refusal
-   carries no pdn_aprs_refusal code; the codes of the encoding calls
-   (INVALID_ADDRESS, INVALID_PATH, TNC2_CANNOT_CARRY, AX25_CANNOT_CARRY) say
-   what each would be. */
-PDN_APRS_API int pdn_aprs_write_tnc2(const pdn_aprs_packet *packet, char *buf, size_t cap);
-PDN_APRS_API int pdn_aprs_write_ax25(const pdn_aprs_packet *packet, void *buf, size_t cap);
+   header is written (unless it returned TOO_LONG, as above).
+
+   result may be NULL; when it is not, the call fills it as the encoders do:
+   len (the bytes written) and, for PDN_APRS_ERR_REFUSED, refusal (a
+   pdn_aprs_refusal code, zero for every other result) and reason. The codes,
+   in order: PDN_APRS_REFUSAL_INVALID_ADDRESS for an address no outer header
+   holds (a source with a space, _ or *, say), PDN_APRS_REFUSAL_INVALID_PATH
+   for a path with an entry not used before one that is, then what the form
+   cannot carry: for a line PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY (a CR or LF
+   inside the information field, one at the very end being carried, or a NUL,
+   since a line is a NUL-terminated string), for a frame
+   PDN_APRS_REFUSAL_AX25_CANNOT_CARRY (an empty, over-long or lower-case call,
+   an SSID a frame cannot hold, over 8 path entries); and
+   PDN_APRS_REFUSAL_DOES_NOT_READ_BACK if the header written does not read back
+   as the header held. */
+PDN_APRS_API int pdn_aprs_write_tnc2(const pdn_aprs_packet *packet, char *buf, size_t cap, pdn_aprs_encoded *result);
+PDN_APRS_API int pdn_aprs_write_ax25(const pdn_aprs_packet *packet, void *buf, size_t cap, pdn_aprs_encoded *result);
 
 /* What a PHG's codes mean: watts (the power code squared), antenna height in
    feet (10 x 2 to the height code), gain in dB, and directivity in degrees

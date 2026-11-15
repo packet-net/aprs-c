@@ -443,46 +443,42 @@ static const pdn_aprs_device_table *devices(void) { return dev_table(); }
 /* "pass_through" and "pass_through_inner" (README Read-back, Header): the
    lenient packet, or for the inner key the inner packet of its third-party
    data, written with pdn_aprs_write_tnc2 and pdn_aprs_write_ax25 is the line
-   and the frame given, or a refusal. The writers return PDN_APRS_ERR_REFUSED
-   and carry no refusal code, so a refusal is checked to be one and its
-   code to be one of those a writer can give (the one of its form, or the
-   outer header's address or path code). */
-static int writer_refusal(const char *code, int ax25)
-{
-    return code && (strcmp(code, ax25 ? "ax25-cannot-carry" : "tnc2-cannot-carry") == 0 ||
-                    strcmp(code, "invalid-address") == 0 || strcmp(code, "invalid-path") == 0);
-}
-
+   and the frame given, or a refusal with exactly the code given. */
 static void check_writers(const jval *pt, const char *key, const char *id, const pdn_aprs_packet *p)
 {
     const char *tnc2 = json_gets(pt, "tnc2"), *hex = json_gets(pt, "ax25_hex");
     const char *tref = json_gets(pt, "tnc2_refusal"), *aref = json_gets(pt, "ax25_refusal");
     char why[512];
     uint8_t buf[2048];
+    pdn_aprs_encoded enc;
     int n;
     if (tnc2 || tref) {
-        n = pdn_aprs_write_tnc2(p, (char *)buf, sizeof buf);
+        const char *got;
+        n = pdn_aprs_write_tnc2(p, (char *)buf, sizeof buf, &enc);
+        got = n == PDN_APRS_ERR_REFUSED ? pdn_aprs_refusal_name(enc.refusal) : NULL;
         if (tref)
-            snprintf(why, sizeof why, "%s: tnc2 wrote %d, want a refusal (%s)", key, n, tref);
+            snprintf(why, sizeof why, "%s: tnc2 wrote %d (%s), want a refusal (%s)", key, n, got ? got : "-", tref);
         else
             snprintf(why, sizeof why, "%s: tnc2 wrote %.200s, want %s", key, n > 0 ? ascii(buf, n) : "nothing", tnc2);
-        report(id, "pass-through", tref ? (n == PDN_APRS_ERR_REFUSED && writer_refusal(tref, 0))
+        report(id, "pass-through", tref ? (got && strcmp(got, tref) == 0)
                                         : (n >= 0 && (size_t)n == strlen(tnc2) && memcmp(buf, tnc2, (size_t)n) == 0),
                why, NULL, NULL);
     }
     if (hex || aref) {
         char got[2 * 512 + 1];
+        const char *code;
         int k, ok = 0;
-        n = pdn_aprs_write_ax25(p, buf, sizeof buf);
+        n = pdn_aprs_write_ax25(p, buf, sizeof buf, &enc);
+        code = n == PDN_APRS_ERR_REFUSED ? pdn_aprs_refusal_name(enc.refusal) : NULL;
         got[0] = 0;
         for (k = 0; n > 0 && k < n && k < 512; k++)
             snprintf(got + 2 * k, 3, "%02X", buf[k]);
         if (aref)
-            ok = n == PDN_APRS_ERR_REFUSED && writer_refusal(aref, 1);
+            ok = code && strcmp(code, aref) == 0;
         else if (n > 0 && strlen(hex) == 2 * (size_t)n)
             for (k = 0, ok = 1; k < 2 * n; k++)
                 ok = ok && (hex[k] & ~0x20) == (got[k] & ~0x20);
-        snprintf(why, sizeof why, "%s: ax25 wrote %d: %.200s, want %.200s", key, n, got, aref ? aref : hex);
+        snprintf(why, sizeof why, "%s: ax25 wrote %d: %.200s (%s), want %.200s", key, n, got, code ? code : "-", aref ? aref : hex);
         report(id, "pass-through", ok, why, NULL, NULL);
     }
 }

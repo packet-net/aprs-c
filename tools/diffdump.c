@@ -235,35 +235,16 @@ static jval *api_view(const pdn_aprs_packet *p, int depth)
            field) and as an AX.25 frame; a header the library cannot write
            has no TNC2 form, and an address AX.25 cannot carry is refused */
         static uint8_t wbuf[2 * (PDN_APRS_MAX_PATH + 2) * 16 + PDN_APRS_MAX_INFO];
-        int w = pdn_aprs_write_tnc2(p, (char *)wbuf, sizeof wbuf);
+        pdn_aprs_encoded why;
+        int w = pdn_aprs_write_tnc2(p, (char *)wbuf, sizeof wbuf, &why);
         if (w >= 0)
             json_set(a, "tnc2", json_str(hex(wbuf, (size_t)w)));
-        w = pdn_aprs_write_ax25(p, wbuf, sizeof wbuf);
+        w = pdn_aprs_write_ax25(p, wbuf, sizeof wbuf, &why);
         if (w >= 0)
             json_set(a, "ax25", json_str(hex(wbuf, (size_t)w)));
         else if (w == PDN_APRS_ERR_REFUSED) {
-            /* pdn_aprs_write_ax25 returns no code, so the tool asks the encoder
-               what it would say of the same header (the outer address rule
-               first: a source with a space, _ or * is invalid-address; one
-               that is only lower case is ax25-cannot-carry). An empty
-               destination, with no other fault, is a frame's
-               ax25-cannot-carry. */
-            pdn_aprs_data stand_in;
-            pdn_aprs_encoded why;
-            uint8_t fbuf[512];
-            int code = PDN_APRS_REFUSAL_AX25_CANNOT_CARRY;
-            memset(&stand_in, 0, sizeof stand_in);
-            stand_in.type = PDN_APRS_TYPE_STATUS;
-            stand_in.as.status.text[0] = 'x';
-            stand_in.as.status.text_len = 1;
-            memset(&why, 0, sizeof why);
-            pdn_aprs_header hh = *h;
-            if (!hh.destination[0])
-                memcpy(hh.destination, "APZ001", 7); /* an empty one is judged last, below */
-            if (pdn_aprs_encode_ax25(&hh, &stand_in, NULL, fbuf, sizeof fbuf, &why) == PDN_APRS_ERR_REFUSED && why.refusal)
-                code = why.refusal;
             json_set(a, "ax25", json_str("refused"));
-            json_set(a, "ax25_refusal", json_str(pdn_aprs_refusal_name(code)));
+            json_set(a, "ax25_refusal", json_str(pdn_aprs_refusal_name(why.refusal)));
         }
     }
     for (i = 0; i < h->path_count; i++) {
