@@ -354,7 +354,7 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
     }
 
     /* after the fields: telemetry and DAO, then software type and unit, or a comment */
-    pdn_aprs__cbuf_cut(cb, 0, i);
+    pdn_aprs__cbuf_cut(cb, 0, i, 0);
     if (r) {
         uint8_t dao[5];
         pdn_aprs__lift_telemetry_dao(cb, r, dao);
@@ -369,7 +369,9 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
     }
     if (cb->n == 0)
         return 1;
-    if (unit_ok(cb->b, cb->n)) {
+    /* software type and unit are one run of text: a lifted element in it
+       splits it */
+    if (cb->nbrk == 0 && unit_ok(cb->b, cb->n)) {
         w->software = (char)cb->b[0];
         memcpy(w->unit, cb->b + 1, cb->n - 1);
         w->unit[cb->n - 1] = 0;
@@ -378,7 +380,7 @@ PDN_APRS__PRIVATE int pdn_aprs__decode_weather_fields(pdn_aprs__dctx *c, pdn_apr
     if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_WEATHER_COMMENT))
         return 0;
     if (mode != 0 && cb->n > 0 && (cb->b[0] == ' ' || cb->b[0] == '/'))
-        pdn_aprs__cbuf_cut(cb, 0, 1);
+        pdn_aprs__cbuf_cut(cb, 0, 1, 0);
     if (!pdn_aprs__check_text(c, cb->b, cb->n))
         return 0;
     *comment_len = (uint16_t)pdn_aprs__take_text(c, comment, comment_cap, cb->b, cb->n);

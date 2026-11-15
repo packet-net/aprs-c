@@ -177,15 +177,23 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_maidenhead(pdn_aprs__dctx *c);
 /* Comment processing (comment.c). A working copy of a comment, as bytes:
    room for the longest the encoder writes, a comment of PDN_APRS_TEXT_SIZE
    bytes and the elements around it. */
+/* Where an element was lifted out of the text a boundary is left, so that no
+   later recogniser reads across it (an element is read only where its bytes
+   stand whole as sent). Each comment lifts at most six elements that leave a
+   boundary (a later Mic-E altitude, telemetry, a !DAO!, a /A= altitude,
+   braces, a late PHG, RNG or DFS), each at most once; the voice frequency
+   and the leading delimiter are cut from the start, which is no boundary. */
+#define PDN_APRS__MAX_BREAKS 8
 typedef struct pdn_aprs__cbuf {
     uint8_t b[PDN_APRS_TEXT_SIZE + 256];
     size_t n;
-    /* 1 + where a Mic-E altitude was taken out, or 0: no !DAO! spans it */
-    size_t cut;
-    /* where pdn_aprs__lift_telemetry_dao took telemetry or a !DAO! out, in
-       the text left: the bytes either side were not next to each other */
-    size_t gap[2];
-    int gaps;
+    /* boundaries, ascending, each strictly inside the text left: a boundary
+       at p lies between b[p - 1] and b[p]; brk_alt[k] is set when only
+       lifted /A= altitudes stand there (they do not cut a voice frequency
+       off from its fields) */
+    size_t brk[PDN_APRS__MAX_BREAKS];
+    uint8_t brk_alt[PDN_APRS__MAX_BREAKS];
+    int nbrk;
 } pdn_aprs__cbuf;
 
 /* What the comment's start lifts: base-91 telemetry (from its first | to
@@ -197,7 +205,14 @@ typedef struct pdn_aprs__lifted {
 
 /* Returns 1, or 0 (after pdn_aprs__overflow) if [s, s+n) does not fit. */
 PDN_APRS__PRIVATE int pdn_aprs__cbuf_set(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, const uint8_t *s, size_t n);
-PDN_APRS__PRIVATE void pdn_aprs__cbuf_cut(pdn_aprs__cbuf *cb, size_t at, size_t n);
+/* Takes n bytes out at at and leaves a boundary there; alt: the bytes were a
+   /A= altitude. */
+PDN_APRS__PRIVATE void pdn_aprs__cbuf_cut(pdn_aprs__cbuf *cb, size_t at, size_t n, int alt);
+/* 1 if a boundary lies strictly inside [from, to). */
+PDN_APRS__PRIVATE int pdn_aprs__cbuf_spans(const pdn_aprs__cbuf *cb, size_t from, size_t to);
+/* The boundary at p: -1 none, 0 something other than /A= lifted there, 1
+   only /A= altitudes. */
+PDN_APRS__PRIVATE int pdn_aprs__cbuf_break_at(const pdn_aprs__cbuf *cb, size_t p);
 /* Lifts base-91 telemetry (between the last two |) and the last !DAO!
    outside it. */
 PDN_APRS__PRIVATE void pdn_aprs__find_telemetry_dao(const pdn_aprs__cbuf *cb, pdn_aprs__lifted *f);

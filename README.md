@@ -113,7 +113,7 @@ pdn_aprs_decode_options strict = {.strict = 1};
 pdn_aprs_decode_options fussy = {.reject = {[PDN_APRS_CODE_TRAILING_LINE_BREAK] = 1}};
 ```
 
-`reject` switches off one tolerance at a time, indexed by the code; `pdn_aprs_code_tolerable()` says which codes can be tolerated. A few tolerances change how a packet is read rather than rejecting it: with `position-not-at-start` switched off, text before a `!` position makes the packet a non-APRS beacon, and with `data-extension-in-comment` or `mic-e-altitude-not-first` switched off the element stays in the comment (a Mic-E report with a later altitude is rejected when lifting its telemetry and `!DAO!` would join bytes across their place into another).
+`reject` switches off one tolerance at a time, indexed by the code; `pdn_aprs_code_tolerable()` says which codes can be tolerated. A few tolerances change how a packet is read rather than rejecting it: with `position-not-at-start` switched off, text before a `!` position makes the packet a non-APRS beacon, and with `data-extension-in-comment` or `mic-e-altitude-not-first` switched off the element stays in the comment.
 
 The decoder knows the Mic-E device suffix codes itself, so it lifts a suffix such as `_%` out of the comment with or without the device table. To name the device, pass the table to `pdn_aprs_identify_device()`:
 

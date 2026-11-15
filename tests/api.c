@@ -710,13 +710,18 @@ static void test_batch2(void)
     CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91SX/G|!:&0'p|   x") == PDN_APRS_OK &&
           !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
           pkt.data.as.report.has_telemetry && strcmp(pkt.data.as.report.comment, " x") == 0);
-    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G|!:&0hl!Y[/>\"4e}='p|  x") == PDN_APRS_OK &&
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G\"4e}|!:&0'p|  x") == PDN_APRS_OK &&
           !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
           pkt.data.as.report.has_telemetry && pkt.data.as.report.has_altitude &&
           strcmp(pkt.data.as.report.comment, "x") == 0);
-    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91SX/G|!:&0hl!Y[/>\"4e}='p|   x") == PDN_APRS_OK &&
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91SX/G\"4e}|!:&0'p|   x") == PDN_APRS_OK &&
           !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
           strcmp(pkt.data.as.report.comment, " x") == 0);
+    /* telemetry split by the altitude is text, and the locator has no space */
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G|!:&0hl!Y[/>\"4e}='p|  x") == PDN_APRS_OK &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
+          !pkt.data.as.report.has_telemetry && pkt.data.as.report.has_altitude &&
+          strcmp(pkt.data.as.report.comment, "|!:&0hl!Y[/>='p|  x") == 0);
     /* a !DAO! that exists only by joining across a lifted altitude is text, so
        the locator has no space and the text stays */
     CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G!W1\"4e}2! hi") == PDN_APRS_OK && !pkt.data.as.report.has_dao &&
@@ -1930,18 +1935,23 @@ static void test_round5(void)
 static void test_mic_e_locator_space_after_lifted_altitude(void)
 {
     const pdn_aprs_report *r;
-    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G|!:&0hl!Y[/>\"4e}='p| DG2MM") == PDN_APRS_OK);
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G\"4e}|!:&0'p| DG2MM") == PDN_APRS_OK);
     r = &pkt.data.as.report;
     CHECK(!pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, -1));
     CHECK(pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MIC_E_ALTITUDE_NOT_FIRST, PDN_APRS_SEVERITY_WARNING));
     CHECK(r->has_altitude && r->has_telemetry && strcmp(r->locator, "IO91") == 0);
     CHECK(r->comment_len == 5 && memcmp(r->comment, "DG2MM", 5) == 0);
+    /* telemetry the altitude splits is text */
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G|!:&0hl!Y[/>\"4e}='p| DG2MM") == PDN_APRS_OK);
+    CHECK(!pkt.data.as.report.has_telemetry && pkt.data.as.report.has_altitude &&
+          strcmp(pkt.data.as.report.comment, "|!:&0hl!Y[/>='p| DG2MM") == 0 &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING));
     /* a longer spaced comment */
-    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G|!:&0hl!Y[/>\"4e}='p| hello there") == PDN_APRS_OK);
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G\"4e}|!:&0'p| hello there") == PDN_APRS_OK);
     CHECK(!pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, -1));
     CHECK(pkt.data.as.report.comment_len == 11);
     /* a comment with no space after the telemetry still warns */
-    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G|!:&0hl!Y[/>\"4e}='p|DG2MM") == PDN_APRS_OK);
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G\"4e}|!:&0'p|DG2MM") == PDN_APRS_OK);
     CHECK(pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING));
 }
 
@@ -2149,6 +2159,62 @@ static void test_mic_e_codes(void)
     }
 }
 
+/* Round 5: lifting an element never joins the text either side of it. Each
+   element is read only where its bytes stand whole as sent. */
+static void test_lifting_never_joins(void)
+{
+    pdn_aprs_decode_options strict;
+    const pdn_aprs_report *r;
+    memset(&strict, 0, sizeof strict);
+    strict.strict = 1;
+    /* a range split by telemetry, in an object: text, and it will not
+       re-encode, since written it would read as a range */
+    CHECK(decode("N0CALL>APZ001:;OBJECT   *111111z4903.50N/07201.75W-RNG00|!:&0'p|12 x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(pkt.data.type == PDN_APRS_TYPE_OBJECT && !r->has_range && r->has_telemetry &&
+          strcmp(r->comment, "RNG0012 x") == 0 && reencodes_as(NULL));
+    /* an altitude split by a !DAO!, in an item, is text (its "/" is the comment's dropped delimiter); the DAO still counts */
+    CHECK(decode("N0CALL>APZ001:)ITEM!4903.50N/07201.75W-/A=00!W12!0123") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(pkt.data.type == PDN_APRS_TYPE_ITEM && !r->has_altitude && r->has_dao && strcmp(r->comment, "A=000123") == 0);
+    /* a PHG split by a later altitude is text, whichever lifts first */
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W-hi PH/A=000100G3330 x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->has_altitude && !r->has_phg && strcmp(r->comment, "hi PHG3330 x") == 0);
+    /* the weather software type and unit are one run: a telemetry block in
+       them makes them a comment */
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W_220/004g005t077e|!:&0'p|Cu2k") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->has_telemetry && r->weather.software == 0 && strcmp(r->comment, "eCu2k") == 0);
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W_220/004g005t077eCu2k") == PDN_APRS_OK);
+    CHECK(pkt.data.as.report.weather.software == 'e' && strcmp(pkt.data.as.report.weather.unit, "Cu2k") == 0);
+    /* a signpost split by an altitude is text */
+    CHECK(decode("N0CALL>APZ001:!4903.50N\\07201.75Wm{a/A=000100b} x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->has_altitude && r->signpost[0] == 0 && strcmp(r->comment, "{ab} x") == 0);
+    /* a voice frequency: an altitude before a field does not cut it off, a
+       telemetry block does, in either order of the two */
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W-146.520MHz T100/A=000100 R25m x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->has_frequency && r->frequency.tone_value == 100 && r->frequency.has_range && r->has_altitude &&
+          strcmp(r->comment, "x") == 0);
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W-146.520MHz T100|!:&0'p| R25m x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->has_frequency && r->frequency.tone_value == 100 && !r->frequency.has_range && r->has_telemetry &&
+          strcmp(r->comment, "R25m x") == 0);
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W-146.520MHz/A=000100!W12! T100 x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->has_frequency && r->frequency.tone == PDN_APRS_TONE_NONE && r->has_altitude && r->has_dao &&
+          strcmp(r->comment, "T100 x") == 0);
+    /* Mic-E: telemetry split by a !DAO! is text, and a strict decoder reads a
+       later altitude as text and never rejects by it */
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G |!:&!W12!0'p| x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(!r->has_telemetry && r->has_dao && strcmp(r->comment, "|!:&0'p| x") == 0);
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G x\"4e}y", 37, &strict, &pkt) == PDN_APRS_OK &&
+          !pkt.data.as.report.has_altitude && strcmp(pkt.data.as.report.comment, "x\"4e}y") == 0);
+}
+
 int main(void)
 {
     test_basics();
@@ -2176,6 +2242,7 @@ int main(void)
     test_mic_e_locator_space_after_lifted_altitude();
     test_garbled_timestamp();
     test_mic_e_codes();
+    test_lifting_never_joins();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

@@ -142,29 +142,12 @@ PDN_APRS__PRIVATE size_t pdn_aprs__mic_e_locator_len(const uint8_t *s, size_t n)
     return 0;
 }
 
-/* Whether lifting telemetry and a !DAO! from cb has left an altitude formed
-   across a place one was taken from (cb is the text after the lift, with its
-   gaps); one the bytes already held is not joined. */
-static int joins_altitude(const pdn_aprs__cbuf *cb)
-{
-    size_t k;
-    for (k = 0; k + 4 <= cb->n; k++) {
-        int g;
-        if (!(A_B91(cb->b[k]) && A_B91(cb->b[k + 1]) && A_B91(cb->b[k + 2]) && cb->b[k + 3] == '}'))
-            continue;
-        for (g = 0; g < cb->gaps; g++)
-            if (k < cb->gap[g] && cb->gap[g] < k + 4)
-                return 1;
-    }
-    return 0;
-}
-
 PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
 {
     pdn_aprs_report *r = &c->data->as.report;
     size_t n = 0, i, tl;
     const uint8_t *s, *t;
-    int msg = 0, amb = 0, west = 0, lon100 = 0, had_ext = 0, space_pending = 0, declined = 0;
+    int msg = 0, amb = 0, west = 0, lon100 = 0, had_ext = 0, space_pending = 0;
     double lat = 0;
     pdn_aprs__cbuf cb;
     uint8_t dti = c->info[0];
@@ -351,16 +334,12 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
             if (A_B91(cb.b[k]) && A_B91(cb.b[k + 1]) && A_B91(cb.b[k + 2]) && cb.b[k + 3] == '}')
                 break;
         }
-        /* looked for before telemetry and a !DAO! are lifted, so bytes
-           either side of a !DAO! never join into one */
+        /* looked for before telemetry and a !DAO! are lifted, as sent */
         if (k + 4 <= cb.n && !pdn_aprs__rejects(c, PDN_APRS_CODE_MIC_E_ALTITUDE_NOT_FIRST)) {
             pdn_aprs__diag(c, PDN_APRS_SEVERITY_WARNING, PDN_APRS_CODE_MIC_E_ALTITUDE_NOT_FIRST);
             r->has_altitude = 1;
             r->altitude_feet = (double)(pdn_aprs__b91(cb.b + k, 3) - 10000) * FEET_PER_METRE;
-            pdn_aprs__cbuf_cut(&cb, k, 4);
-            cb.cut = k + 1;
-        } else if (k + 4 <= cb.n) {
-            declined = 1;
+            pdn_aprs__cbuf_cut(&cb, k, 4, 0);
         }
     }
     /* the comment's own lifting of base-91 telemetry and a !DAO!, here so the
@@ -371,20 +350,12 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
         if (space_pending && cb.n > 0 && cb.b[0] != ' ' &&
             !pdn_aprs__tolerate(c, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR))
             return;
-        if (declined && joins_altitude(&cb)) {
-            /* a later altitude declined: left as text, lifting the !DAO!
-               made one that is not in the bytes. With no later altitude
-               there is nothing to decline, and a strict decoder reads the
-               text as a lenient one does */
-            pdn_aprs__fail(c, PDN_APRS_CODE_MIC_E_ALTITUDE_NOT_FIRST);
-            return;
-        }
         if (!pdn_aprs__apply_lifted_dao(c, r, dao))
             return;
     }
     /* a locator with its space: that space separates it and is not comment */
     if (space_pending && cb.n > 0 && cb.b[0] == ' ')
-        pdn_aprs__cbuf_cut(&cb, 0, 1);
+        pdn_aprs__cbuf_cut(&cb, 0, 1, 0);
     had_ext |= PDN_APRS__LIFTED;
     pdn_aprs__finish_comment(c, &cb, r, had_ext);
 }
