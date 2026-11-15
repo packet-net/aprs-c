@@ -300,7 +300,11 @@ PDN_APRS__PRIVATE int pdn_aprs__path_has_gap(const pdn_aprs_header *h);
 PDN_APRS__PRIVATE int pdn_aprs__header_reads_back(const uint8_t *head, size_t n, int ax25, const pdn_aprs_header *given,
                                                   const char *dest, int as_received);
 PDN_APRS__PRIVATE void pdn_aprs__header_default(pdn_aprs_header *h);
+PDN_APRS__PRIVATE int pdn_aprs__address_valid(const char *s, size_t n);
 PDN_APRS__PRIVATE int pdn_aprs__header_strings_ok(const pdn_aprs_header *h, int destination);
+
+/* The mark (a checksum, never zero) the decoder sets in a third-party packet's as_received for the n bytes of its inner packet at p; the encoder honours it only when it matches the bytes it writes. */
+PDN_APRS__PRIVATE uint16_t pdn_aprs__third_party_mark(const uint8_t *p, size_t n);
 
 /* Compares decoded data as the vectors do (equal.c). */
 PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_aprs_data *b);
@@ -331,17 +335,24 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
 PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const pdn_aprs_weather *w, int positionless);
 PDN_APRS__PRIVATE int pdn_aprs__encode_frequency(pdn_aprs__ectx *e, const pdn_aprs_frequency *f);
 #ifdef PDN_APRS_FAULT_INJECTION
-/* Test builds only (tests/readback.c; never in the library or dist/): called
+/* Test builds only (tests/readback.c): compiled only when PDN_APRS_FAULT_INJECTION
+   is defined, which the library and dist/pdn_aprs.c as shipped never are. The #ifdef
+   blocks stay in dist/pdn_aprs.c, so the same test builds from the single file. Called
    with the bytes a field writer just wrote, before the read-back, to stand
    in for a writer that writes a wrong byte. */
 extern void (*pdn_aprs__fault_hook)(uint8_t *info, size_t len, int data_type);
 /* The same for the header bytes written (a TNC2 header, or an AX.25 address field). */
 extern void (*pdn_aprs__header_fault_hook)(uint8_t *head, size_t len, int ax25);
+/* The same for the read-back's decode of the information field: called with the packet it
+   produced, before the comparison, to stand in for a decoder that reads a diagnostic or a field
+   the bytes do not carry. */
+extern void (*pdn_aprs__decode_fault_hook)(pdn_aprs_packet *decoded);
 #endif
 PDN_APRS__PRIVATE int pdn_aprs__header_addresses_ok(const pdn_aprs_header *h, const char *dest);
 PDN_APRS__PRIVATE int pdn_aprs__write_header_tnc2(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest);
-PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest,
-                                                  int as_received);
+PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest);
+/* The refusal code (invalid-address, invalid-path) of a header as given, or 0; *why says why. */
+PDN_APRS__PRIVATE int pdn_aprs__header_fault(const pdn_aprs_header *h, const char *dest, const char **why);
 
 #endif
 
@@ -694,6 +705,27 @@ PDN_APRS__PRIVATE long pdn_aprs__b91(const uint8_t *s, size_t n)
     return v;
 }
 
+/* ---- the decoder's mark on a third-party packet ---- */
+
+/* A multiplicative hash of the bytes, four at a time (read as little-endian
+   numbers whatever the machine), folded to 16 bits, never zero. Not a secret
+   and not a signature: it ties as_received to the bytes the decoder read, so
+   edited bytes or a made-up flag do not carry the exemption. */
+PDN_APRS__PRIVATE uint16_t pdn_aprs__third_party_mark(const uint8_t *p, size_t n)
+{
+    uint32_t h = 2166136261u ^ (uint32_t)n;
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        uint32_t w = (uint32_t)p[i] | (uint32_t)p[i + 1] << 8 | (uint32_t)p[i + 2] << 16 | (uint32_t)p[i + 3] << 24;
+        h = (h ^ w) * 0x9E3779B1u;
+        h ^= h >> 15;
+    }
+    for (; i < n; i++)
+        h = (h ^ p[i]) * 16777619u;
+    h = (h >> 16) ^ (h & 0xFFFFu);
+    return (uint16_t)(h ? h : 1u);
+}
+
 /* ==== src/decode.c ==== */
 
 
@@ -938,7 +970,8 @@ const char *pdn_aprs_refusal_name(int refusal)
         "invalid-nmea",
         "not-encodable",
         "does-not-read-back",
-        "information-field-too-long"};
+        "information-field-too-long",
+        "invalid-path"};
     if (refusal < 1 || refusal > (int)(sizeof names / sizeof names[0]))
         return NULL;
     return names[refusal - 1];
@@ -1526,6 +1559,13 @@ static int address_ok(const uint8_t *s, size_t n)
     return 1;
 }
 
+/* 1 if the n bytes at s are an APRS-IS address (1-9 letters, digits or -): for the builders, which
+   judge a station's strings before they build its header. */
+PDN_APRS__PRIVATE int pdn_aprs__address_valid(const char *s, size_t n)
+{
+    return address_ok((const uint8_t *)s, n);
+}
+
 /* The source inside a third-party packet (APRS12c ch. 17): 1-9 printable
    ASCII characters other than '>' and ':', which end it. */
 static int inner_source_ok(const uint8_t *s, size_t n)
@@ -1672,6 +1712,25 @@ PDN_APRS__PRIVATE int pdn_aprs__path_has_gap(const pdn_aprs_header *h)
     return 0;
 }
 
+/* The fault of a header as given, which no form can carry and which is judged
+   when the header is given, before any fault of the data (README Refusal
+   reasons): PDN_APRS_REFUSAL_INVALID_ADDRESS for an address that is not 1-9
+   letters, digits or -, PDN_APRS_REFUSAL_INVALID_PATH for a path with an entry
+   not marked used before one that is, else 0. dest is the destination to
+   judge (a Mic-E report's is computed). *why is a plain reason. */
+PDN_APRS__PRIVATE int pdn_aprs__header_fault(const pdn_aprs_header *h, const char *dest, const char **why)
+{
+    if (!pdn_aprs__header_addresses_ok(h, dest)) {
+        *why = "a header address is not 1-9 letters, digits or -";
+        return PDN_APRS_REFUSAL_INVALID_ADDRESS;
+    }
+    if (pdn_aprs__path_has_gap(h)) {
+        *why = "a path entry that is not used comes before one that is, which reads back used";
+        return PDN_APRS_REFUSAL_INVALID_PATH;
+    }
+    return 0;
+}
+
 /* The last entry that is used, or -1. */
 static int last_used(const pdn_aprs_header *h)
 {
@@ -1708,14 +1767,14 @@ PDN_APRS__PRIVATE int pdn_aprs__write_header_tnc2(pdn_aprs__buf *b, const pdn_ap
 
 /* One AX.25 address: callsign of 1-6 upper-case letters or digits, SSID 0-15.
    An SSID written with a leading zero, or -0, is refused: a frame gives it back as no SSID. */
-static int ax25_put_address(pdn_aprs__buf *b, const char *a, int last, int hbit, int cbit, int blank_ok)
+static int ax25_put_address(pdn_aprs__buf *b, const char *a, int last, int hbit, int cbit)
 {
     size_t n = 0, i;
     int ssid = 0;
     uint8_t out[7];
     while (a[n] && a[n] != '-')
         n++;
-    if ((n == 0 && !(blank_ok && !a[0])) || n > 6)
+    if (n == 0 || n > 6)
         return 0;
     for (i = 0; i < n; i++)
         if (!(A_UPPER(a[i]) || A_DIGIT(a[i])))
@@ -1735,21 +1794,22 @@ static int ax25_put_address(pdn_aprs__buf *b, const char *a, int last, int hbit,
     return 1;
 }
 
-/* as_received: a decoded packet's header, whose empty destination (a defect a
-   lenient decoder tolerates) is written as six spaces, which reads back empty. */
-PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest,
-                                                  int as_received)
+/* An AX.25 frame never carries an empty or over-long address, a lower-case
+   call or an SSID it cannot hold, whatever wrote it: a packet already held,
+   whose lenient decode accepted an empty destination, is refused here as
+   well (README Read-back, Header). */
+PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest)
 {
     unsigned i, count = h->path_count;
     if (count > 8)
         return PDN_APRS_ERR_REFUSED;
     /* a command frame: C bit set in the destination, clear in the source */
-    if (!ax25_put_address(b, dest, 0, 0, 1, as_received))
+    if (!ax25_put_address(b, dest, 0, 0, 1))
         return PDN_APRS_ERR_REFUSED;
-    if (!ax25_put_address(b, h->source, count == 0, 0, 0, 0))
+    if (!ax25_put_address(b, h->source, count == 0, 0, 0))
         return PDN_APRS_ERR_REFUSED;
     for (i = 0; i < count; i++)
-        if (!ax25_put_address(b, h->path[i].call, i + 1 == count, h->path[i].marked || h->path[i].used, 0, 0))
+        if (!ax25_put_address(b, h->path[i].call, i + 1 == count, h->path[i].marked || h->path[i].used, 0))
             return PDN_APRS_ERR_REFUSED;
     pdn_aprs__putc(b, 0x03);
     pdn_aprs__putc(b, 0xF0);
@@ -4822,7 +4882,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_third_party(pdn_aprs__dctx *c)
     t->len = (uint16_t)(c->len - 1);
     memcpy(t->packet, c->info + 1, c->len - 1);
     t->depth = (uint8_t)c->depth;
-    t->as_received = 1;
+    t->as_received = pdn_aprs__third_party_mark(t->packet, t->len);
 }
 
 /* ---- user-defined, test, Agrelo, Maidenhead ---- */
@@ -5468,19 +5528,19 @@ PDN_APRS__PRIVATE int pdn_aprs__refusal_rank(int code)
 {
     static const int order[] = {
         PDN_APRS_REFUSAL_NOT_ENCODABLE,      PDN_APRS_REFUSAL_INVALID_ADDRESS,
-        PDN_APRS_REFUSAL_AX25_CANNOT_CARRY,  PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY,
-        PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER, PDN_APRS_REFUSAL_INVALID_ADDRESSEE,
-        PDN_APRS_REFUSAL_INVALID_NAME,       PDN_APRS_REFUSAL_INVALID_TIMESTAMP,
-        PDN_APRS_REFUSAL_NOT_A_NUMBER,       PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE,
-        PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM,  PDN_APRS_REFUSAL_INVALID_CODE,
-        PDN_APRS_REFUSAL_INVALID_SYMBOL,     PDN_APRS_REFUSAL_INVALID_CHARACTER,
-        PDN_APRS_REFUSAL_TOO_LONG,           PDN_APRS_REFUSAL_PADDING_SPACE,
-        PDN_APRS_REFUSAL_MALFORMED,          PDN_APRS_REFUSAL_INVALID_MESSAGE_ID,
-        PDN_APRS_REFUSAL_INVALID_NMEA,       PDN_APRS_REFUSAL_EXTENSION_CONFLICT,
-        PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED,  PDN_APRS_REFUSAL_SYMBOL_MISMATCH,
-        PDN_APRS_REFUSAL_MISSING_FIELD,      PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE,
-        PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD, PDN_APRS_REFUSAL_DOES_NOT_READ_BACK,
-        PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG};
+        PDN_APRS_REFUSAL_INVALID_PATH,       PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER,
+        PDN_APRS_REFUSAL_INVALID_ADDRESSEE,  PDN_APRS_REFUSAL_INVALID_NAME,
+        PDN_APRS_REFUSAL_INVALID_TIMESTAMP,  PDN_APRS_REFUSAL_NOT_A_NUMBER,
+        PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM,
+        PDN_APRS_REFUSAL_INVALID_CODE,       PDN_APRS_REFUSAL_INVALID_SYMBOL,
+        PDN_APRS_REFUSAL_INVALID_CHARACTER,  PDN_APRS_REFUSAL_TOO_LONG,
+        PDN_APRS_REFUSAL_PADDING_SPACE,      PDN_APRS_REFUSAL_MALFORMED,
+        PDN_APRS_REFUSAL_INVALID_MESSAGE_ID, PDN_APRS_REFUSAL_INVALID_NMEA,
+        PDN_APRS_REFUSAL_EXTENSION_CONFLICT, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED,
+        PDN_APRS_REFUSAL_SYMBOL_MISMATCH,    PDN_APRS_REFUSAL_MISSING_FIELD,
+        PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE,  PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD,
+        PDN_APRS_REFUSAL_DOES_NOT_READ_BACK, PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG,
+        PDN_APRS_REFUSAL_AX25_CANNOT_CARRY,  PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY};
     int i;
     for (i = 0; i < (int)(sizeof order / sizeof order[0]); i++)
         if (order[i] == code)
@@ -5516,6 +5576,7 @@ static int finite_number(double v)
 #ifdef PDN_APRS_FAULT_INJECTION
 void (*pdn_aprs__fault_hook)(uint8_t *info, size_t len, int data_type);
 void (*pdn_aprs__header_fault_hook)(uint8_t *head, size_t len, int ax25);
+void (*pdn_aprs__decode_fault_hook)(pdn_aprs_packet *decoded);
 #endif
 
 /* Refusals about how fields relate (a field the report has no room for, two
@@ -5555,25 +5616,37 @@ static void defer(pdn_aprs__ectx *e, int code, const char *why)
 #define PDN_APRS__NOINLINE
 #endif
 
+/* An info the read-back allows on this data: only where the rules attach it
+   to the form the data itself asks for (README Read-back, Diagnostics). It is
+   judged against the data given, so an info listed for one form is not
+   accepted on another. */
+static int info_listed(const pdn_aprs_data *d, int code)
+{
+    switch (code) {
+    case PDN_APRS_CODE_OBSOLETE_FORMAT:
+        /* positionless weather, raw weather, raw NMEA, a Maidenhead beacon,
+           Mic-E Rev 0 telemetry */
+        return d->type == PDN_APRS_TYPE_WEATHER || d->type == PDN_APRS_TYPE_RAW_WEATHER ||
+               d->type == PDN_APRS_TYPE_NMEA || d->type == PDN_APRS_TYPE_MAIDENHEAD_BEACON ||
+               (d->type == PDN_APRS_TYPE_MIC_E && d->as.report.has_legacy_telemetry);
+    case PDN_APRS_CODE_MIC_E_MISSING_DEVICE_TYPE:
+        return d->type == PDN_APRS_TYPE_MIC_E && !d->as.report.type_code;
+    case PDN_APRS_CODE_INVALID_QUERY:
+    case PDN_APRS_CODE_INVALID_TELEMETRY_METADATA:
+        return d->type == PDN_APRS_TYPE_MESSAGE;
+    default:
+        return 0;
+    }
+}
+
 /* The diagnostics a read-back allows: no warning, no error, and an info only
-   where the rules attach it to the form the data itself asks for (README
-   Read-back, Diagnostics). */
-static int diagnostics_ok(const pdn_aprs_packet *p)
+   where info_listed says so. */
+static int diagnostics_ok(const pdn_aprs_packet *p, const pdn_aprs_data *d)
 {
     int i;
-    for (i = 0; i < p->diagnostic_count; i++) {
-        if (p->diagnostics[i].severity != PDN_APRS_SEVERITY_INFO)
+    for (i = 0; i < p->diagnostic_count; i++)
+        if (p->diagnostics[i].severity != PDN_APRS_SEVERITY_INFO || !info_listed(d, p->diagnostics[i].code))
             return 0;
-        switch (p->diagnostics[i].code) {
-        case PDN_APRS_CODE_OBSOLETE_FORMAT:
-        case PDN_APRS_CODE_MIC_E_MISSING_DEVICE_TYPE:
-        case PDN_APRS_CODE_INVALID_QUERY:
-        case PDN_APRS_CODE_INVALID_TELEMETRY_METADATA:
-            break;
-        default:
-            return 0;
-        }
-    }
     return 1;
 }
 
@@ -5592,7 +5665,11 @@ static PDN_APRS__NOINLINE int decodes_to(const pdn_aprs_data *d, const uint8_t *
         pdn_aprs__strlcpy(h.destination, dest, sizeof h.destination);
     if (pdn_aprs_decode_info_unbounded(&h, info, n, &o, &p) != PDN_APRS_OK)
         return 0;
-    return diagnostics_ok(&p) && pdn_aprs__data_equal(&p.data, d);
+#ifdef PDN_APRS_FAULT_INJECTION
+    if (pdn_aprs__decode_fault_hook)
+        pdn_aprs__decode_fault_hook(&p);
+#endif
+    return diagnostics_ok(&p, d) && pdn_aprs__data_equal(&p.data, d);
 }
 
 /* A third-party packet's inner packets, at every depth the decoder reads,
@@ -5623,13 +5700,24 @@ static PDN_APRS__NOINLINE int inner_packets_clean(const pdn_aprs_data *outer)
     }
 }
 
+/* 1 if the third-party data was read as received by the decoder and the
+   bytes written are the bytes it read: the mark is a checksum of those bytes
+   (the decoder's, never a program's), so edited bytes get the full check.
+   The bytes written are '}' and the packet. */
+static int as_received(const pdn_aprs_data *d, const uint8_t *info, size_t n)
+{
+    const pdn_aprs_third_party *t = &d->as.third_party;
+    return t->as_received && n == (size_t)t->len + 1 && t->len <= sizeof t->packet &&
+           t->as_received == pdn_aprs__third_party_mark(t->packet, t->len) && memcmp(info + 1, t->packet, t->len) == 0;
+}
+
 /* THE read-back (README Read-back): the bytes written, from data, decode to
    the data given. Every path that writes an information field ends here, and
    nothing decides whether it runs. */
 static int reads_back(const pdn_aprs_data *d, const uint8_t *info, size_t n, const char *dest)
 {
     return decodes_to(d, info, n, dest) &&
-           (d->type != PDN_APRS_TYPE_THIRD_PARTY || d->as.third_party.as_received || inner_packets_clean(d));
+           (d->type != PDN_APRS_TYPE_THIRD_PARTY || as_received(d, info, n) || inner_packets_clean(d));
 }
 
 /* NaN or an infinity: refused before any range check sees it. */
@@ -8280,6 +8368,8 @@ static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options 
     pdn_aprs__ectx e;
     int ok = 0, full = 0, variant, alt_force, attempt, attempts;
     size_t wrote = 0; /* the most any variant put in buf */
+    memset(&e, 0, sizeof e);
+    pdn_aprs__buf_init(&b, buf, cap);
     if (encoded) {
         encoded->len = 0;
         encoded->destination[0] = 0;
@@ -8336,7 +8426,7 @@ static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options 
         e.reason = "what the encoder would write does not read back as the same data";
         e.refusal = read_back_refusal(data);
     }
-    if (!ok && buf && cap)
+    if ((!ok || full) && buf && cap)
         memset(buf, 0, cap < wrote ? cap : wrote); /* bytes that failed are not left in the caller's buffer */
     if (encoded) {
         encoded->reason = ok ? NULL : e.reason;
@@ -8362,6 +8452,26 @@ int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_option
    bytes each in AX.25, and the control and PID bytes. */
 #define HEADER_ROOM ((PDN_APRS_MAX_PATH + 2) * (PDN_APRS_ADDR_SIZE + 2) + 2)
 
+/* What a TNC2 line cannot carry in an information field (README Read-back):
+   a CR or LF inside it, since a line ends at one, and a NUL, since the line
+   is a NUL-terminated string. The line breaks at the very end of the field
+   (which a decoder takes off as trailing-line-break, however many) are
+   carried: the line ends where it ends anyway. An AX.25 frame carries all of
+   these. */
+static int line_cannot_carry(const uint8_t *info, size_t n)
+{
+    size_t i;
+    while (n > 0 && (info[n - 1] == '\r' || info[n - 1] == '\n'))
+        n--;
+    for (i = 0; i < n; i++)
+        if (info[i] == 0 || info[i] == '\r' || info[i] == '\n')
+            return 1;
+    return 0;
+}
+
+#define LINE_REASON "a TNC2 line ends at a CR or LF and holds no NUL, which the information field has inside it"
+#define FRAME_REASON "a header address or the path is more than an AX.25 frame can carry"
+
 PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *data,
                                               const pdn_aprs_encode_options *options, void *buf, size_t cap,
                                               pdn_aprs_encoded *encoded, int ax25, int builder)
@@ -8370,8 +8480,8 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
     uint8_t *out = (uint8_t *)buf;
     pdn_aprs_encoded local;
     pdn_aprs__buf hb;
-    int n, rc;
-    const char *dest, *cannot_reason = NULL;
+    int n, rc, fault;
+    const char *dest, *why = NULL, *cannot_reason = NULL;
     if (!header || !data || (!buf && cap))
         return PDN_APRS_ERR_ARGUMENT;
     if (header->path_count > PDN_APRS_MAX_PATH)
@@ -8381,56 +8491,53 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
         return PDN_APRS_ERR_ARGUMENT;
     if (!encoded)
         encoded = &local;
-    /* the information field first, at the start of buf, then moved along
-       to make room for the header, which for Mic-E carries what the encoder
-       computed */
-    /* the refusal order (README Refusal reasons): an address that is no
-       address first, then the data's faults, then the read-back's, then the
-       size, and a header the form cannot carry last. A header the form
-       cannot carry is noted here and raised after the data is judged. */
+    encoded->len = 0;
+    encoded->destination[0] = 0;
+    encoded->reason = NULL;
+    encoded->refusal = 0;
+    /* the refusal order (README Refusal reasons): a header given that no form
+       can be (an address that is no address, a path no line or frame reads
+       back) first, then the data's faults, then the read-back's, then the
+       size, and last what the form written cannot carry. */
     {
         /* Mic-E computes only its destination, so the source and path are
            checked with a placeholder for it */
         const char *first = data->type == PDN_APRS_TYPE_MIC_E ? "APZ001" : header->destination;
-        pdn_aprs__buf_init(&hb, head, sizeof head);
-        if (!pdn_aprs__header_addresses_ok(header, first)) {
-            encoded->len = 0;
-            encoded->destination[0] = 0;
-            encoded->refusal = PDN_APRS_REFUSAL_INVALID_ADDRESS;
-            encoded->reason = "a header address is not 1-9 letters, digits or -";
+        fault = pdn_aprs__header_fault(header, first, &why);
+        if (fault) {
+            encoded->refusal = fault;
+            encoded->reason = why;
             return PDN_APRS_ERR_REFUSED;
         }
-        /* an entry not used before one that is reads back used, in a line and
-           in a frame alike: no form carries it */
-        rc = ax25 ? pdn_aprs__write_header_ax25(&hb, header, first, 0) : PDN_APRS_OK;
-        if (rc == PDN_APRS_ERR_REFUSED) {
-            cannot_reason = "a header address or the path is more than an AX.25 frame can carry";
-        } else if (pdn_aprs__path_has_gap(header)) {
-            cannot_reason = "a path entry that is not used comes before one that is, which reads back used";
-        }
+        pdn_aprs__buf_init(&hb, head, sizeof head);
+        if (ax25 && pdn_aprs__write_header_ax25(&hb, header, first) == PDN_APRS_ERR_REFUSED)
+            cannot_reason = FRAME_REASON;
     }
+    /* the information field first, at the start of buf, then moved along
+       to make room for the header, which for Mic-E carries what the encoder
+       computed */
     n = encode_info(data, options, buf, cap, encoded, builder);
     if (n < 0)
         return n;
+    /* every failure from here on leaves nothing in the caller's buffer */
+    if (!cannot_reason && !ax25 && line_cannot_carry(out, (size_t)n))
+        cannot_reason = LINE_REASON;
     if (cannot_reason) {
         encoded->len = 0;
         encoded->refusal = ax25 ? PDN_APRS_REFUSAL_AX25_CANNOT_CARRY : PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY;
         encoded->reason = cannot_reason;
-        if (buf && cap)
-            memset(buf, 0, cap < (size_t)n ? cap : (size_t)n);
-        return PDN_APRS_ERR_REFUSED;
+        goto clear;
     }
     dest = data->type == PDN_APRS_TYPE_MIC_E ? encoded->destination : header->destination;
     pdn_aprs__buf_init(&hb, head, sizeof head);
-    rc = ax25 ? pdn_aprs__write_header_ax25(&hb, header, dest, 0) : pdn_aprs__write_header_tnc2(&hb, header, dest);
+    rc = ax25 ? pdn_aprs__write_header_ax25(&hb, header, dest) : pdn_aprs__write_header_tnc2(&hb, header, dest);
     if (rc != PDN_APRS_OK) {
         encoded->len = 0;
         if (rc == PDN_APRS_ERR_REFUSED) {
             encoded->refusal = ax25 ? PDN_APRS_REFUSAL_AX25_CANNOT_CARRY : PDN_APRS_REFUSAL_INVALID_ADDRESS;
-            encoded->reason = ax25 ? "a header address or the path is more than an AX.25 frame can carry"
-                                   : "a header address is not 1-9 letters, digits or -";
+            encoded->reason = ax25 ? FRAME_REASON : "a header address is not 1-9 letters, digits or -";
         }
-        return rc;
+        goto clear_rc;
     }
 #ifdef PDN_APRS_FAULT_INJECTION
     if (pdn_aprs__header_fault_hook)
@@ -8442,11 +8549,12 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
         encoded->len = 0;
         encoded->refusal = PDN_APRS_REFUSAL_DOES_NOT_READ_BACK;
         encoded->reason = "the header written does not read back as the header given";
-        return PDN_APRS_ERR_REFUSED;
+        goto clear;
     }
     if (hb.overflow || hb.len > cap - (size_t)n) {
         encoded->len = 0;
-        return PDN_APRS_ERR_BUFFER;
+        rc = PDN_APRS_ERR_BUFFER;
+        goto clear_rc;
     }
     memmove(out + hb.len, out, (size_t)n);
     memcpy(out, head, hb.len);
@@ -8454,6 +8562,12 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
         out[hb.len + (size_t)n] = 0;
     encoded->len = hb.len + (size_t)n;
     return (int)encoded->len;
+clear:
+    rc = PDN_APRS_ERR_REFUSED;
+clear_rc:
+    if (buf && cap)
+        memset(buf, 0, cap < (size_t)n ? cap : (size_t)n);
+    return rc;
 }
 
 int pdn_aprs_encode_tnc2(const pdn_aprs_header *header, const pdn_aprs_data *data,
@@ -8470,6 +8584,11 @@ int pdn_aprs_encode_ax25(const pdn_aprs_header *header, const pdn_aprs_data *dat
 
 /* ---- a decoded packet written back as received ---- */
 
+/* Writes the information field as received and reads the header back, as a
+   user's decode of the form reads it (the outer header rules, whatever the
+   packet's origin). An empty destination, which a lenient decode takes with
+   a warning, is written as it came in a line and is never written to a frame;
+   a line is refused an information field with a CR or LF inside it, or a NUL. */
 static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int ax25)
 {
     uint8_t head[HEADER_ROOM];
@@ -8487,9 +8606,14 @@ static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int a
     /* the information field was longer than the packet holds, so none of it was kept */
     if (p->info_dropped)
         return PDN_APRS_ERR_TOO_LONG;
+    /* a path no line or frame carries (an entry not used before one that is) */
+    if (pdn_aprs__path_has_gap(&p->header))
+        return PDN_APRS_ERR_REFUSED;
+    if (!ax25 && line_cannot_carry(p->info, p->info_len))
+        return PDN_APRS_ERR_REFUSED;
     pdn_aprs__buf_init(&hb, head, sizeof head);
     if (ax25) {
-        rc = pdn_aprs__write_header_ax25(&hb, &p->header, p->header.destination, 1);
+        rc = pdn_aprs__write_header_ax25(&hb, &p->header, p->header.destination);
     } else {
         /* a TNC2 line marks only the last entry that has been used */
         pdn_aprs_header h = p->header;
@@ -8518,14 +8642,13 @@ static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int a
     if (rc != PDN_APRS_OK)
         return PDN_APRS_ERR_REFUSED;
     /* the information field is written as received, but the header is read
-       back: a path no line or frame carries (an entry not used before one
-       that is) is refused, and the rest must decode to the header held */
+       back: it must decode to the header held, with no diagnostic the held
+       packet does not carry */
 #ifdef PDN_APRS_FAULT_INJECTION
     if (pdn_aprs__header_fault_hook)
         pdn_aprs__header_fault_hook(head, hb.len, ax25);
 #endif
-    if (pdn_aprs__path_has_gap(&p->header) ||
-        !pdn_aprs__header_reads_back(head, hb.len, ax25, &p->header, p->header.destination, 1))
+    if (!pdn_aprs__header_reads_back(head, hb.len, ax25, &p->header, p->header.destination, !ax25))
         return PDN_APRS_ERR_REFUSED;
     if (hb.overflow || hb.len > cap || p->info_len > cap - hb.len)
         return PDN_APRS_ERR_BUFFER;
@@ -8626,6 +8749,69 @@ static int station_header(const pdn_aprs_station *st, pdn_aprs_header *h, pdn_ap
         p = comma ? comma + 1 : NULL;
     }
     return PDN_APRS_OK;
+}
+
+/* A builder judges the station's header when it is given, before any fault
+   of the data its arguments hold (README Refusal reasons: invalid-address,
+   invalid-path come first, whatever form is written). When the data is
+   sound the encoder does it first thing; when the arguments fail before the
+   encoder is reached (a text too long for its field, a bad type code) the
+   call ends in header_last, which reads the station's strings as they are,
+   without building the header, and gives the header's fault instead. Returns
+   0 for none, or the call's result. A station the call cannot read (NULL, no
+   source, more path entries than the header holds) is left as it is. */
+static int header_fault_of(const pdn_aprs_station *st, int mic_e, pdn_aprs_encoded *result)
+{
+    const char *dest, *p;
+    unsigned entries = 0;
+    int gap = 0, unused = 0;
+    if (!st || !st->source)
+        return PDN_APRS_OK;
+    dest = st->destination ? st->destination : PDN_APRS_DEFAULT_DESTINATION;
+    if (strlen(st->source) >= PDN_APRS_ADDR_SIZE || strlen(dest) >= PDN_APRS_ADDR_SIZE)
+        return PDN_APRS_OK; /* station_header refuses it, with the reason */
+    if (!pdn_aprs__address_valid(st->source, strlen(st->source)) ||
+        (!mic_e && !pdn_aprs__address_valid(dest, strlen(dest))))
+        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESS,
+                    "a header address is not 1-9 letters, digits or -");
+    for (p = st->path; p && *p; entries++) {
+        const char *comma = strchr(p, ',');
+        size_t n = comma ? (size_t)(comma - p) : strlen(p);
+        int marked = n > 0 && p[n - 1] == '*';
+        if (entries >= PDN_APRS_MAX_PATH)
+            return PDN_APRS_OK;
+        if (marked)
+            n--;
+        if (n == 0 || n >= PDN_APRS_ADDR_SIZE || !pdn_aprs__address_valid(p, n))
+            return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESS,
+                        "a header address is not 1-9 letters, digits or -");
+        /* an entry marked used makes every entry before it used, and one not marked
+           before a used one reads back used (invalid-path); a mark anywhere after
+           an unmarked entry is the gap */
+        if (marked && unused)
+            gap = 1;
+        if (!marked)
+            unused = 1;
+        p = comma ? comma + 1 : NULL;
+    }
+    /* an entry used (marked) after one not used: no form carries it; the entries
+       after the last mark are unused and no fault */
+    return gap ? fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_PATH,
+                      "a path entry that is not used comes before one that is, which reads back used")
+               : PDN_APRS_OK;
+}
+
+
+/* The end of every public builder: a call that was refused before the encoder judged the
+   station's header gives the header's fault when it has one. */
+static int header_last(const pdn_aprs_station *st, int mic_e, pdn_aprs_encoded *result, int rc)
+{
+    int hf;
+    if (rc != PDN_APRS_ERR_REFUSED || (result && (result->refusal == PDN_APRS_REFUSAL_INVALID_ADDRESS ||
+                                                  result->refusal == PDN_APRS_REFUSAL_INVALID_PATH)))
+        return rc;
+    hf = header_fault_of(st, mic_e, result);
+    return hf != PDN_APRS_OK ? hf : rc;
 }
 
 static int build_data(const pdn_aprs_station *station, const pdn_aprs_data *data, void *buf, size_t cap,
@@ -8801,7 +8987,7 @@ static int fill_position(pdn_aprs_encoded *result, pdn_aprs_report *r, const pdn
     return rc;
 }
 
-int pdn_aprs_build_position(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf,
+static int build_position_(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf,
                             size_t cap, pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
@@ -8821,7 +9007,7 @@ int pdn_aprs_build_position(const pdn_aprs_station *station, const pdn_aprs_posi
     return pdn_aprs_build(station, &d, buf, cap, result);
 }
 
-int pdn_aprs_build_object(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf,
+static int build_object_(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf,
                           size_t cap, pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
@@ -8844,7 +9030,7 @@ int pdn_aprs_build_object(const pdn_aprs_station *station, const pdn_aprs_positi
     return pdn_aprs_build(station, &d, buf, cap, result);
 }
 
-int pdn_aprs_build_item(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf,
+static int build_item_(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf,
                         size_t cap, pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
@@ -8864,7 +9050,7 @@ int pdn_aprs_build_item(const pdn_aprs_station *station, const pdn_aprs_position
     return pdn_aprs_build(station, &d, buf, cap, result);
 }
 
-int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_args *m, void *buf, size_t cap,
+static int build_mic_e_(const pdn_aprs_station *station, const pdn_aprs_mic_e_args *m, void *buf, size_t cap,
                          pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
@@ -8899,7 +9085,7 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
         /* the value as given: the encoder rounds it once to the metre when
            it writes the Mic-E bytes, and a /A= (the second form) holds it
            only if it is whole feet */
-        r->altitude_feet = metres / 0.3048;
+        r->altitude_feet = m->has_altitude_m ? m->altitude_m / 0.3048 : m->altitude_feet;
         if (metres == metres && fabs(metres) < 1e9) {
             double mm = pdn_aprs__round(metres);
             if (mm < -10000 || mm > 743570)
@@ -9001,7 +9187,7 @@ int pdn_aprs_format_timestamp(int year, int month, int day, int hour, int minute
     return (int)(o - out);
 }
 
-int pdn_aprs_build_weather(const pdn_aprs_station *station, const char *timestamp, const pdn_aprs_weather *weather,
+static int build_weather_(const pdn_aprs_station *station, const char *timestamp, const pdn_aprs_weather *weather,
                            void *buf, size_t cap, pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
@@ -9082,7 +9268,7 @@ static int build_message(const pdn_aprs_station *station, int type, const char *
     return pdn_aprs_build(station, &d, buf, cap, result);
 }
 
-int pdn_aprs_build_message(const pdn_aprs_station *station, const pdn_aprs_message_args *args, void *buf,
+static int build_message_(const pdn_aprs_station *station, const pdn_aprs_message_args *args, void *buf,
                            size_t cap, pdn_aprs_encoded *result)
 {
     begin(result);
@@ -9111,19 +9297,19 @@ static int build_ack(const pdn_aprs_station *station, int type, const char *addr
     return pdn_aprs_build(station, &d, buf, cap, result);
 }
 
-int pdn_aprs_build_ack(const pdn_aprs_station *station, const char *addressee, const char *message_id, void *buf,
+static int build_ack_(const pdn_aprs_station *station, const char *addressee, const char *message_id, void *buf,
                        size_t cap, pdn_aprs_encoded *result)
 {
     return build_ack(station, PDN_APRS_TYPE_ACK, addressee, message_id, buf, cap, result);
 }
 
-int pdn_aprs_build_reject(const pdn_aprs_station *station, const char *addressee, const char *message_id,
+static int build_reject_(const pdn_aprs_station *station, const char *addressee, const char *message_id,
                           void *buf, size_t cap, pdn_aprs_encoded *result)
 {
     return build_ack(station, PDN_APRS_TYPE_REJECT, addressee, message_id, buf, cap, result);
 }
 
-int pdn_aprs_build_bulletin(const pdn_aprs_station *station, char id, const char *group, const char *text,
+static int build_bulletin_(const pdn_aprs_station *station, char id, const char *group, const char *text,
                             void *buf, size_t cap, pdn_aprs_encoded *result)
 {
     char addressee[16];
@@ -9141,7 +9327,7 @@ int pdn_aprs_build_bulletin(const pdn_aprs_station *station, char id, const char
     return build_message(station, PDN_APRS_TYPE_BULLETIN, addressee, text, NULL, NULL, buf, cap, result);
 }
 
-int pdn_aprs_build_status(const pdn_aprs_station *station, const pdn_aprs_status_args *o, void *buf, size_t cap,
+static int build_status_(const pdn_aprs_station *station, const pdn_aprs_status_args *o, void *buf, size_t cap,
                           pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
@@ -9172,7 +9358,7 @@ int pdn_aprs_build_status(const pdn_aprs_station *station, const pdn_aprs_status
     return pdn_aprs_build(station, &d, buf, cap, result);
 }
 
-int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const pdn_aprs_telemetry_args *a, void *buf,
+static int build_telemetry_(const pdn_aprs_station *station, const pdn_aprs_telemetry_args *a, void *buf,
                              size_t cap, pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
@@ -9271,19 +9457,19 @@ static int build_list(const pdn_aprs_station *station, int type, const char *add
     return build_with(station, &d, buf, cap, result, &pend);
 }
 
-int pdn_aprs_build_telemetry_names(const pdn_aprs_station *station, const char *addressee, const char *const *names,
+static int build_telemetry_names_(const pdn_aprs_station *station, const char *addressee, const char *const *names,
                                    size_t count, void *buf, size_t cap, pdn_aprs_encoded *result)
 {
     return build_list(station, PDN_APRS_TYPE_TELEMETRY_NAMES, addressee, names, count, buf, cap, result);
 }
 
-int pdn_aprs_build_telemetry_units(const pdn_aprs_station *station, const char *addressee, const char *const *units,
+static int build_telemetry_units_(const pdn_aprs_station *station, const char *addressee, const char *const *units,
                                    size_t count, void *buf, size_t cap, pdn_aprs_encoded *result)
 {
     return build_list(station, PDN_APRS_TYPE_TELEMETRY_UNITS, addressee, units, count, buf, cap, result);
 }
 
-int pdn_aprs_build_telemetry_coefficients(const pdn_aprs_station *station, const char *addressee,
+static int build_telemetry_coefficients_(const pdn_aprs_station *station, const char *addressee,
                                           const double *coefficients, size_t count, void *buf, size_t cap,
                                           pdn_aprs_encoded *result)
 {
@@ -9307,7 +9493,7 @@ int pdn_aprs_build_telemetry_coefficients(const pdn_aprs_station *station, const
     return pdn_aprs_build(station, &d, buf, cap, result);
 }
 
-int pdn_aprs_build_telemetry_bits(const pdn_aprs_station *station, const char *addressee, const char *bits,
+static int build_telemetry_bits_(const pdn_aprs_station *station, const char *addressee, const char *bits,
                                   const char *project, void *buf, size_t cap, pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
@@ -9341,6 +9527,83 @@ int pdn_aprs_build_telemetry_bits(const pdn_aprs_station *station, const char *a
     }
     d.as.meta.project_len = (uint16_t)n;
     return build_with(station, &d, buf, cap, result, &pend);
+}
+
+/* ---- the public builders: each ends in header_last ---- */
+
+int pdn_aprs_build_position(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_position_(station, args, buf, cap, result));
+}
+
+int pdn_aprs_build_object(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_object_(station, args, buf, cap, result));
+}
+
+int pdn_aprs_build_item(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_item_(station, args, buf, cap, result));
+}
+
+int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_args *m, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 1, result, build_mic_e_(station, m, buf, cap, result));
+}
+
+int pdn_aprs_build_weather(const pdn_aprs_station *station, const char *timestamp, const pdn_aprs_weather *weather, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_weather_(station, timestamp, weather, buf, cap, result));
+}
+
+int pdn_aprs_build_message(const pdn_aprs_station *station, const pdn_aprs_message_args *args, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_message_(station, args, buf, cap, result));
+}
+
+int pdn_aprs_build_ack(const pdn_aprs_station *station, const char *addressee, const char *message_id, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_ack_(station, addressee, message_id, buf, cap, result));
+}
+
+int pdn_aprs_build_reject(const pdn_aprs_station *station, const char *addressee, const char *message_id, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_reject_(station, addressee, message_id, buf, cap, result));
+}
+
+int pdn_aprs_build_bulletin(const pdn_aprs_station *station, char id, const char *group, const char *text, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_bulletin_(station, id, group, text, buf, cap, result));
+}
+
+int pdn_aprs_build_status(const pdn_aprs_station *station, const pdn_aprs_status_args *o, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_status_(station, o, buf, cap, result));
+}
+
+int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const pdn_aprs_telemetry_args *a, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_telemetry_(station, a, buf, cap, result));
+}
+
+int pdn_aprs_build_telemetry_names(const pdn_aprs_station *station, const char *addressee, const char *const *names, size_t count, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_telemetry_names_(station, addressee, names, count, buf, cap, result));
+}
+
+int pdn_aprs_build_telemetry_units(const pdn_aprs_station *station, const char *addressee, const char *const *units, size_t count, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_telemetry_units_(station, addressee, units, count, buf, cap, result));
+}
+
+int pdn_aprs_build_telemetry_coefficients(const pdn_aprs_station *station, const char *addressee, const double *coefficients, size_t count, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_telemetry_coefficients_(station, addressee, coefficients, count, buf, cap, result));
+}
+
+int pdn_aprs_build_telemetry_bits(const pdn_aprs_station *station, const char *addressee, const char *bits, const char *project, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_telemetry_bits_(station, addressee, bits, project, buf, cap, result));
 }
 
 /* ==== src/symbols.c ==== */
@@ -9589,6 +9852,8 @@ int pdn_aprs_symbol_overlay(pdn_aprs_symbol symbol, char overlay, pdn_aprs_symbo
 #undef TERMINATED
 #undef PDN_APRS_ENCODE_SCRATCH
 #undef HEADER_ROOM
+#undef LINE_REASON
+#undef FRAME_REASON
 #undef NO_STATION
 #undef NO_ARGS
 #undef TOO_BIG

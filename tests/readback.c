@@ -5,7 +5,8 @@
  *
  * Built with the library sources and PDN_APRS_FAULT_INJECTION, which adds two
  * hooks that stand in for a field writer that writes a wrong byte (the
- * hooks are not in the library or in dist/ as shipped). Each test says what
+ * hooks are compiled out of the library and of dist/pdn_aprs.c as shipped:
+ * the #ifdef blocks stay in the single file so this test builds from it too). Each test says what
  * it would write without the read-back:
  *
  *   - for every report type the library writes: a hook corrupts the last byte
@@ -33,6 +34,7 @@
 
 extern void (*pdn_aprs__fault_hook)(uint8_t *info, size_t len, int data_type);
 extern void (*pdn_aprs__header_fault_hook)(uint8_t *head, size_t len, int ax25);
+extern void (*pdn_aprs__decode_fault_hook)(pdn_aprs_packet *decoded);
 
 static int failures, checks;
 
@@ -82,8 +84,58 @@ static void header_fault(uint8_t *head, size_t len, int ax25)
         head[g_head_at] ^= 2;
 }
 
+/* What a decoder that read something the bytes do not carry would give: a
+   diagnostic, or a field changed or added in the data decoded. */
+enum {
+    DM_NONE,
+    DM_DIAG,          /* adds the diagnostic g_dsev / g_dcode */
+    DM_ALTITUDE,      /* an altitude the data does not give */
+    DM_REPLY_ACK,     /* a reply-ack the data does not give */
+    DM_BEAM,          /* a beam the status does not give */
+    DM_STATUS_SYMBOL, /* another symbol on a status */
+    DM_WX_LETTER,     /* another letter on the first weather extra field */
+    DM_WX_VALUE       /* another value on the first weather extra field */
+};
+static int g_dmode, g_dsev, g_dcode;
+
+static void decode_fault(pdn_aprs_packet *p)
+{
+    pdn_aprs_data *d = &p->data;
+    switch (g_dmode) {
+    case DM_DIAG:
+        p->diagnostics[p->diagnostic_count].severity = (uint8_t)g_dsev;
+        p->diagnostics[p->diagnostic_count].code = (uint8_t)g_dcode;
+        p->diagnostic_count++;
+        break;
+    case DM_ALTITUDE:
+        d->as.report.has_altitude = 1; /* with the 0 the data's altitude holds: only its presence differs */
+        d->as.report.altitude_feet = 0;
+        break;
+    case DM_REPLY_ACK:
+        d->as.message.has_reply_ack = 1; /* an empty one: "" is a value of its own, only its presence differs */
+        d->as.message.reply_ack[0] = 0;
+        break;
+    case DM_BEAM:
+        d->as.status.has_beam = 1;
+        break;
+    case DM_STATUS_SYMBOL:
+        d->as.status.symbol.code ^= 1;
+        break;
+    case DM_WX_LETTER:
+        d->as.weather.weather.extra[0].letter ^= 1;
+        break;
+    case DM_WX_VALUE:
+        d->as.weather.weather.extra[0].value[0] ^= 1;
+        break;
+    default:
+        break;
+    }
+}
+
 static void no_fault(void)
 {
+    pdn_aprs__decode_fault_hook = NULL;
+    g_dmode = DM_NONE;
     pdn_aprs__fault_hook = NULL;
     pdn_aprs__header_fault_hook = NULL;
     g_find = g_repl = NULL;
@@ -389,11 +441,11 @@ static void test_header(void)
     pdn_aprs_encoded enc;
     int n;
     no_fault();
-    /* an entry not used before one that is cannot be carried, in a line or in a frame */
+    /* an entry not used before one that is is a fault of the header given, in a line or in a frame */
     CHECK(build_status("WIDE1-1,N0CALL-1*", 0, &enc) == PDN_APRS_ERR_REFUSED &&
-          enc.refusal == PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY && enc.len == 0);
+          enc.refusal == PDN_APRS_REFUSAL_INVALID_PATH && enc.len == 0);
     CHECK(build_status("WIDE1-1,N0CALL-1*", 1, &enc) == PDN_APRS_ERR_REFUSED &&
-          enc.refusal == PDN_APRS_REFUSAL_AX25_CANNOT_CARRY && enc.len == 0);
+          enc.refusal == PDN_APRS_REFUSAL_INVALID_PATH && enc.len == 0);
     /* the * goes on the last used entry only; the frame sets every used entry's H bit */
     n = build_status("WIDE1-1*,N0CALL-1*,WIDE2-1", 0, &enc);
     CHECK(n > 0 && memcmp(out, "N0CALL>APZ001,WIDE1-1,N0CALL-1*,WIDE2-1:>hi", (size_t)n) == 0);
@@ -458,6 +510,378 @@ static void test_header(void)
     CHECK(n > 0 && memcmp(out, "N0CALL>APZ001,WIDE1-1,N0CALL-1*,WIDE2-1:>hi", (size_t)n) == 0);
 }
 
+/* ---- what the read-back's comparison refuses (README Read-back, The comparison) ---- */
+
+static void decode_fails(int mode)
+{
+    no_fault();
+    g_dmode = mode;
+    pdn_aprs__decode_fault_hook = decode_fault;
+}
+
+/* The data given, written with what the decode reads changed by mode: nothing is returned and the call refuses. */
+static void refused_with(int mode, int sev, int code, const char *what)
+{
+    pdn_aprs_encoded enc;
+    int rc;
+    decode_fails(mode);
+    g_dsev = sev;
+    g_dcode = code;
+    memset(out, 0xA5, sizeof out);
+    rc = encode(&enc);
+    if (rc != PDN_APRS_ERR_REFUSED)
+        printf("not refused: %s\n", what);
+    CHECK(rc == PDN_APRS_ERR_REFUSED && enc.len == 0 &&
+          (enc.refusal == PDN_APRS_REFUSAL_DOES_NOT_READ_BACK || enc.refusal == PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD));
+    CHECK(out[0] != '!' && out[0] != '>' && out[0] != '_' && out[0] != ':' && out[0] != '`');
+    no_fault();
+}
+
+static void accepted_with(int mode, int sev, int code, const char *what)
+{
+    pdn_aprs_encoded enc;
+    int rc;
+    decode_fails(mode);
+    g_dsev = sev;
+    g_dcode = code;
+    rc = encode(&enc);
+    if (rc <= 0)
+        printf("refused: %s\n", what);
+    CHECK(rc > 0);
+    no_fault();
+}
+
+static void test_comparison(void)
+{
+    /* a read-back that sees only a warning, or only an error, refuses */
+    CHECK(decode_line("N0CALL>APZ001:!4903.50N/07201.75W-Test") == PDN_APRS_OK);
+    accepted_with(DM_NONE, 0, 0, "the hook with nothing to add");
+    refused_with(DM_DIAG, PDN_APRS_SEVERITY_WARNING, PDN_APRS_CODE_LOWERCASE_HEMISPHERE, "a warning alone");
+    refused_with(DM_DIAG, PDN_APRS_SEVERITY_ERROR, PDN_APRS_CODE_INVALID_LATITUDE, "an error alone");
+    /* an info that is not listed refuses */
+    refused_with(DM_DIAG, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_NOT_APRS, "an info not listed");
+    refused_with(DM_DIAG, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_RESERVED_DATA_TYPE, "an info not listed");
+    /* an info listed for one form is not accepted on another */
+    refused_with(DM_DIAG, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_OBSOLETE_FORMAT, "obsolete-format on a position");
+    refused_with(DM_DIAG, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_MIC_E_MISSING_DEVICE_TYPE, "no device type on a position");
+    refused_with(DM_DIAG, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_INVALID_QUERY, "invalid-query on a position");
+    refused_with(DM_DIAG, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_INVALID_TELEMETRY_METADATA, "metadata on a position");
+    CHECK(decode_line("N0CALL>APZ001:>hello") == PDN_APRS_OK);
+    refused_with(DM_DIAG, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_INVALID_QUERY, "invalid-query on a status");
+    CHECK(decode_line("N0CALL>APZ001::N0CALL   :hello") == PDN_APRS_OK);
+    accepted_with(DM_DIAG, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_INVALID_QUERY, "invalid-query on a message");
+    accepted_with(DM_DIAG, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_INVALID_TELEMETRY_METADATA, "metadata on a message");
+    refused_with(DM_DIAG, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_OBSOLETE_FORMAT, "obsolete-format on a message");
+    CHECK(decode_line("N0CALL>APZ001:_10090556c220s004g005t077r000p000P000h50b09900") == PDN_APRS_OK);
+    accepted_with(DM_DIAG, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_OBSOLETE_FORMAT, "obsolete-format on positionless weather");
+    refused_with(DM_DIAG, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_INVALID_QUERY, "invalid-query on weather");
+    /* a code listed for the form is an info only: as a warning or an error it refuses */
+    refused_with(DM_DIAG, PDN_APRS_SEVERITY_WARNING, PDN_APRS_CODE_OBSOLETE_FORMAT, "obsolete-format as a warning");
+    refused_with(DM_DIAG, PDN_APRS_SEVERITY_ERROR, PDN_APRS_CODE_OBSOLETE_FORMAT, "obsolete-format as an error");
+    CHECK(decode_line("SP3MJK-1>URRT10:`,PJl \x1c-/`test") == PDN_APRS_OK && data.as.report.type_code == '`');
+    refused_with(DM_DIAG, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_MIC_E_MISSING_DEVICE_TYPE, "no device type on a Mic-E with one");
+    refused_with(DM_DIAG, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_OBSOLETE_FORMAT, "Rev 0 on a Mic-E with no Rev 0 telemetry");
+    data.as.report.type_code = 0;
+    accepted_with(DM_DIAG, PDN_APRS_SEVERITY_INFO, PDN_APRS_CODE_MIC_E_MISSING_DEVICE_TYPE, "no device type, on a Mic-E with none");
+
+    /* a decode with a field the data does not give refuses, whichever field */
+    CHECK(decode_line("N0CALL>APZ001:!4903.50N/07201.75W-Test") == PDN_APRS_OK);
+    refused_with(DM_ALTITUDE, 0, 0, "an altitude the data does not give");
+    CHECK(decode_line("N0CALL>APZ001::N0CALL   :hello") == PDN_APRS_OK);
+    refused_with(DM_REPLY_ACK, 0, 0, "a reply-ack the data does not give");
+    CHECK(decode_line("N0CALL>APZ001:>IO91SX/G") == PDN_APRS_OK);
+    refused_with(DM_BEAM, 0, 0, "a beam the data does not give");
+
+    /* a status symbol is compared */
+    CHECK(decode_line("N0CALL>APZ001:>IO91SX/G") == PDN_APRS_OK && data.as.status.symbol.code == 'G');
+    refused_with(DM_STATUS_SYMBOL, 0, 0, "another status symbol");
+
+    /* a weather extra field's letter and its value are compared */
+    CHECK(decode_line("N0CALL>APZ001:_10092345c...s...g...t...b10132X01Y-1") == PDN_APRS_OK &&
+          data.as.weather.weather.extra_count == 2);
+    accepted_with(DM_NONE, 0, 0, "weather extra fields as they are");
+    refused_with(DM_WX_LETTER, 0, 0, "another extra field letter");
+    refused_with(DM_WX_VALUE, 0, 0, "another extra field value");
+    no_fault();
+}
+
+/* ---- as_received is the decoder's, tied to the bytes (review D1) ---- */
+
+static void test_as_received_mark(void)
+{
+    pdn_aprs_encoded enc;
+    pdn_aprs_data d;
+    pdn_aprs_header h;
+    char line[512];
+    static const char *const bad[] = {"N0CALL>APZ001:!garbage", "N0CALL>APZ001:>a\nb", "N0CALL>APZ001:>a\001b",
+                                      "A>B:}A>B:}A>B:}A>B:}A>B:>hi"};
+    size_t i;
+    no_fault();
+    memset(&h, 0, sizeof h);
+    h.q_construct = -1;
+    strcpy(h.source, "N0CALL");
+    strcpy(h.destination, "APZ001");
+    for (i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        /* a program that sets the flag on bytes the decoder never read gets the full check */
+        memset(&d, 0, sizeof d);
+        d.type = PDN_APRS_TYPE_THIRD_PARTY;
+        d.as.third_party.len = (uint16_t)strlen(bad[i]);
+        memcpy(d.as.third_party.packet, bad[i], d.as.third_party.len);
+        d.as.third_party.as_received = 1;
+        memset(&enc, 0, sizeof enc);
+        CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, line, sizeof line, &enc) == PDN_APRS_ERR_REFUSED);
+        d.as.third_party.as_received = 0xFFFF;
+        CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, line, sizeof line, &enc) == PDN_APRS_ERR_REFUSED);
+        d.as.third_party.as_received = 0;
+        CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, line, sizeof line, &enc) == PDN_APRS_ERR_REFUSED);
+    }
+    /* what the decoder read is written as received, whatever its inner warning */
+    CHECK(decode_line("N0CALL>APZ001:}G4ABC>APZ001:>Net \007Control") == PDN_APRS_OK && data.as.third_party.as_received);
+    CHECK(data.as.third_party.as_received != 0 && data.as.third_party.as_received != 1);
+    CHECK(pdn_aprs_encode_tnc2(&h, &data, NULL, line, sizeof line, &enc) > 0);
+    /* a copy keeps its mark with its bytes */
+    d = data;
+    CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, line, sizeof line, &enc) > 0);
+    /* edited bytes do not carry it: the same data with one byte changed, or the mark copied to other bytes */
+    d.as.third_party.packet[d.as.third_party.len - 1] = '\001';
+    CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, line, sizeof line, &enc) == PDN_APRS_ERR_REFUSED);
+    d = data;
+    d.as.third_party.len = (uint16_t)strlen("N0CALL>APZ001:!garbage");
+    memcpy(d.as.third_party.packet, "N0CALL>APZ001:!garbage", d.as.third_party.len);
+    CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, line, sizeof line, &enc) == PDN_APRS_ERR_REFUSED);
+    /* a mark of the right bytes for the others is no mark for these: every other flag value for the decoded bytes */
+    d = data;
+    d.as.third_party.as_received ^= 1;
+    CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, line, sizeof line, &enc) == PDN_APRS_ERR_REFUSED);
+    no_fault();
+}
+
+/* ---- the buffer holds nothing after any failure (review D3) ---- */
+
+static int all_zero(const uint8_t *p, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (p[i])
+            return 0;
+    return 1;
+}
+
+static void test_buffer_cleared(void)
+{
+    pdn_aprs_encoded enc;
+    pdn_aprs_header h;
+    pdn_aprs_data d;
+    static uint8_t buf[64];
+    no_fault();
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_STATUS;
+    strcpy(d.as.status.text, "hello world");
+    d.as.status.text_len = 11;
+    /* too small for the field: nothing of it is left */
+    memset(buf, 0, sizeof buf);
+    CHECK(pdn_aprs_encode_info(&d, NULL, buf, 5, &enc) == PDN_APRS_ERR_BUFFER);
+    CHECK(all_zero(buf, sizeof buf));
+    /* the field fits, the header does not */
+    memset(&h, 0, sizeof h);
+    h.q_construct = -1;
+    strcpy(h.source, "N0CALL");
+    strcpy(h.destination, "APZ001");
+    memset(buf, 0, sizeof buf);
+    CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, (char *)buf, 16, &enc) == PDN_APRS_ERR_BUFFER);
+    CHECK(all_zero(buf, sizeof buf));
+    memset(buf, 0, sizeof buf);
+    CHECK(pdn_aprs_encode_ax25(&h, &d, NULL, buf, 16, &enc) == PDN_APRS_ERR_BUFFER);
+    CHECK(all_zero(buf, sizeof buf));
+    /* a refusal after the field was written: the header cannot be carried, or no read-back */
+    strcpy(h.path[0].call, "lower");
+    h.path_count = 1;
+    memset(buf, 0, sizeof buf);
+    CHECK(pdn_aprs_encode_ax25(&h, &d, NULL, buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED);
+    CHECK(all_zero(buf, sizeof buf));
+    h.path_count = 0;
+    g_head_at = 2;
+    pdn_aprs__header_fault_hook = header_fault;
+    memset(buf, 0, sizeof buf);
+    CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED);
+    CHECK(all_zero(buf, sizeof buf));
+    no_fault();
+    /* a field a decoded packet holds that no line carries leaves nothing either */
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001:>hi", 17, NULL, &pkt) == PDN_APRS_OK);
+    memset(buf, 0, sizeof buf);
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, 10) == PDN_APRS_ERR_BUFFER);
+    CHECK(all_zero(buf, sizeof buf));
+}
+
+/* ---- the order of a header's faults, and what a form cannot carry (R26) ---- */
+
+static void test_header_order_and_forms(void)
+{
+    pdn_aprs_encoded enc;
+    pdn_aprs_header h;
+    pdn_aprs_data d;
+    static uint8_t buf[1024];
+    int n;
+    no_fault();
+    memset(&h, 0, sizeof h);
+    h.q_construct = -1;
+    strcpy(h.source, "N0CALL");
+    strcpy(h.destination, "APZ001");
+    strcpy(h.path[0].call, "WIDE1-1");
+    strcpy(h.path[1].call, "N0CALL-1");
+    h.path[1].marked = h.path[1].used = 1;
+    h.path_count = 2;
+    /* the path is judged when the header is given: before a data fault, in a line and in a frame */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_STATUS;
+    strcpy(d.as.status.text, "a\001b");
+    d.as.status.text_len = 3;
+    CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_INVALID_PATH);
+    CHECK(pdn_aprs_encode_ax25(&h, &d, NULL, buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_INVALID_PATH);
+    strcpy(d.as.status.text, "ok");
+    d.as.status.text_len = 2;
+    CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_INVALID_PATH);
+    /* an address that is not one comes before it */
+    strcpy(h.path[0].call, "WIDE 1");
+    CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_INVALID_ADDRESS);
+    /* the same through the builders, with a fault of the arguments as well */
+    {
+        pdn_aprs_station st;
+        pdn_aprs_message_args m;
+        memset(&st, 0, sizeof st);
+        st.source = "N0CALL";
+        st.path = "WIDE1-1,N0CALL-1*";
+        memset(&m, 0, sizeof m);
+        m.addressee = "N0CALL";
+        m.text = "hi";
+        m.message_id = "toolongid";
+        CHECK(pdn_aprs_build_message(&st, &m, buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+              enc.refusal == PDN_APRS_REFUSAL_INVALID_PATH);
+        st.ax25 = 1;
+        CHECK(pdn_aprs_build_message(&st, &m, buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+              enc.refusal == PDN_APRS_REFUSAL_INVALID_PATH);
+    }
+    /* a CR or LF inside the information field is carried by a frame and not by a line (one at the end is carried) */
+    memset(&h, 0, sizeof h);
+    h.q_construct = -1;
+    strcpy(h.source, "N0CALL");
+    strcpy(h.destination, "APZ001");
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_USER_DEFINED;
+    d.as.user_defined.user_id = 'A';
+    d.as.user_defined.packet_type = 'x';
+    memcpy(d.as.user_defined.data, "a\nX>Y:>evil", 11);
+    d.as.user_defined.data_len = 11;
+    CHECK(pdn_aprs_encode_info(&d, NULL, buf, sizeof buf, &enc) > 0);
+    CHECK(pdn_aprs_encode_ax25(&h, &d, NULL, buf, sizeof buf, &enc) > 0);
+    memset(buf, 0xA5, sizeof buf);
+    CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY && enc.len == 0);
+    CHECK(all_zero(buf, 14) && buf[14] == 0xA5);
+    memcpy(d.as.user_defined.data, "a\rb", 3);
+    d.as.user_defined.data_len = 3;
+    CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY);
+    /* a NUL: a frame carries it, a NUL-terminated line does not */
+    memcpy(d.as.user_defined.data, "a\0b", 3);
+    CHECK(pdn_aprs_encode_ax25(&h, &d, NULL, buf, sizeof buf, &enc) > 0);
+    CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY);
+    /* no code of the data comes after it */
+    d.as.user_defined.data_len = 3;
+    memcpy(d.as.user_defined.data, "a\nb", 3);
+    d.as.user_defined.data_len = 2;
+    d.as.user_defined.data[1] = '\n'; /* ends in a line break: the field cannot carry it, whatever the form */
+    CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_INVALID_CHARACTER);
+
+    /* a packet already held: the same of its writers */
+    {
+        pdn_aprs_packet *inner = (pdn_aprs_packet *)malloc(sizeof *inner);
+        static const uint8_t ud[] = {0x82, 0xA0, 0xB4, 0x60, 0x60, 0x62, 0xE0, 0x9C, 0x60, 0x86, 0x82, 0x98, 0x98, 0x61,
+                                     0x03, 0xF0, '{', 'A', 'x', 'a', '\n', 'X', '>', 'Y', ':', '>', 'e', 'v', 'i', 'l'};
+        CHECK(pdn_aprs_decode_ax25(ud, sizeof ud, NULL, &pkt) == PDN_APRS_OK && pkt.data.type == PDN_APRS_TYPE_USER_DEFINED);
+        CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf) > 0);
+        CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf) == PDN_APRS_ERR_REFUSED);
+        CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001:>a\rb", 18, NULL, &pkt) == PDN_APRS_OK);
+        CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf) == PDN_APRS_ERR_REFUSED);
+        CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf) > 0);
+        /* one at the very end is carried */
+        CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001:>ab\r\n", 19, NULL, &pkt) == PDN_APRS_OK);
+        n = pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf);
+        CHECK(n > 0 && memcmp(buf, "N0CALL>APZ001:>ab\r\n", (size_t)n) == 0);
+        /* an empty destination is written as it came in a line, and never to a frame */
+        CHECK(pdn_aprs_decode_tnc2("N0CALL>:>x", 10, NULL, &pkt) == PDN_APRS_OK);
+        n = pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf);
+        CHECK(n == 10 && memcmp(buf, "N0CALL>:>x", 10) == 0);
+        CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf) == PDN_APRS_ERR_REFUSED);
+        {
+            static const uint8_t blank[] = {0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x60, 0x9C, 0x60, 0x86,
+                                            0x82, 0x98, 0x98, 0x61, 0x03, 0xF0, 0x3E, 0x78};
+            CHECK(pdn_aprs_decode_ax25(blank, sizeof blank, NULL, &pkt) == PDN_APRS_OK);
+            CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf) == PDN_APRS_ERR_REFUSED);
+            CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf) > 0);
+        }
+        /* an inner packet written on its own is read back by the outer header rules */
+        CHECK(pdn_aprs_decode_tnc2("N0CALL>APRS:}a b>APRS,A*,B:>hi", 30, NULL, &pkt) == PDN_APRS_OK);
+        CHECK(pdn_aprs_decode_third_party(&pkt.data, NULL, inner) == PDN_APRS_OK);
+        CHECK(pdn_aprs_write_tnc2(inner, (char *)buf, sizeof buf) == PDN_APRS_ERR_REFUSED);
+        CHECK(pdn_aprs_write_ax25(inner, buf, sizeof buf) == PDN_APRS_ERR_REFUSED);
+        /* an inner header written inside third-party data is still read by the third-party rules */
+        CHECK(pdn_aprs_encode_tnc2(&h, &pkt.data, NULL, (char *)buf, sizeof buf, &enc) > 0);
+        CHECK(pdn_aprs_decode_tnc2("N0CALL>APRS:}N0CALL>APRS,qAR,X:>hi", 34, NULL, &pkt) == PDN_APRS_OK);
+        CHECK(pdn_aprs_decode_third_party(&pkt.data, NULL, inner) == PDN_APRS_OK);
+        n = pdn_aprs_write_tnc2(inner, (char *)buf, sizeof buf);
+        CHECK(n > 0 && memcmp(buf, "N0CALL>APRS,qAR,X:>hi", (size_t)n) == 0);
+        CHECK(pdn_aprs_write_ax25(inner, buf, sizeof buf) == PDN_APRS_ERR_REFUSED);
+        free(inner);
+    }
+}
+
+/* ---- a header written that reads back with a diagnostic refuses (README Read-back, Header) ---- */
+
+static int g_pad_at = -1;
+
+static void pad_fault(uint8_t *head, size_t len, int ax25)
+{
+    (void)ax25;
+    if (g_pad_at >= 0 && (size_t)g_pad_at < len)
+        head[g_pad_at] = 0; /* a space of a short call's padding becomes a NUL: the same call, with a warning */
+}
+
+static void test_header_diagnostics(void)
+{
+    pdn_aprs_encoded enc;
+    pdn_aprs_header h;
+    pdn_aprs_data d;
+    static uint8_t buf[256];
+    no_fault();
+    memset(&h, 0, sizeof h);
+    h.q_construct = -1;
+    strcpy(h.source, "N0CAL");
+    strcpy(h.destination, "APZ001");
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_STATUS;
+    strcpy(d.as.status.text, "hi");
+    d.as.status.text_len = 2;
+    CHECK(pdn_aprs_encode_ax25(&h, &d, NULL, buf, sizeof buf, &enc) > 0);
+    /* the source's sixth byte is padding: a NUL there reads as the same call with nul-padded-address */
+    g_pad_at = 7 + 5;
+    pdn_aprs__header_fault_hook = pad_fault;
+    CHECK(pdn_aprs_encode_ax25(&h, &d, NULL, buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_DOES_NOT_READ_BACK);
+    /* and a packet already held */
+    CHECK(pdn_aprs_decode_tnc2("N0CAL>APZ001:>hi", 16, NULL, &pkt) == PDN_APRS_OK);
+    CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf) == PDN_APRS_ERR_REFUSED);
+    no_fault();
+    g_pad_at = -1;
+    CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf) > 0);
+}
+
 int main(void)
 {
     test_every_type();
@@ -466,6 +890,11 @@ int main(void)
     test_text_reads_as_field();
     test_third_party();
     test_header();
+    test_comparison();
+    test_as_received_mark();
+    test_buffer_cleared();
+    test_header_order_and_forms();
+    test_header_diagnostics();
     no_fault();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

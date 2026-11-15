@@ -349,3 +349,24 @@ PDN_APRS__PRIVATE long pdn_aprs__b91(const uint8_t *s, size_t n)
         v = v * 91 + (long)(s[i] - 33);
     return v;
 }
+
+/* ---- the decoder's mark on a third-party packet ---- */
+
+/* A multiplicative hash of the bytes, four at a time (read as little-endian
+   numbers whatever the machine), folded to 16 bits, never zero. Not a secret
+   and not a signature: it ties as_received to the bytes the decoder read, so
+   edited bytes or a made-up flag do not carry the exemption. */
+PDN_APRS__PRIVATE uint16_t pdn_aprs__third_party_mark(const uint8_t *p, size_t n)
+{
+    uint32_t h = 2166136261u ^ (uint32_t)n;
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        uint32_t w = (uint32_t)p[i] | (uint32_t)p[i + 1] << 8 | (uint32_t)p[i + 2] << 16 | (uint32_t)p[i + 3] << 24;
+        h = (h ^ w) * 0x9E3779B1u;
+        h ^= h >> 15;
+    }
+    for (; i < n; i++)
+        h = (h ^ p[i]) * 16777619u;
+    h = (h >> 16) ^ (h & 0xFFFFu);
+    return (uint16_t)(h ? h : 1u);
+}

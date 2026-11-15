@@ -440,44 +440,69 @@ static int needs_more_than(const jval *c, const input_t *in, int limit)
 
 static const pdn_aprs_device_table *devices(void) { return dev_table(); }
 
-/* "pass_through" (README Read-back, Header): the lenient packet written with
-   pdn_aprs_write_tnc2 and pdn_aprs_write_ax25 is the line and the frame given,
-   or a refusal. The writers refuse with the one code of their form
-   (tnc2-cannot-carry, ax25-cannot-carry). */
-static void check_pass_through(const jval *c, const char *id, const input_t *in, const pdn_aprs_decode_options *lenient)
+/* "pass_through" and "pass_through_inner" (README Read-back, Header): the
+   lenient packet, or for the inner key the inner packet of its third-party
+   data, written with pdn_aprs_write_tnc2 and pdn_aprs_write_ax25 is the line
+   and the frame given, or a refusal. The writers return PDN_APRS_ERR_REFUSED
+   and carry no refusal code, so a refusal is checked to be one and its
+   code to be one of those a writer can give (the one of its form, or the
+   outer header's address or path code). */
+static int writer_refusal(const char *code, int ax25)
 {
-    const jval *pt = json_get(c, "pass_through");
+    return code && (strcmp(code, ax25 ? "ax25-cannot-carry" : "tnc2-cannot-carry") == 0 ||
+                    strcmp(code, "invalid-address") == 0 || strcmp(code, "invalid-path") == 0);
+}
+
+static void check_writers(const jval *pt, const char *key, const char *id, const pdn_aprs_packet *p)
+{
     const char *tnc2 = json_gets(pt, "tnc2"), *hex = json_gets(pt, "ax25_hex");
     const char *tref = json_gets(pt, "tnc2_refusal"), *aref = json_gets(pt, "ax25_refusal");
     char why[512];
     uint8_t buf[2048];
     int n;
-    if (decode(in, lenient, &pkt) != PDN_APRS_OK)
-        return;
     if (tnc2 || tref) {
-        n = pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf);
+        n = pdn_aprs_write_tnc2(p, (char *)buf, sizeof buf);
         if (tref)
-            snprintf(why, sizeof why, "tnc2 wrote %d, want a refusal (%s)", n, tref);
+            snprintf(why, sizeof why, "%s: tnc2 wrote %d, want a refusal (%s)", key, n, tref);
         else
-            snprintf(why, sizeof why, "tnc2 wrote %.200s, want %s", n > 0 ? ascii(buf, n) : "nothing", tnc2);
-        report(id, "pass-through", tref ? (n == PDN_APRS_ERR_REFUSED && strcmp(tref, "tnc2-cannot-carry") == 0)
+            snprintf(why, sizeof why, "%s: tnc2 wrote %.200s, want %s", key, n > 0 ? ascii(buf, n) : "nothing", tnc2);
+        report(id, "pass-through", tref ? (n == PDN_APRS_ERR_REFUSED && writer_refusal(tref, 0))
                                         : (n >= 0 && (size_t)n == strlen(tnc2) && memcmp(buf, tnc2, (size_t)n) == 0),
                why, NULL, NULL);
     }
     if (hex || aref) {
         char got[2 * 512 + 1];
         int k, ok = 0;
-        n = pdn_aprs_write_ax25(&pkt, buf, sizeof buf);
+        n = pdn_aprs_write_ax25(p, buf, sizeof buf);
         got[0] = 0;
         for (k = 0; n > 0 && k < n && k < 512; k++)
             snprintf(got + 2 * k, 3, "%02X", buf[k]);
         if (aref)
-            ok = n == PDN_APRS_ERR_REFUSED && strcmp(aref, "ax25-cannot-carry") == 0;
+            ok = n == PDN_APRS_ERR_REFUSED && writer_refusal(aref, 1);
         else if (n > 0 && strlen(hex) == 2 * (size_t)n)
             for (k = 0, ok = 1; k < 2 * n; k++)
                 ok = ok && (hex[k] & ~0x20) == (got[k] & ~0x20);
-        snprintf(why, sizeof why, "ax25 wrote %d: %.200s, want %.200s", n, got, aref ? aref : hex);
+        snprintf(why, sizeof why, "%s: ax25 wrote %d: %.200s, want %.200s", key, n, got, aref ? aref : hex);
         report(id, "pass-through", ok, why, NULL, NULL);
+    }
+}
+
+static void check_pass_through(const jval *c, const char *id, const input_t *in, const pdn_aprs_decode_options *lenient)
+{
+    const jval *pt = json_get(c, "pass_through"), *pi = json_get(c, "pass_through_inner");
+    if (decode(in, lenient, &pkt) != PDN_APRS_OK)
+        return;
+    if (pt)
+        check_writers(pt, "pass_through", id, &pkt);
+    if (pi) {
+        /* the inner packet of the third-party data, written as a line or a frame of its own */
+        pdn_aprs_packet *inner = (pdn_aprs_packet *)malloc(sizeof *inner);
+        if (!inner || pkt.data.type != PDN_APRS_TYPE_THIRD_PARTY ||
+            pdn_aprs_decode_third_party(&pkt.data, lenient, inner) != PDN_APRS_OK)
+            report(id, "pass-through", 0, "pass_through_inner: no inner packet to write", NULL, NULL);
+        else
+            check_writers(pi, "pass_through_inner", id, inner);
+        free(inner);
     }
 }
 
@@ -541,7 +566,7 @@ static void check_decode_case(const jval *c, const char *id)
     report(id, "lenient", ok, why, ok ? NULL : got, ok ? NULL : expect);
 
     /* pass through: the lenient packet written back with the packet writers */
-    if (json_get(c, "pass_through") && ok)
+    if ((json_get(c, "pass_through") || json_get(c, "pass_through_inner")) && ok)
         check_pass_through(c, id, &in, &lenient);
 
     /* re-encode, from the lenient data */

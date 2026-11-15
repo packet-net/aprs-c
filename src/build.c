@@ -67,6 +67,69 @@ static int station_header(const pdn_aprs_station *st, pdn_aprs_header *h, pdn_ap
     return PDN_APRS_OK;
 }
 
+/* A builder judges the station's header when it is given, before any fault
+   of the data its arguments hold (README Refusal reasons: invalid-address,
+   invalid-path come first, whatever form is written). When the data is
+   sound the encoder does it first thing; when the arguments fail before the
+   encoder is reached (a text too long for its field, a bad type code) the
+   call ends in header_last, which reads the station's strings as they are,
+   without building the header, and gives the header's fault instead. Returns
+   0 for none, or the call's result. A station the call cannot read (NULL, no
+   source, more path entries than the header holds) is left as it is. */
+static int header_fault_of(const pdn_aprs_station *st, int mic_e, pdn_aprs_encoded *result)
+{
+    const char *dest, *p;
+    unsigned entries = 0;
+    int gap = 0, unused = 0;
+    if (!st || !st->source)
+        return PDN_APRS_OK;
+    dest = st->destination ? st->destination : PDN_APRS_DEFAULT_DESTINATION;
+    if (strlen(st->source) >= PDN_APRS_ADDR_SIZE || strlen(dest) >= PDN_APRS_ADDR_SIZE)
+        return PDN_APRS_OK; /* station_header refuses it, with the reason */
+    if (!pdn_aprs__address_valid(st->source, strlen(st->source)) ||
+        (!mic_e && !pdn_aprs__address_valid(dest, strlen(dest))))
+        return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESS,
+                    "a header address is not 1-9 letters, digits or -");
+    for (p = st->path; p && *p; entries++) {
+        const char *comma = strchr(p, ',');
+        size_t n = comma ? (size_t)(comma - p) : strlen(p);
+        int marked = n > 0 && p[n - 1] == '*';
+        if (entries >= PDN_APRS_MAX_PATH)
+            return PDN_APRS_OK;
+        if (marked)
+            n--;
+        if (n == 0 || n >= PDN_APRS_ADDR_SIZE || !pdn_aprs__address_valid(p, n))
+            return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESS,
+                        "a header address is not 1-9 letters, digits or -");
+        /* an entry marked used makes every entry before it used, and one not marked
+           before a used one reads back used (invalid-path); a mark anywhere after
+           an unmarked entry is the gap */
+        if (marked && unused)
+            gap = 1;
+        if (!marked)
+            unused = 1;
+        p = comma ? comma + 1 : NULL;
+    }
+    /* an entry used (marked) after one not used: no form carries it; the entries
+       after the last mark are unused and no fault */
+    return gap ? fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_PATH,
+                      "a path entry that is not used comes before one that is, which reads back used")
+               : PDN_APRS_OK;
+}
+
+
+/* The end of every public builder: a call that was refused before the encoder judged the
+   station's header gives the header's fault when it has one. */
+static int header_last(const pdn_aprs_station *st, int mic_e, pdn_aprs_encoded *result, int rc)
+{
+    int hf;
+    if (rc != PDN_APRS_ERR_REFUSED || (result && (result->refusal == PDN_APRS_REFUSAL_INVALID_ADDRESS ||
+                                                  result->refusal == PDN_APRS_REFUSAL_INVALID_PATH)))
+        return rc;
+    hf = header_fault_of(st, mic_e, result);
+    return hf != PDN_APRS_OK ? hf : rc;
+}
+
 static int build_data(const pdn_aprs_station *station, const pdn_aprs_data *data, void *buf, size_t cap,
                       pdn_aprs_encoded *result, int builder)
 {
@@ -240,7 +303,7 @@ static int fill_position(pdn_aprs_encoded *result, pdn_aprs_report *r, const pdn
     return rc;
 }
 
-int pdn_aprs_build_position(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf,
+static int build_position_(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf,
                             size_t cap, pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
@@ -260,7 +323,7 @@ int pdn_aprs_build_position(const pdn_aprs_station *station, const pdn_aprs_posi
     return pdn_aprs_build(station, &d, buf, cap, result);
 }
 
-int pdn_aprs_build_object(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf,
+static int build_object_(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf,
                           size_t cap, pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
@@ -283,7 +346,7 @@ int pdn_aprs_build_object(const pdn_aprs_station *station, const pdn_aprs_positi
     return pdn_aprs_build(station, &d, buf, cap, result);
 }
 
-int pdn_aprs_build_item(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf,
+static int build_item_(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf,
                         size_t cap, pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
@@ -303,7 +366,7 @@ int pdn_aprs_build_item(const pdn_aprs_station *station, const pdn_aprs_position
     return pdn_aprs_build(station, &d, buf, cap, result);
 }
 
-int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_args *m, void *buf, size_t cap,
+static int build_mic_e_(const pdn_aprs_station *station, const pdn_aprs_mic_e_args *m, void *buf, size_t cap,
                          pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
@@ -338,7 +401,7 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
         /* the value as given: the encoder rounds it once to the metre when
            it writes the Mic-E bytes, and a /A= (the second form) holds it
            only if it is whole feet */
-        r->altitude_feet = metres / 0.3048;
+        r->altitude_feet = m->has_altitude_m ? m->altitude_m / 0.3048 : m->altitude_feet;
         if (metres == metres && fabs(metres) < 1e9) {
             double mm = pdn_aprs__round(metres);
             if (mm < -10000 || mm > 743570)
@@ -440,7 +503,7 @@ int pdn_aprs_format_timestamp(int year, int month, int day, int hour, int minute
     return (int)(o - out);
 }
 
-int pdn_aprs_build_weather(const pdn_aprs_station *station, const char *timestamp, const pdn_aprs_weather *weather,
+static int build_weather_(const pdn_aprs_station *station, const char *timestamp, const pdn_aprs_weather *weather,
                            void *buf, size_t cap, pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
@@ -521,7 +584,7 @@ static int build_message(const pdn_aprs_station *station, int type, const char *
     return pdn_aprs_build(station, &d, buf, cap, result);
 }
 
-int pdn_aprs_build_message(const pdn_aprs_station *station, const pdn_aprs_message_args *args, void *buf,
+static int build_message_(const pdn_aprs_station *station, const pdn_aprs_message_args *args, void *buf,
                            size_t cap, pdn_aprs_encoded *result)
 {
     begin(result);
@@ -550,19 +613,19 @@ static int build_ack(const pdn_aprs_station *station, int type, const char *addr
     return pdn_aprs_build(station, &d, buf, cap, result);
 }
 
-int pdn_aprs_build_ack(const pdn_aprs_station *station, const char *addressee, const char *message_id, void *buf,
+static int build_ack_(const pdn_aprs_station *station, const char *addressee, const char *message_id, void *buf,
                        size_t cap, pdn_aprs_encoded *result)
 {
     return build_ack(station, PDN_APRS_TYPE_ACK, addressee, message_id, buf, cap, result);
 }
 
-int pdn_aprs_build_reject(const pdn_aprs_station *station, const char *addressee, const char *message_id,
+static int build_reject_(const pdn_aprs_station *station, const char *addressee, const char *message_id,
                           void *buf, size_t cap, pdn_aprs_encoded *result)
 {
     return build_ack(station, PDN_APRS_TYPE_REJECT, addressee, message_id, buf, cap, result);
 }
 
-int pdn_aprs_build_bulletin(const pdn_aprs_station *station, char id, const char *group, const char *text,
+static int build_bulletin_(const pdn_aprs_station *station, char id, const char *group, const char *text,
                             void *buf, size_t cap, pdn_aprs_encoded *result)
 {
     char addressee[16];
@@ -580,7 +643,7 @@ int pdn_aprs_build_bulletin(const pdn_aprs_station *station, char id, const char
     return build_message(station, PDN_APRS_TYPE_BULLETIN, addressee, text, NULL, NULL, buf, cap, result);
 }
 
-int pdn_aprs_build_status(const pdn_aprs_station *station, const pdn_aprs_status_args *o, void *buf, size_t cap,
+static int build_status_(const pdn_aprs_station *station, const pdn_aprs_status_args *o, void *buf, size_t cap,
                           pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
@@ -611,7 +674,7 @@ int pdn_aprs_build_status(const pdn_aprs_station *station, const pdn_aprs_status
     return pdn_aprs_build(station, &d, buf, cap, result);
 }
 
-int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const pdn_aprs_telemetry_args *a, void *buf,
+static int build_telemetry_(const pdn_aprs_station *station, const pdn_aprs_telemetry_args *a, void *buf,
                              size_t cap, pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
@@ -710,19 +773,19 @@ static int build_list(const pdn_aprs_station *station, int type, const char *add
     return build_with(station, &d, buf, cap, result, &pend);
 }
 
-int pdn_aprs_build_telemetry_names(const pdn_aprs_station *station, const char *addressee, const char *const *names,
+static int build_telemetry_names_(const pdn_aprs_station *station, const char *addressee, const char *const *names,
                                    size_t count, void *buf, size_t cap, pdn_aprs_encoded *result)
 {
     return build_list(station, PDN_APRS_TYPE_TELEMETRY_NAMES, addressee, names, count, buf, cap, result);
 }
 
-int pdn_aprs_build_telemetry_units(const pdn_aprs_station *station, const char *addressee, const char *const *units,
+static int build_telemetry_units_(const pdn_aprs_station *station, const char *addressee, const char *const *units,
                                    size_t count, void *buf, size_t cap, pdn_aprs_encoded *result)
 {
     return build_list(station, PDN_APRS_TYPE_TELEMETRY_UNITS, addressee, units, count, buf, cap, result);
 }
 
-int pdn_aprs_build_telemetry_coefficients(const pdn_aprs_station *station, const char *addressee,
+static int build_telemetry_coefficients_(const pdn_aprs_station *station, const char *addressee,
                                           const double *coefficients, size_t count, void *buf, size_t cap,
                                           pdn_aprs_encoded *result)
 {
@@ -746,7 +809,7 @@ int pdn_aprs_build_telemetry_coefficients(const pdn_aprs_station *station, const
     return pdn_aprs_build(station, &d, buf, cap, result);
 }
 
-int pdn_aprs_build_telemetry_bits(const pdn_aprs_station *station, const char *addressee, const char *bits,
+static int build_telemetry_bits_(const pdn_aprs_station *station, const char *addressee, const char *bits,
                                   const char *project, void *buf, size_t cap, pdn_aprs_encoded *result)
 {
     pdn_aprs_data d;
@@ -780,4 +843,81 @@ int pdn_aprs_build_telemetry_bits(const pdn_aprs_station *station, const char *a
     }
     d.as.meta.project_len = (uint16_t)n;
     return build_with(station, &d, buf, cap, result, &pend);
+}
+
+/* ---- the public builders: each ends in header_last ---- */
+
+int pdn_aprs_build_position(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_position_(station, args, buf, cap, result));
+}
+
+int pdn_aprs_build_object(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_object_(station, args, buf, cap, result));
+}
+
+int pdn_aprs_build_item(const pdn_aprs_station *station, const pdn_aprs_position_args *args, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_item_(station, args, buf, cap, result));
+}
+
+int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_args *m, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 1, result, build_mic_e_(station, m, buf, cap, result));
+}
+
+int pdn_aprs_build_weather(const pdn_aprs_station *station, const char *timestamp, const pdn_aprs_weather *weather, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_weather_(station, timestamp, weather, buf, cap, result));
+}
+
+int pdn_aprs_build_message(const pdn_aprs_station *station, const pdn_aprs_message_args *args, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_message_(station, args, buf, cap, result));
+}
+
+int pdn_aprs_build_ack(const pdn_aprs_station *station, const char *addressee, const char *message_id, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_ack_(station, addressee, message_id, buf, cap, result));
+}
+
+int pdn_aprs_build_reject(const pdn_aprs_station *station, const char *addressee, const char *message_id, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_reject_(station, addressee, message_id, buf, cap, result));
+}
+
+int pdn_aprs_build_bulletin(const pdn_aprs_station *station, char id, const char *group, const char *text, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_bulletin_(station, id, group, text, buf, cap, result));
+}
+
+int pdn_aprs_build_status(const pdn_aprs_station *station, const pdn_aprs_status_args *o, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_status_(station, o, buf, cap, result));
+}
+
+int pdn_aprs_build_telemetry(const pdn_aprs_station *station, const pdn_aprs_telemetry_args *a, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_telemetry_(station, a, buf, cap, result));
+}
+
+int pdn_aprs_build_telemetry_names(const pdn_aprs_station *station, const char *addressee, const char *const *names, size_t count, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_telemetry_names_(station, addressee, names, count, buf, cap, result));
+}
+
+int pdn_aprs_build_telemetry_units(const pdn_aprs_station *station, const char *addressee, const char *const *units, size_t count, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_telemetry_units_(station, addressee, units, count, buf, cap, result));
+}
+
+int pdn_aprs_build_telemetry_coefficients(const pdn_aprs_station *station, const char *addressee, const double *coefficients, size_t count, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_telemetry_coefficients_(station, addressee, coefficients, count, buf, cap, result));
+}
+
+int pdn_aprs_build_telemetry_bits(const pdn_aprs_station *station, const char *addressee, const char *bits, const char *project, void *buf, size_t cap, pdn_aprs_encoded *result)
+{
+    return header_last(station, 0, result, build_telemetry_bits_(station, addressee, bits, project, buf, cap, result));
 }

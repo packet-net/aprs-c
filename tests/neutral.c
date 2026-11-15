@@ -9,6 +9,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* In the data form, `null` is a field left out (README Read-back, Fields: empty and absent
+   are one value, and so are a `null` and a boolean given false): a key holding null is
+   read as absent. An item of a list is a value and is read as it is. */
+static jval *get_unless_null(const jval *o, const char *k)
+{
+    jval *v = json_get(o, k);
+    return v && v->t == J_NULL ? NULL : v;
+}
+#define json_get get_unless_null
+
 static const char *const mic_e_names[] = {"off-duty", "en-route", "in-service", "returning", "committed",
                                           "special",  "priority", "custom0",    "custom1",   "custom2",
                                           "custom3",  "custom4",  "custom5",    "custom6",   "emergency",
@@ -653,10 +663,15 @@ static int num_in(conv *cv, const jval *o, const char *k, double *out)
    allows: one outside the type is out of the field's range, which the
    encoder would refuse as value-out-of-range, so it is noted and the field
    left 0. */
-static int int_ranged(conv *cv, const jval *o, const char *k, double lo, double hi, long *out)
+static int int_ranged(conv *cv, const jval *o, const char *k, double lo, double hi, long *out, int whole)
 {
     jval *v = json_get(o, k);
     *out = 0;
+    if (whole && v && v->t == J_NUM && v->num - v->num == 0.0 && v->num != floor(v->num)) {
+        /* a code field holds whole numbers only: not rounded */
+        note_pending(PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "a code field is not given a non-integer");
+        return 1;
+    }
     if (v && v->t == J_NUM && !(v->num - v->num == 0.0)) {
         note_pending(PDN_APRS_REFUSAL_NOT_A_NUMBER, "NaN or an infinity");
         return 1;
@@ -694,6 +709,28 @@ static void bearing_in(conv *cv, const jval *o, const char *k, long *out)
         return;
     }
     *out = (long)r;
+}
+
+/* A whole number the C field's type holds, lo to hi. A number in a field the
+   form holds only in whole units or as a code (a PHG or DFS digit, an Agrelo
+   quality, a comment telemetry sequence, an area offset, a storm field, a DF
+   bearing's code) that is not whole is outside what the field holds: noted as
+   value-out-of-range, with 0 as the stand-in the encoder is run on, so the
+   code reported is the first in the README's order (the README's rule for a
+   record the C types cannot hold). */
+static int int_whole(conv *cv, const jval *o, const char *k, double lo, double hi, long *out)
+{
+    jval *v = json_get(o, k);
+    *out = 0;
+    if (v && v->t == J_NUM && !(v->num - v->num == 0.0)) {
+        note_pending(PDN_APRS_REFUSAL_NOT_A_NUMBER, "NaN or an infinity");
+        return 1;
+    }
+    if (v && v->t == J_NUM && v->num != floor(v->num)) {
+        note_pending(PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "a whole-unit or code field is not given a non-integer");
+        return 1;
+    }
+    return int_in(cv, o, k, lo, hi, out);
 }
 
 /* A whole number the C field's type holds, lo to hi. */
@@ -880,7 +917,7 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
     }
     num_in(cv, o, "latitude", &r->latitude);
     num_in(cv, o, "longitude", &r->longitude);
-    int_in(cv, o, "ambiguity", 0, 255, &n);
+    int_whole(cv, o, "ambiguity", 0, 255, &n);
     r->ambiguity = (uint8_t)n;
     symbol_in(cv, o, &r->symbol);
     r->compressed = (uint8_t)flag_in(cv, o, "compressed");
@@ -902,15 +939,15 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
         static const char *const pk[] = {"power", "height", "gain", "directivity", "beacons_per_hour", NULL};
         keys_only(cv, v, pk);
         r->has_phg = 1;
-        int_in(cv, v, "power", 0, 255, &n);
+        int_whole(cv, v, "power", 0, 255, &n);
         r->phg.power = (uint8_t)n;
-        int_in(cv, v, "height", 0, 255, &n);
+        int_whole(cv, v, "height", 0, 255, &n);
         r->phg.height = (uint8_t)n;
-        int_in(cv, v, "gain", 0, 255, &n);
+        int_whole(cv, v, "gain", 0, 255, &n);
         r->phg.gain = (uint8_t)n;
-        int_in(cv, v, "directivity", 0, 255, &n);
+        int_whole(cv, v, "directivity", 0, 255, &n);
         r->phg.directivity = (uint8_t)n;
-        int_in(cv, v, "beacons_per_hour", 0, 255, &n);
+        int_whole(cv, v, "beacons_per_hour", 0, 255, &n);
         r->phg.beacons_per_hour = (uint8_t)n;
     }
     r->has_range = (uint8_t)num_in(cv, o, "range_miles", &r->range_miles);
@@ -918,13 +955,13 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
         static const char *const dk[] = {"strength", "height", "gain", "directivity", NULL};
         keys_only(cv, v, dk);
         r->has_dfs = 1;
-        int_in(cv, v, "strength", 0, 255, &n);
+        int_whole(cv, v, "strength", 0, 255, &n);
         r->dfs.strength = (uint8_t)n;
-        int_in(cv, v, "height", 0, 255, &n);
+        int_whole(cv, v, "height", 0, 255, &n);
         r->dfs.height = (uint8_t)n;
-        int_in(cv, v, "gain", 0, 255, &n);
+        int_whole(cv, v, "gain", 0, 255, &n);
         r->dfs.gain = (uint8_t)n;
-        int_in(cv, v, "directivity", 0, 255, &n);
+        int_whole(cv, v, "directivity", 0, 255, &n);
         r->dfs.directivity = (uint8_t)n;
     }
     if ((v = json_get(o, "area")) != NULL) {
@@ -935,24 +972,24 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
         r->area.shape = (uint8_t)e;
         enum_in(cv, v, "color", color_names, 16, &e);
         r->area.color = (uint8_t)e;
-        int_in(cv, v, "lat_offset", 0, 255, &n);
+        int_whole(cv, v, "lat_offset", 0, 255, &n);
         r->area.lat_offset = (uint8_t)n;
-        int_in(cv, v, "lon_offset", 0, 255, &n);
+        int_whole(cv, v, "lon_offset", 0, 255, &n);
         r->area.lon_offset = (uint8_t)n;
-        r->area.has_corridor = (uint8_t)int_in(cv, v, "corridor_width_miles", 0, 65535, &n);
+        r->area.has_corridor = (uint8_t)int_whole(cv, v, "corridor_width_miles", 0, 65535, &n);
         r->area.corridor_width_miles = (uint16_t)n;
     }
     if ((v = json_get(o, "df_bearing")) != NULL) {
         static const char *const bk[] = {"bearing_degrees", "number", "range", "quality", NULL};
         keys_only(cv, v, bk);
         r->has_df_bearing = 1;
-        int_ranged(cv, v, "bearing_degrees", 0, 65535, &n);
+        int_ranged(cv, v, "bearing_degrees", 0, 65535, &n, 0);
         r->df_bearing.bearing_degrees = (uint16_t)n;
-        int_in(cv, v, "number", 0, 255, &n);
+        int_whole(cv, v, "number", 0, 255, &n);
         r->df_bearing.number = (uint8_t)n;
-        int_in(cv, v, "range", 0, 255, &n);
+        int_whole(cv, v, "range", 0, 255, &n);
         r->df_bearing.range = (uint8_t)n;
-        int_ranged(cv, v, "quality", 0, 255, &n);
+        int_ranged(cv, v, "quality", 0, 255, &n, 1);
         r->df_bearing.quality = (uint8_t)n;
     }
     if ((v = json_get(o, "storm")) != NULL) {
@@ -969,17 +1006,17 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
                 note_pending(PDN_APRS_REFUSAL_MISSING_FIELD, "storm data is missing a required field");
         enum_in(cv, v, "type", storm_names, 3, &e);
         r->storm.type = (uint8_t)e;
-        int_in(cv, v, "sustained_wind_knots", 0, 65535, &n);
+        int_whole(cv, v, "sustained_wind_knots", 0, 65535, &n);
         r->storm.sustained_wind_knots = (uint16_t)n;
-        int_in(cv, v, "gust_knots", 0, 65535, &n);
+        int_whole(cv, v, "gust_knots", 0, 65535, &n);
         r->storm.gust_knots = (uint16_t)n;
-        int_in(cv, v, "central_pressure_mbar", 0, 65535, &n);
+        int_whole(cv, v, "central_pressure_mbar", 0, 65535, &n);
         r->storm.central_pressure_mbar = (uint16_t)n;
-        int_in(cv, v, "hurricane_radius_nm", 0, 65535, &n);
+        int_whole(cv, v, "hurricane_radius_nm", 0, 65535, &n);
         r->storm.hurricane_radius_nm = (uint16_t)n;
-        int_in(cv, v, "tropical_storm_radius_nm", 0, 65535, &n);
+        int_whole(cv, v, "tropical_storm_radius_nm", 0, 65535, &n);
         r->storm.tropical_storm_radius_nm = (uint16_t)n;
-        r->storm.has_whole_gale_radius = (uint8_t)int_in(cv, v, "whole_gale_radius_nm", 0, 65535, &n);
+        r->storm.has_whole_gale_radius = (uint8_t)int_whole(cv, v, "whole_gale_radius_nm", 0, 65535, &n);
         r->storm.whole_gale_radius_nm = (uint16_t)n;
     }
     if ((v = json_get(o, "dao")) != NULL) {
@@ -996,7 +1033,7 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
         jval *a = json_get(v, "analog");
         keys_only(cv, v, tk);
         r->has_telemetry = 1;
-        int_in(cv, v, "sequence", 0, 65535, &n);
+        int_whole(cv, v, "sequence", 0, 65535, &n);
         r->telemetry.sequence = (uint16_t)n;
         if (a) {
             size_t k;
@@ -1008,13 +1045,22 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
                     break;
                 }
                 const jval *x = a->items[k];
-                if (x->t != J_NUM || x->num != floor(x->num) || x->num < 0 || x->num > 65535)
-                    cannot(cv, "does not fit the C field (a whole number of limited size)", "telemetry.analog");
-                else
+                if (x->t != J_NUM) {
+                    cannot(cv, "is not a number", "telemetry.analog");
+                } else if (!(x->num - x->num == 0.0)) {
+                    /* a value is a code, 0 to 8280: not a number, or not a whole one, or out of the C field's
+                       range, is refused by its value alone, with a stand-in of 0 for the rest of the data */
+                    note_pending(PDN_APRS_REFUSAL_NOT_A_NUMBER, "a comment telemetry value is NaN or infinite");
+                    r->telemetry.analog[r->telemetry.analog_count++] = 0;
+                } else if (x->num != floor(x->num) || x->num < 0 || x->num > 65535) {
+                    note_pending(PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "a comment telemetry value is a whole number, 0 to 8280");
+                    r->telemetry.analog[r->telemetry.analog_count++] = 0;
+                } else {
                     r->telemetry.analog[r->telemetry.analog_count++] = (uint16_t)x->num;
+                }
             }
         }
-        r->telemetry.has_digital = (uint8_t)int_in(cv, v, "digital", 0, 65535, &n);
+        r->telemetry.has_digital = (uint8_t)int_whole(cv, v, "digital", 0, 65535, &n);
         r->telemetry.digital = (uint16_t)n;
     }
     if ((v = json_get(o, "frequency")) != NULL) {
@@ -1067,7 +1113,7 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
         }
         r->has_legacy_telemetry = 1;
     }
-    int_in(cv, o, "destination_ssid", 0, 255, &n);
+    int_whole(cv, o, "destination_ssid", 0, 255, &n);
     r->destination_ssid = (uint8_t)n;
 }
 
@@ -1129,20 +1175,20 @@ int neutral_refusal(void)
 int neutral_refusal_rank(int code)
 {
     static const int order[] = {
-        PDN_APRS_REFUSAL_NOT_ENCODABLE,       PDN_APRS_REFUSAL_INVALID_ADDRESS,
-        PDN_APRS_REFUSAL_AX25_CANNOT_CARRY,   PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY,
-        PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER, PDN_APRS_REFUSAL_INVALID_ADDRESSEE,
-        PDN_APRS_REFUSAL_INVALID_NAME,        PDN_APRS_REFUSAL_INVALID_TIMESTAMP,
-        PDN_APRS_REFUSAL_NOT_A_NUMBER,        PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE,
-        PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM,   PDN_APRS_REFUSAL_INVALID_CODE,
-        PDN_APRS_REFUSAL_INVALID_SYMBOL,      PDN_APRS_REFUSAL_INVALID_CHARACTER,
-        PDN_APRS_REFUSAL_TOO_LONG,            PDN_APRS_REFUSAL_PADDING_SPACE,
-        PDN_APRS_REFUSAL_MALFORMED,           PDN_APRS_REFUSAL_INVALID_MESSAGE_ID,
-        PDN_APRS_REFUSAL_INVALID_NMEA,        PDN_APRS_REFUSAL_EXTENSION_CONFLICT,
-        PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED,   PDN_APRS_REFUSAL_SYMBOL_MISMATCH,
-        PDN_APRS_REFUSAL_MISSING_FIELD,       PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE,
-        PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD, PDN_APRS_REFUSAL_DOES_NOT_READ_BACK,
-        PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG};
+        PDN_APRS_REFUSAL_NOT_ENCODABLE,      PDN_APRS_REFUSAL_INVALID_ADDRESS,
+        PDN_APRS_REFUSAL_INVALID_PATH,       PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER,
+        PDN_APRS_REFUSAL_INVALID_ADDRESSEE,  PDN_APRS_REFUSAL_INVALID_NAME,
+        PDN_APRS_REFUSAL_INVALID_TIMESTAMP,  PDN_APRS_REFUSAL_NOT_A_NUMBER,
+        PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM,
+        PDN_APRS_REFUSAL_INVALID_CODE,       PDN_APRS_REFUSAL_INVALID_SYMBOL,
+        PDN_APRS_REFUSAL_INVALID_CHARACTER,  PDN_APRS_REFUSAL_TOO_LONG,
+        PDN_APRS_REFUSAL_PADDING_SPACE,      PDN_APRS_REFUSAL_MALFORMED,
+        PDN_APRS_REFUSAL_INVALID_MESSAGE_ID, PDN_APRS_REFUSAL_INVALID_NMEA,
+        PDN_APRS_REFUSAL_EXTENSION_CONFLICT, PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED,
+        PDN_APRS_REFUSAL_SYMBOL_MISMATCH,    PDN_APRS_REFUSAL_MISSING_FIELD,
+        PDN_APRS_REFUSAL_VALUE_GIVEN_TWICE,  PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD,
+        PDN_APRS_REFUSAL_DOES_NOT_READ_BACK, PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG,
+        PDN_APRS_REFUSAL_AX25_CANNOT_CARRY,  PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY};
     int i;
     for (i = 0; i < (int)(sizeof order / sizeof order[0]); i++)
         if (order[i] == code)
@@ -1190,6 +1236,81 @@ static int tnc2_address_ok(const char *a, size_t n)
     return 1;
 }
 
+/* 1 if a "warning:code" or "error:code" names a defect of the inner packet's
+   header, which a header written from its fields cannot carry. */
+static int inner_header_diagnostic(const char *name)
+{
+    const char *colon = strchr(name, ':');
+    return colon && (strcmp(colon + 1, "multiple-used-markers") == 0 || strcmp(colon + 1, "empty-path-entry") == 0 ||
+                     strcmp(colon + 1, "empty-destination") == 0);
+}
+
+/* Warnings and errors the neutral data gives its inner packet, which the C
+   data has no list for. The bytes written are decoded, as the encoder's
+   read-back would, and the warnings and errors compared with those given as
+   a multiset: when they are the same, the data is the decoded packet as
+   received, which is what the decoder's mark says; when they are not, no
+   form of the inner packet carries them, value-has-no-form. */
+static void inner_diagnostics_given(const jval *p, pdn_aprs_third_party *t)
+{
+    const jval *dg = json_get(p, "diagnostics");
+    int given[2][PDN_APRS_CODE_COUNT];
+    int same = 1, rc, k, c;
+    uint8_t info[2 * PDN_APRS_MAX_INFO + 1];
+    pdn_aprs_packet *in = (pdn_aprs_packet *)malloc(sizeof *in);
+    pdn_aprs_packet *out_pk = (pdn_aprs_packet *)malloc(sizeof *out_pk);
+    memset(given, 0, sizeof given);
+    for (k = 0; dg && dg->t == J_ARR && k < (int)dg->count; k++) {
+        const char *name = dg->items[k]->t == J_STR ? dg->items[k]->str : "";
+        const char *colon = strchr(name, ':');
+        int sev = strncmp(name, "warning:", 8) == 0 ? 0 : strncmp(name, "error:", 6) == 0 ? 1 : -1;
+        int code = colon ? pdn_aprs_code_from_name(colon + 1, strlen(colon + 1)) : 0;
+        if (sev < 0)
+            continue;
+        if (code > 0 && code < PDN_APRS_CODE_COUNT)
+            given[sev][code]++;
+        else
+            same = 0;
+    }
+    /* the decoder's own reading of the bytes: its data carries its mark */
+    if (in && out_pk && t->len + 1u <= sizeof info) {
+        pdn_aprs_header h;
+        memset(&h, 0, sizeof h);
+        memcpy(h.source, "N0CALL", 7);
+        memcpy(h.destination, "APZ001", 7);
+        h.q_construct = -1;
+        info[0] = '}';
+        memcpy(info + 1, t->packet, t->len);
+        rc = pdn_aprs_decode_info(&h, info, (size_t)t->len + 1, NULL, out_pk);
+        rc = rc == PDN_APRS_OK && out_pk->data.type == PDN_APRS_TYPE_THIRD_PARTY
+                 ? pdn_aprs_decode_third_party(&out_pk->data, NULL, in)
+                 : PDN_APRS_ERR_ARGUMENT;
+    } else {
+        rc = PDN_APRS_ERR_ARGUMENT;
+    }
+    if (rc != PDN_APRS_OK) {
+        same = 0;
+    } else {
+        for (k = 0; k < in->diagnostic_count; k++) {
+            int sev = in->diagnostics[k].severity == PDN_APRS_SEVERITY_WARNING ? 0
+                      : in->diagnostics[k].severity == PDN_APRS_SEVERITY_ERROR ? 1
+                                                                                : -1;
+            if (sev >= 0)
+                given[sev][in->diagnostics[k].code]--;
+        }
+        for (k = 0; k < 2; k++)
+            for (c = 0; c < PDN_APRS_CODE_COUNT; c++)
+                if (given[k][c])
+                    same = 0;
+    }
+    if (same)
+        t->as_received = out_pk->data.as.third_party.as_received;
+    else
+        note_pending(PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "no form of the inner packet carries the warning or error given");
+    free(in);
+    free(out_pk);
+}
+
 /* A third-party packet's inner packet, written as its TNC2 form: the header,
    with * on the last used path entry, and the inner data encoded. Returns 1,
    0 when the C data cannot hold it, or -1 when the encoder refuses it. */
@@ -1209,6 +1330,7 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
     size_t n = 0, k, last = 0;
     int rc, i;
     const char *header_fault = NULL;
+    int given_diagnostics = 0;
     memset(&enc, 0, sizeof enc);
     keys_only(cv, p, keys);
     if (cv->bad)
@@ -1216,12 +1338,21 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
     if (!data)
         return cannot(cv, "has no data", "packet");
     {
-        /* a tolerated defect in the inner packet is part of its data, but an
-           info is not a defect (ruling F10) */
+        /* a tolerated defect in the inner header is part of its data and no
+           header written carries it (invalid-third-party-header); a warning
+           or an error the bytes would carry in the inner information field
+           is compared with what they decode to once they are written (below).
+           An info is not a defect and is not compared (README Read-back). */
         const jval *dg = json_get(p, "diagnostics");
-        for (k = 0; dg && dg->t == J_ARR && k < dg->count; k++)
-            if (dg->items[k]->t != J_STR || strncmp(dg->items[k]->str, "info:", 5) != 0)
+        for (k = 0; dg && dg->t == J_ARR && k < dg->count; k++) {
+            const char *name = dg->items[k]->t == J_STR ? dg->items[k]->str : "";
+            if (dg->items[k]->t == J_STR && strncmp(name, "info:", 5) == 0)
+                continue;
+            if (dg->items[k]->t == J_STR && inner_header_diagnostic(name))
                 header_fault = "inner packet: a tolerated defect is part of its data";
+            else
+                given_diagnostics = 1;
+        }
     }
     /* a header with no destination (Mic-E computes its own) */
     if (!dst[0] && !(json_gets(data, "type") && strcmp(json_gets(data, "type"), "mic-e") == 0))
@@ -1319,6 +1450,8 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         n = h + 1 + (size_t)i;
     }
     t->len = (uint16_t)n;
+    if (given_diagnostics)
+        inner_diagnostics_given(p, t);
     return 1;
 }
 
@@ -1653,7 +1786,7 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
         keys_only(cv, j, keys);
         bearing_in(cv, j, "bearing_degrees", &n);
         d->as.agrelo.bearing_degrees = (uint16_t)n;
-        int_ranged(cv, j, "quality", 0, 255, &n);
+        int_ranged(cv, j, "quality", 0, 255, &n, 1);
         d->as.agrelo.quality = (uint8_t)n;
         break;
     }

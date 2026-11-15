@@ -293,7 +293,11 @@ PDN_APRS__PRIVATE int pdn_aprs__path_has_gap(const pdn_aprs_header *h);
 PDN_APRS__PRIVATE int pdn_aprs__header_reads_back(const uint8_t *head, size_t n, int ax25, const pdn_aprs_header *given,
                                                   const char *dest, int as_received);
 PDN_APRS__PRIVATE void pdn_aprs__header_default(pdn_aprs_header *h);
+PDN_APRS__PRIVATE int pdn_aprs__address_valid(const char *s, size_t n);
 PDN_APRS__PRIVATE int pdn_aprs__header_strings_ok(const pdn_aprs_header *h, int destination);
+
+/* The mark (a checksum, never zero) the decoder sets in a third-party packet's as_received for the n bytes of its inner packet at p; the encoder honours it only when it matches the bytes it writes. */
+PDN_APRS__PRIVATE uint16_t pdn_aprs__third_party_mark(const uint8_t *p, size_t n);
 
 /* Compares decoded data as the vectors do (equal.c). */
 PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_aprs_data *b);
@@ -324,16 +328,23 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
 PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const pdn_aprs_weather *w, int positionless);
 PDN_APRS__PRIVATE int pdn_aprs__encode_frequency(pdn_aprs__ectx *e, const pdn_aprs_frequency *f);
 #ifdef PDN_APRS_FAULT_INJECTION
-/* Test builds only (tests/readback.c; never in the library or dist/): called
+/* Test builds only (tests/readback.c): compiled only when PDN_APRS_FAULT_INJECTION
+   is defined, which the library and dist/pdn_aprs.c as shipped never are. The #ifdef
+   blocks stay in dist/pdn_aprs.c, so the same test builds from the single file. Called
    with the bytes a field writer just wrote, before the read-back, to stand
    in for a writer that writes a wrong byte. */
 extern void (*pdn_aprs__fault_hook)(uint8_t *info, size_t len, int data_type);
 /* The same for the header bytes written (a TNC2 header, or an AX.25 address field). */
 extern void (*pdn_aprs__header_fault_hook)(uint8_t *head, size_t len, int ax25);
+/* The same for the read-back's decode of the information field: called with the packet it
+   produced, before the comparison, to stand in for a decoder that reads a diagnostic or a field
+   the bytes do not carry. */
+extern void (*pdn_aprs__decode_fault_hook)(pdn_aprs_packet *decoded);
 #endif
 PDN_APRS__PRIVATE int pdn_aprs__header_addresses_ok(const pdn_aprs_header *h, const char *dest);
 PDN_APRS__PRIVATE int pdn_aprs__write_header_tnc2(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest);
-PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest,
-                                                  int as_received);
+PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest);
+/* The refusal code (invalid-address, invalid-path) of a header as given, or 0; *why says why. */
+PDN_APRS__PRIVATE int pdn_aprs__header_fault(const pdn_aprs_header *h, const char *dest, const char **why);
 
 #endif

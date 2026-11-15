@@ -986,6 +986,7 @@ static void test_refusal_codes(void)
     pdn_aprs_encoded enc;
     CHECK(strcmp(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_INVALID_ADDRESS), "invalid-address") == 0);
     CHECK(strcmp(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_DOES_NOT_READ_BACK), "does-not-read-back") == 0);
+    CHECK(strcmp(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_INVALID_PATH), "invalid-path") == 0);
     CHECK(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_NONE) == NULL && pdn_aprs_refusal_name(99) == NULL);
 
     memset(&pos, 0, sizeof pos);

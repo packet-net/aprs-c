@@ -245,7 +245,8 @@ const char *pdn_aprs_refusal_name(int refusal)
         "invalid-nmea",
         "not-encodable",
         "does-not-read-back",
-        "information-field-too-long"};
+        "information-field-too-long",
+        "invalid-path"};
     if (refusal < 1 || refusal > (int)(sizeof names / sizeof names[0]))
         return NULL;
     return names[refusal - 1];

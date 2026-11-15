@@ -149,7 +149,7 @@ if(PDN_APRS_BUILD_TESTS)
   add_test(NAME api COMMAND pdn_aprs_api_test)
 
   # the read-back's own tests, with the library sources built with a seam that stands in for a
-  # field writer that writes a wrong byte (PDN_APRS_FAULT_INJECTION: not in the library or dist/)
+  # field writer that writes a wrong byte (PDN_APRS_FAULT_INJECTION: compiled out of the library and of dist/ as shipped)
   add_executable(pdn_aprs_readback_test tests/readback.c ${PDN_APRS_SOURCES})
   target_include_directories(pdn_aprs_readback_test PRIVATE ${PDN_APRS_INCLUDE})
   if(NOT PDN_APRS_AMALGAMATION)

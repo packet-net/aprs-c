@@ -38,6 +38,13 @@ static int address_ok(const uint8_t *s, size_t n)
     return 1;
 }
 
+/* 1 if the n bytes at s are an APRS-IS address (1-9 letters, digits or -): for the builders, which
+   judge a station's strings before they build its header. */
+PDN_APRS__PRIVATE int pdn_aprs__address_valid(const char *s, size_t n)
+{
+    return address_ok((const uint8_t *)s, n);
+}
+
 /* The source inside a third-party packet (APRS12c ch. 17): 1-9 printable
    ASCII characters other than '>' and ':', which end it. */
 static int inner_source_ok(const uint8_t *s, size_t n)
@@ -184,6 +191,25 @@ PDN_APRS__PRIVATE int pdn_aprs__path_has_gap(const pdn_aprs_header *h)
     return 0;
 }
 
+/* The fault of a header as given, which no form can carry and which is judged
+   when the header is given, before any fault of the data (README Refusal
+   reasons): PDN_APRS_REFUSAL_INVALID_ADDRESS for an address that is not 1-9
+   letters, digits or -, PDN_APRS_REFUSAL_INVALID_PATH for a path with an entry
+   not marked used before one that is, else 0. dest is the destination to
+   judge (a Mic-E report's is computed). *why is a plain reason. */
+PDN_APRS__PRIVATE int pdn_aprs__header_fault(const pdn_aprs_header *h, const char *dest, const char **why)
+{
+    if (!pdn_aprs__header_addresses_ok(h, dest)) {
+        *why = "a header address is not 1-9 letters, digits or -";
+        return PDN_APRS_REFUSAL_INVALID_ADDRESS;
+    }
+    if (pdn_aprs__path_has_gap(h)) {
+        *why = "a path entry that is not used comes before one that is, which reads back used";
+        return PDN_APRS_REFUSAL_INVALID_PATH;
+    }
+    return 0;
+}
+
 /* The last entry that is used, or -1. */
 static int last_used(const pdn_aprs_header *h)
 {
@@ -220,14 +246,14 @@ PDN_APRS__PRIVATE int pdn_aprs__write_header_tnc2(pdn_aprs__buf *b, const pdn_ap
 
 /* One AX.25 address: callsign of 1-6 upper-case letters or digits, SSID 0-15.
    An SSID written with a leading zero, or -0, is refused: a frame gives it back as no SSID. */
-static int ax25_put_address(pdn_aprs__buf *b, const char *a, int last, int hbit, int cbit, int blank_ok)
+static int ax25_put_address(pdn_aprs__buf *b, const char *a, int last, int hbit, int cbit)
 {
     size_t n = 0, i;
     int ssid = 0;
     uint8_t out[7];
     while (a[n] && a[n] != '-')
         n++;
-    if ((n == 0 && !(blank_ok && !a[0])) || n > 6)
+    if (n == 0 || n > 6)
         return 0;
     for (i = 0; i < n; i++)
         if (!(A_UPPER(a[i]) || A_DIGIT(a[i])))
@@ -247,21 +273,22 @@ static int ax25_put_address(pdn_aprs__buf *b, const char *a, int last, int hbit,
     return 1;
 }
 
-/* as_received: a decoded packet's header, whose empty destination (a defect a
-   lenient decoder tolerates) is written as six spaces, which reads back empty. */
-PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest,
-                                                  int as_received)
+/* An AX.25 frame never carries an empty or over-long address, a lower-case
+   call or an SSID it cannot hold, whatever wrote it: a packet already held,
+   whose lenient decode accepted an empty destination, is refused here as
+   well (README Read-back, Header). */
+PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest)
 {
     unsigned i, count = h->path_count;
     if (count > 8)
         return PDN_APRS_ERR_REFUSED;
     /* a command frame: C bit set in the destination, clear in the source */
-    if (!ax25_put_address(b, dest, 0, 0, 1, as_received))
+    if (!ax25_put_address(b, dest, 0, 0, 1))
         return PDN_APRS_ERR_REFUSED;
-    if (!ax25_put_address(b, h->source, count == 0, 0, 0, 0))
+    if (!ax25_put_address(b, h->source, count == 0, 0, 0))
         return PDN_APRS_ERR_REFUSED;
     for (i = 0; i < count; i++)
-        if (!ax25_put_address(b, h->path[i].call, i + 1 == count, h->path[i].marked || h->path[i].used, 0, 0))
+        if (!ax25_put_address(b, h->path[i].call, i + 1 == count, h->path[i].marked || h->path[i].used, 0))
             return PDN_APRS_ERR_REFUSED;
     pdn_aprs__putc(b, 0x03);
     pdn_aprs__putc(b, 0xF0);
