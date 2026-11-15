@@ -656,6 +656,10 @@ static int num_in(conv *cv, const jval *o, const char *k, double *out)
     if (v->t != J_NUM)
         return cannot(cv, "is not a number", k);
     *out = v->num;
+    /* NaN or an infinity is not-a-number wherever it is, even in a field the C data holds only
+       together with another (an NMEA latitude without a longitude) */
+    if (!(v->num - v->num == 0.0))
+        note_pending(PDN_APRS_REFUSAL_NOT_A_NUMBER, "a number is NaN or infinite");
     return 1;
 }
 

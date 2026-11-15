@@ -22,7 +22,13 @@
  *  - Nothing is locale-dependent.
  *  - Public names start pdn_aprs_ / PDN_APRS_.
  *
- * What 1.x promises: source compatibility only. Struct sizes depend on the
+ * What 1.x promises: source compatibility only, from 1.3.0 on. 1.3.0 itself
+ * changed three things incompatibly with 1.2.0: pdn_aprs_write_tnc2() and
+ * pdn_aprs_write_ax25() take a last argument, a pdn_aprs_encoded *result (NULL
+ * is allowed); pdn_aprs_third_party.as_received is a uint32_t hash set by the
+ * decoder, where it was a uint8_t flag; and the decoder's mark on a third-party
+ * packet is no longer a flag a program may set (see there). From 1.3.0 on no
+ * 1.x release changes a function signature or removes a name. Struct sizes depend on the
  * capacities below (which a program may override with -D), and 1.x may add a
  * field to any struct, so rebuild everything that includes this header when
  * you upgrade, and link the library statically or compile in the single file
@@ -739,8 +745,12 @@ typedef struct pdn_aprs_report {
     uint8_t mic_e_message;    /* pdn_aprs_mic_e_message */
     uint8_t old_data;         /* ' rather than ` */
     /* The altitude was sent as a /A= in the text, not in the Mic-E altitude
-       bytes (set by the decoder; the encoder writes it the same way). Outside
-       the vectors' neutral form. */
+       bytes: set by the decoder, which records where the value came from, and
+       honoured by the encoder only while a /A= holds the value exactly (a whole
+       number of feet, within 1e-6, in six digits). It never makes the encoder
+       round: on a value a /A= does not hold exactly, a program that sets it gets
+       the Mic-E altitude bytes (the nearest metre) like any other data, or a
+       refusal where neither form holds it. Outside the vectors' neutral form. */
     uint8_t altitude_in_comment;
     char type_code;           /* the device type code: ` ' > ] or space; 0 if none */
     char device_suffix[3];    /* "_%", "=" ...; "" if none */
@@ -975,16 +985,15 @@ typedef struct pdn_aprs_third_party {
        PDN_APRS_MAX_THIRD_PARTY_DEPTH (a fifth level) is not read and is
        unrecognized with invalid-third-party. The encoder ignores it. */
     uint8_t depth;
-    /* Set by the decoder, never by a program: a checksum of `packet` (never
-       zero) that says the decoder read these bytes as received, so the inner
-       packets' warnings and errors are part of the data and the encoder
-       writes them as they are. The encoder honours it only while it matches
-       the bytes being written, so edited bytes, a copied flag or any value a
-       program made up give no exemption: the encoder's read-back then
-       requires every inner packet, at every depth, to decode with no warning
-       or error (infos are not compared). Data a program builds has 0; leave
-       it 0. */
-    uint16_t as_received;
+    /* Set by the decoder: a 32-bit hash of `packet` (never zero) that says the decoder read
+       these bytes as received, so the inner packets' warnings and errors are part of the data
+       and the encoder writes them as they are. The encoder honours it only while it matches the
+       bytes being written, so edited bytes, a copied flag or a bare 1 give no exemption: the
+       encoder's read-back then requires every inner packet, at every depth, to decode with no
+       warning or error (infos are not compared). Data a program builds has 0; leave it 0. This
+       is a guard against accidental edits, not against a program that sets it on purpose: the
+       hash is public and not a signature. */
+    uint32_t as_received;
 } pdn_aprs_third_party;
 
 /* User-defined data {UX... (APRS12c ch. 19): bytes as sent. */
@@ -1274,7 +1283,7 @@ PDN_APRS_API int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_
  * with an entry not marked used before one that is (INVALID_PATH), both
  * judged before the data; then the data's own codes, the read-back's, the
  * size, and last what a line cannot carry (TNC2_CANNOT_CARRY): a CR or LF
- * inside the information field (one at its very end is carried) or a NUL,
+ * inside the information field (a run of them at its very end, which a decoder takes off as one trailing-line-break, is carried) or a NUL,
  * since the line is a string. On any failure buf holds nothing of use (it is
  * zeroed).
  */
@@ -1583,7 +1592,7 @@ PDN_APRS_API int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_
    holds (a source with a space, _ or *, say), PDN_APRS_REFUSAL_INVALID_PATH
    for a path with an entry not used before one that is, then what the form
    cannot carry: for a line PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY (a CR or LF
-   inside the information field, one at the very end being carried, or a NUL,
+   inside the information field, the run at its very end being carried, or a NUL,
    since a line is a NUL-terminated string), for a frame
    PDN_APRS_REFUSAL_AX25_CANNOT_CARRY (an empty, over-long or lower-case call,
    an SSID a frame cannot hold, over 8 path entries); and

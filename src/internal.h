@@ -297,7 +297,7 @@ PDN_APRS__PRIVATE int pdn_aprs__address_valid(const char *s, size_t n);
 PDN_APRS__PRIVATE int pdn_aprs__header_strings_ok(const pdn_aprs_header *h, int destination);
 
 /* The mark (a checksum, never zero) the decoder sets in a third-party packet's as_received for the n bytes of its inner packet at p; the encoder honours it only when it matches the bytes it writes. */
-PDN_APRS__PRIVATE uint16_t pdn_aprs__third_party_mark(const uint8_t *p, size_t n);
+PDN_APRS__PRIVATE uint32_t pdn_aprs__third_party_mark(const uint8_t *p, size_t n);
 
 /* Compares decoded data as the vectors do (equal.c). */
 PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_aprs_data *b);

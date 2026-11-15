@@ -186,7 +186,13 @@ static int report_eq(const pdn_aprs_report *a, const pdn_aprs_report *b, int typ
         return 0;
     if (a->has_altitude) {
         double want = rnd(b->altitude_feet);
-        if (mic && !a->altitude_in_comment) {
+        if (mic && a->altitude_in_comment) {
+            /* read from a /A=, which holds a whole number of feet within its six digits: the
+               data given must be exactly that, or the bytes written are not the value given */
+            double rb = rnd(b->altitude_feet);
+            if (!(fabs(b->altitude_feet - rb) <= 1e-6 && rb >= -99999 && rb <= 999999))
+                return 0;
+        } else if (mic) {
             want = rnd(b->altitude_feet * 0.3048) * (1.0 / 0.3048);
         } else if (!mic && comp && b->has_compression && b->compression.source == PDN_APRS_SOURCE_GGA) {
             double feet = b->altitude_feet, cs = feet < 1 ? 0.0 : fmin(rnd(log(feet) / log(1.002)), 8280.0);

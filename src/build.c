@@ -63,6 +63,8 @@ static int station_header(const pdn_aprs_station *st, pdn_aprs_header *h, pdn_ap
         e->call[n] = 0;
         h->path_count++;
         p = comma ? comma + 1 : NULL;
+        if (p && !*p)
+            return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESS, "a path entry is empty or longer than an address can be");
     }
     return PDN_APRS_OK;
 }
@@ -109,6 +111,9 @@ static int header_fault_of(const pdn_aprs_station *st, int mic_e, pdn_aprs_encod
         if (!marked)
             unused = 1;
         p = comma ? comma + 1 : NULL;
+        if (p && !*p) /* a path ending in a comma has an empty last entry, as one in the middle */
+            return fail(result, PDN_APRS_ERR_REFUSED, PDN_APRS_REFUSAL_INVALID_ADDRESS,
+                        "a header address is not 1-9 letters, digits or -");
     }
     /* an entry used (marked) after one not used: no form carries it; the entries
        after the last mark are unused and no fault */

@@ -939,6 +939,106 @@ static void test_writer_codes(void)
     free(inner);
 }
 
+/* ---- the second review (findings 1 to 6) and R28 ---- */
+
+static int contains(const uint8_t *p, size_t n, const char *what)
+{
+    size_t k = strlen(what), i;
+    for (i = 0; i + k <= n; i++)
+        if (memcmp(p + i, what, k) == 0)
+            return 1;
+    return 0;
+}
+
+static void test_second_review(void)
+{
+    pdn_aprs_encoded enc;
+    pdn_aprs_data d;
+    pdn_aprs_header h;
+    static uint8_t buf[600];
+    char line[600];
+    long k;
+    int n;
+    no_fault();
+    memset(&h, 0, sizeof h);
+    h.q_construct = -1;
+    strcpy(h.source, "N0CALL");
+    strcpy(h.destination, "APZ001");
+
+    /* 1: altitude_in_comment is honoured only where a /A= holds the value exactly */
+    CHECK(decode_line("SP3MJK-1>URRT10:`,PJl \x1c-/`test") == PDN_APRS_OK && data.type == PDN_APRS_TYPE_MIC_E);
+    data.as.report.has_altitude = 1;
+    data.as.report.altitude_feet = 1000.4;
+    data.as.report.altitude_in_comment = 1;
+    n = encode(&enc);
+    CHECK(n > 0 && !contains(out, (size_t)n, "/A="));
+    data.as.report.altitude_feet = 1000;
+    n = encode(&enc);
+    CHECK(n > 0 && contains(out, (size_t)n, "/A=001000"));
+    data.as.report.altitude_feet = 1000.4;
+    data.as.report.altitude_in_comment = 0;
+    CHECK(encode(&enc) > 0);
+
+    /* 2: the mark cannot be found by brute force at 16 bits: no edit of the bytes among the first
+       200,000 carries the decoded packet's mark */
+    CHECK(decode_line("N0CALL>APZ001:}G4ABC>APZ001:>hello") == PDN_APRS_OK && data.as.third_party.as_received > 0xFFFF);
+    {
+        pdn_aprs_data e = data;
+        int wrote = 0;
+        for (k = 0; k < 200000 && !wrote; k++) {
+            int m = sprintf(line, "G4ABC>APZ001:>a\001b%06ld", k);
+            e.as.third_party.len = (uint16_t)m;
+            memcpy(e.as.third_party.packet, line, (size_t)m);
+            wrote = pdn_aprs_encode_info(&e, NULL, buf, sizeof buf, &enc) > 0;
+        }
+        CHECK(!wrote);
+    }
+
+    /* 3: nesting past the fourth level is invalid-third-party-header through the API too */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_THIRD_PARTY;
+    strcpy(line, "A>B:}A>B:}A>B:}A>B:}A>B:>hi");
+    d.as.third_party.len = (uint16_t)strlen(line);
+    memcpy(d.as.third_party.packet, line, d.as.third_party.len);
+    CHECK(pdn_aprs_encode_info(&d, NULL, buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_INVALID_THIRD_PARTY_HEADER);
+    strcpy(line, "A>B:}A>B:}A>B:}A>B:>hi"); /* four deep is fine */
+    d.as.third_party.len = (uint16_t)strlen(line);
+    memcpy(d.as.third_party.packet, line, d.as.third_party.len);
+    CHECK(pdn_aprs_encode_info(&d, NULL, buf, sizeof buf, &enc) > 0);
+
+    /* 6: nothing to encode is not-encodable before a header fault; a path ending in a comma is an empty entry */
+    memset(&d, 0, sizeof d);
+    strcpy(h.source, "a b");
+    CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE);
+    strcpy(h.source, "N0CALL");
+    CHECK(build_status("WIDE1-1,", 0, &enc) == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_ADDRESS);
+    CHECK(build_status("WIDE1-1,,WIDE2-1", 0, &enc) == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_INVALID_ADDRESS);
+    CHECK(build_status("WIDE1-1", 0, &enc) > 0);
+
+    /* R28 3: test data with a line break inside is an information field; only one ending in it is refused */
+    memset(&d, 0, sizeof d);
+    d.type = PDN_APRS_TYPE_TEST;
+    memcpy(d.as.test.data, "a\nb", 3);
+    d.as.test.data_len = 3;
+    CHECK(pdn_aprs_encode_info(&d, NULL, buf, sizeof buf, &enc) == 4);
+    CHECK(pdn_aprs_encode_tnc2(&h, &d, NULL, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY);
+    CHECK(pdn_aprs_encode_ax25(&h, &d, NULL, buf, sizeof buf, &enc) > 0);
+    memcpy(d.as.test.data, "ab\n", 3);
+    CHECK(pdn_aprs_encode_info(&d, NULL, buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_INVALID_CHARACTER);
+
+    /* R28 6: a corridor width on an area that is not a line */
+    CHECK(decode_line("N0CALL>APZ001:!4903.50N/07201.75W-Test") == PDN_APRS_OK);
+    data.as.report.has_area = 1;
+    data.as.report.area.shape = PDN_APRS_AREA_OPEN_CIRCLE;
+    data.as.report.area.has_corridor = 1;
+    data.as.report.area.corridor_width_miles = 5;
+    CHECK(encode(&enc) == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED);
+}
+
 int main(void)
 {
     test_every_type();
@@ -953,6 +1053,7 @@ int main(void)
     test_header_order_and_forms();
     test_header_diagnostics();
     test_writer_codes();
+    test_second_review();
     no_fault();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
