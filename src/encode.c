@@ -2929,8 +2929,8 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
        to make room for the header, which for Mic-E carries what the encoder
        computed */
     /* the refusal order (README Refusal reasons): an address that is no
-       address first, then the data's faults, then the read-back's, then a
-       header the form cannot carry, and the size last. A header the form
+       address first, then the data's faults, then the read-back's, then the
+       size, and a header the form cannot carry last. A header the form
        cannot carry is noted here and raised after the data is judged. */
     {
         /* Mic-E computes only its destination, so the source and path are
@@ -2954,13 +2954,13 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
         }
     }
     n = encode_info(data, options, buf, cap, encoded, builder);
-    if (n < 0 && !(cannot_reason && encoded->refusal == PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG))
+    if (n < 0)
         return n;
     if (cannot_reason) {
         encoded->len = 0;
         encoded->refusal = ax25 ? PDN_APRS_REFUSAL_AX25_CANNOT_CARRY : PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY;
         encoded->reason = cannot_reason;
-        if (n >= 0 && buf && cap)
+        if (buf && cap)
             memset(buf, 0, cap < (size_t)n ? cap : (size_t)n);
         return PDN_APRS_ERR_REFUSED;
     }
