@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+Round 5 of the shared vectors (aprs-vectors `round-5`, pinned at b118424e59fb62194ded6552c1796ad9280f188d). In a `/` or `@` position report whose timestamp is not valid, seven bytes ending in `z`, `/` or `h` followed by an uncompressed position (`@R30549z2831.07N/08142.92W_015/001`) are read as a garbled timestamp and the position is read after them, with `malformed-timestamp`; before, a garbled timestamp could read as a compressed position straight after the DTI.
+
 ## 1.2.0 (2026-11-14)
 
 Round 4 of the shared vectors (aprs-vectors `round-4`, pinned at 656d583a521a2c0d9b743a18a35e19496274b40f, version 1.2), and the fixes from the November 2026 review. Licence: this library has always been MIT and still is (it was never AGPL-3.0-or-later, unlike the other libraries' versions up to 1.1.0); the vectors it is tested against are now CC0 (their tools MIT).

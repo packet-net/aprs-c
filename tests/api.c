@@ -1896,6 +1896,55 @@ static void test_round5(void)
           !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_OUT_OF_RANGE_VALUE, -1));
 }
 
+/* A garbled timestamp before an uncompressed position: seven bytes ending in z, / or h
+   and an uncompressed position after them win over any reading straight after the DTI. */
+static void test_garbled_timestamp(void)
+{
+    static const char suffix[] = {'z', '/', 'h'};
+    static const char dti[] = {'/', '@'};
+    pdn_aprs_decode_options strict;
+    unsigned i, j;
+    char info[96];
+    memset(&strict, 0, sizeof strict);
+    strict.strict = 1;
+    for (i = 0; i < 3; i++) {
+        for (j = 0; j < 2; j++) {
+            const pdn_aprs_report *r;
+            int n = snprintf(info, sizeof info, "N0CALL>APZ001:%cR30549%c2831.07N/08142.92W_015/001g006t058", dti[j], suffix[i]);
+            CHECK(n > 0 && pdn_aprs_decode_tnc2(info, (size_t)n, NULL, &pkt) == PDN_APRS_OK &&
+                  (pkt.data.type == PDN_APRS_TYPE_WEATHER || pkt.data.type == PDN_APRS_TYPE_POSITION));
+            r = &pkt.data.as.report;
+            CHECK(pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MALFORMED_TIMESTAMP, PDN_APRS_SEVERITY_WARNING));
+            CHECK(!r->compressed && r->latitude > 28.5 && r->latitude < 28.6 && r->longitude < -81.7 &&
+                  r->timestamp[0] == 0 && r->messaging == (dti[j] == '@'));
+            CHECK(pdn_aprs_decode_tnc2(info, (size_t)n, &strict, &pkt) == PDN_APRS_OK &&
+                  pkt.data.type == PDN_APRS_TYPE_UNRECOGNIZED &&
+                  pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MALFORMED_TIMESTAMP, PDN_APRS_SEVERITY_ERROR));
+        }
+    }
+    /* lower-case hemisphere letters and ambiguity after the seven bytes */
+    CHECK(decode("N0CALL>APZ001:/R30549z2831.07n/08142.92w-") == PDN_APRS_OK &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MALFORMED_TIMESTAMP, PDN_APRS_SEVERITY_WARNING) &&
+          !pkt.data.as.report.compressed && pkt.data.as.report.latitude > 28.5 && pkt.data.as.report.latitude < 28.6);
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001:/R30549z2831.07n/08142.92w-", 41, &strict, &pkt) == PDN_APRS_OK &&
+          pkt.data.type == PDN_APRS_TYPE_UNRECOGNIZED &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MALFORMED_TIMESTAMP, PDN_APRS_SEVERITY_ERROR));
+    CHECK(decode("N0CALL>APZ001:@R30549h28  .  N/081  .  W-") == PDN_APRS_OK &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MALFORMED_TIMESTAMP, PDN_APRS_SEVERITY_WARNING) &&
+          !pkt.data.as.report.compressed && pkt.data.as.report.ambiguity == 4);
+    /* a seventh byte that is not a time indicator: the old order (a compressed reading straight after the DTI) */
+    CHECK(decode("N0CALL>APZ001:/R30549x2831.07N/08142.92W_015/001g006t058") == PDN_APRS_OK &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MALFORMED_TIMESTAMP, PDN_APRS_SEVERITY_WARNING) &&
+          pkt.data.as.report.compressed);
+    /* a compressed position after the seven bytes does not win */
+    CHECK(decode("N0CALL>APZ001:/R30549z/5L!!<*e7>7P[") == PDN_APRS_OK &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MALFORMED_TIMESTAMP, PDN_APRS_SEVERITY_WARNING) &&
+          pkt.data.as.report.compressed);
+    /* too short to hold a position after the seven bytes: no overrun, the old reading */
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001:/R30549z", 22, NULL, &pkt) >= 0);
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001:/R30549z2831.07N/0814", 35, NULL, &pkt) >= 0);
+}
+
 /* A Mic-E info field decoded with no device table. */
 static int decode_mice_bare(char type_code, const char *tail)
 {
@@ -2075,6 +2124,7 @@ int main(void)
     test_capability_without_value();
     test_round4();
     test_round5();
+    test_garbled_timestamp();
     test_mic_e_codes();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

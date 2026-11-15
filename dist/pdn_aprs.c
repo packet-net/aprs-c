@@ -2180,10 +2180,18 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_position_report(pdn_aprs__dctx *c)
             return;
         }
         {
-            /* the position straight after the DTI if that position decodes,
-               else after seven bytes */
+            /* after seven bytes when they end in a time indicator and an
+               uncompressed position follows; else the position straight after
+               the DTI if that decodes, else after seven bytes */
             size_t at = 0;
-            if (position_decodes(c, 1, r)) {
+            uint8_t seventh = c->len > 8 ? c->info[7] : 0;
+            if ((seventh == 'z' || seventh == '/' || seventh == 'h') && c->info[8] >= '0' && c->info[8] <= '9' &&
+                position_decodes(c, 8, r)) {
+                /* seven bytes ending in a time indicator, then an uncompressed
+                   position: a garbled timestamp, whatever reads straight after
+                   the DTI */
+                at = 8;
+            } else if (position_decodes(c, 1, r)) {
                 at = 1;
             } else {
                 memset(r, 0, sizeof *r);
