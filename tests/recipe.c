@@ -638,6 +638,8 @@ static int build_other(const char *report, const jval *a, const pdn_aprs_station
     return cannot("report", "a kind the builder does not make");
 }
 
+static int write_ax25; /* build the packet as an AX.25 frame, not a TNC2 line */
+
 static int build(const jval *r, uint8_t *buf, size_t cap)
 {
     const jval *st = json_get(r, "station"), *a = json_get(r, "args"), *pv;
@@ -646,6 +648,7 @@ static int build(const jval *r, uint8_t *buf, size_t cap)
     char path[256] = "";
     size_t k;
     memset(&station, 0, sizeof station);
+    station.ax25 = (uint8_t)write_ax25;
     station.source = text_arg(st, "source");
     station.destination = text_arg(st, "destination");
     station.devices = dev_table();
@@ -672,9 +675,10 @@ static size_t recipe_path_count(const jval *in)
     return pv && pv->t == J_ARR ? pv->count : 0;
 }
 
-int recipe_build(const jval *in, uint8_t *buf, size_t cap, recipe_result *res)
+int recipe_build_as(const jval *in, uint8_t *buf, size_t cap, recipe_result *res, int ax25)
 {
     int rc;
+    write_ax25 = ax25;
     why[0] = 0;
     why_limit = 0;
     why_limit_kind = 0;
@@ -748,4 +752,9 @@ int recipe_build(const jval *in, uint8_t *buf, size_t cap, recipe_result *res)
         res->len = (size_t)rc;
     }
     return res->kind;
+}
+
+int recipe_build(const jval *in, uint8_t *buf, size_t cap, recipe_result *res)
+{
+    return recipe_build_as(in, buf, cap, res, 0);
 }

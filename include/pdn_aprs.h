@@ -975,6 +975,12 @@ typedef struct pdn_aprs_third_party {
        PDN_APRS_MAX_THIRD_PARTY_DEPTH (a fifth level) is not read and is
        unrecognized with invalid-third-party. The encoder ignores it. */
     uint8_t depth;
+    /* The inner packets' warnings and errors are part of the data (set by
+       the decoder, which read the packet as received): the encoder writes
+       them as they are. Data a program builds has 0, and the encoder's
+       read-back then requires every inner packet, at every depth, to decode
+       with no warning or error (infos are not compared). */
+    uint8_t as_received;
 } pdn_aprs_third_party;
 
 /* User-defined data {UX... (APRS12c ch. 19): bytes as sent. */

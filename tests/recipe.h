@@ -26,4 +26,8 @@ typedef struct recipe_result {
    result kind is returned and in res->kind. */
 int recipe_build(const jval *recipe, uint8_t *buf, size_t cap, recipe_result *res);
 
+/* The same, writing an AX.25 frame (ax25 nonzero) or a TNC2 line (0): RECIPE_BUILT has the
+   frame, in KISS form without flags or FCS, in buf[0..len). */
+int recipe_build_as(const jval *recipe, uint8_t *buf, size_t cap, recipe_result *res, int ax25);
+
 #endif

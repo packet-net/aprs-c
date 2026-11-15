@@ -284,11 +284,19 @@ PDN_APRS__PRIVATE int pdn_aprs__mic_e_suffix_known(char type_code, const uint8_t
    diagnostics). */
 PDN_APRS__PRIVATE size_t pdn_aprs__parse_tnc2_header(pdn_aprs__dctx *c, const uint8_t *s, size_t n,
                                                      pdn_aprs_header *h, int third_party);
+/* The address field, control and PID of an AX.25 UI frame; *info_at is where the information field starts. */
+PDN_APRS__PRIVATE int pdn_aprs__parse_ax25_header(pdn_aprs__dctx *c, const uint8_t *f, size_t len,
+                                                  pdn_aprs_header *h, size_t *info_at);
+/* 1 if an entry used comes after one that is not: no TNC2 line or AX.25 frame carries such a path. */
+PDN_APRS__PRIVATE int pdn_aprs__path_has_gap(const pdn_aprs_header *h);
+/* 1 if the header written (a TNC2 header, or an AX.25 address field) reads back as the header given. */
+PDN_APRS__PRIVATE int pdn_aprs__header_reads_back(const uint8_t *head, size_t n, int ax25, const pdn_aprs_header *given,
+                                                  const char *dest, int as_received);
 PDN_APRS__PRIVATE void pdn_aprs__header_default(pdn_aprs_header *h);
 PDN_APRS__PRIVATE int pdn_aprs__header_strings_ok(const pdn_aprs_header *h, int destination);
 
 /* Compares decoded data as the vectors do (equal.c). */
-PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_aprs_data *b, int loose);
+PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_aprs_data *b);
 
 /* ---- encoding (encode.c) ---- */
 
@@ -310,10 +318,17 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
 PDN_APRS__PRIVATE int pdn_aprs__refuse(pdn_aprs__ectx *e, int code, const char *why);
 /* Where a refusal code comes in the README's Refusal reasons order. */
 PDN_APRS__PRIVATE int pdn_aprs__refusal_rank(int code);
-PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_data *d);
 PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_report *r);
 PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const pdn_aprs_weather *w, int positionless);
 PDN_APRS__PRIVATE int pdn_aprs__encode_frequency(pdn_aprs__ectx *e, const pdn_aprs_frequency *f);
+#ifdef PDN_APRS_FAULT_INJECTION
+/* Test builds only (tests/readback.c; never in the library or dist/): called
+   with the bytes a field writer just wrote, before the read-back, to stand
+   in for a writer that writes a wrong byte. */
+extern void (*pdn_aprs__fault_hook)(uint8_t *info, size_t len, int data_type);
+/* The same for the header bytes written (a TNC2 header, or an AX.25 address field). */
+extern void (*pdn_aprs__header_fault_hook)(uint8_t *head, size_t len, int ax25);
+#endif
 PDN_APRS__PRIVATE int pdn_aprs__write_header_tnc2(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest);
 PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest);
 

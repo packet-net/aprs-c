@@ -707,24 +707,14 @@ static int ax25_address(pdn_aprs__dctx *c, const uint8_t *a, char *out, int *nul
     return 1;
 }
 
-int pdn_aprs_decode_ax25(const void *frame, size_t len, const pdn_aprs_decode_options *options,
-                         pdn_aprs_packet *packet)
+/* The address field of an AX.25 UI frame, control and PID: the header into
+   h, and in *info_at where the information field starts. Returns
+   PDN_APRS_OK, or PDN_APRS_ERR_HEADER with the reason in c's diagnostics. */
+PDN_APRS__PRIVATE int pdn_aprs__parse_ax25_header(pdn_aprs__dctx *c, const uint8_t *f, size_t len,
+                                                  pdn_aprs_header *h, size_t *info_at)
 {
-    const uint8_t *f = (const uint8_t *)frame;
-    pdn_aprs__dctx c;
     size_t naddr = 0, i, at;
     int nul_padded = 0, bad_chars = 0, last_marked = -1, k, empty_destination, empty_path = 0;
-    pdn_aprs_header *h;
-    if (!packet || (!frame && len))
-        return PDN_APRS_ERR_ARGUMENT;
-    packet_reset(packet);
-    memset(&c, 0, sizeof c);
-    c.opt = options;
-    c.pkt = packet;
-    c.data = &packet->data;
-    h = &packet->header;
-    packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
-    packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
     /* addresses end at the one whose low bit is set */
     for (i = 0; i + 7 <= len; i += 7) {
         naddr++;
@@ -732,29 +722,29 @@ int pdn_aprs_decode_ax25(const void *frame, size_t len, const pdn_aprs_decode_op
             break;
     }
     if (i + 7 > len || naddr < 2 || i + 7 + 2 > len) {
-        pdn_aprs__fail(&c, PDN_APRS_CODE_NOT_APRS_FRAME);
+        pdn_aprs__fail(c, PDN_APRS_CODE_NOT_APRS_FRAME);
         return PDN_APRS_ERR_HEADER;
     }
     at = i + 7;
     if ((f[at] & ~0x10u) != 0x03 || f[at + 1] != 0xF0) {
-        pdn_aprs__fail(&c, PDN_APRS_CODE_NOT_APRS_FRAME);
+        pdn_aprs__fail(c, PDN_APRS_CODE_NOT_APRS_FRAME);
         return PDN_APRS_ERR_HEADER;
     }
     if (naddr - 2 > 8) {
-        pdn_aprs__fail(&c, PDN_APRS_CODE_TOO_MANY_DIGIPEATERS);
+        pdn_aprs__fail(c, PDN_APRS_CODE_TOO_MANY_DIGIPEATERS);
         return PDN_APRS_ERR_HEADER;
     }
-    if (ax25_address(&c, f + 7, h->source, &nul_padded, &bad_chars) != 1 ||
-        (k = ax25_address(&c, f, h->destination, &nul_padded, &bad_chars)) < 0) {
-        pdn_aprs__fail(&c, PDN_APRS_CODE_INVALID_ADDRESS);
+    if (ax25_address(c, f + 7, h->source, &nul_padded, &bad_chars) != 1 ||
+        (k = ax25_address(c, f, h->destination, &nul_padded, &bad_chars)) < 0) {
+        pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_ADDRESS);
         return PDN_APRS_ERR_HEADER;
     }
     empty_destination = k == 0;
     for (i = 2; i < naddr; i++) {
         pdn_aprs_path_entry *e = &h->path[h->path_count];
-        k = ax25_address(&c, f + 7 * i, e->call, &nul_padded, &bad_chars);
+        k = ax25_address(c, f + 7 * i, e->call, &nul_padded, &bad_chars);
         if (k < 0) {
-            pdn_aprs__fail(&c, PDN_APRS_CODE_INVALID_ADDRESS);
+            pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_ADDRESS);
             return PDN_APRS_ERR_HEADER;
         }
         if (k == 0) {
@@ -770,15 +760,38 @@ int pdn_aprs_decode_ax25(const void *frame, size_t len, const pdn_aprs_decode_op
     }
     for (i = 0; (int)i <= last_marked; i++)
         h->path[i].used = 1;
-    if (nul_padded && !pdn_aprs__tolerate(&c, PDN_APRS_CODE_NUL_PADDED_ADDRESS))
+    if (nul_padded && !pdn_aprs__tolerate(c, PDN_APRS_CODE_NUL_PADDED_ADDRESS))
         return PDN_APRS_ERR_HEADER;
-    if (bad_chars && !pdn_aprs__tolerate(&c, PDN_APRS_CODE_INVALID_AX25_ADDRESS_CHARACTERS))
+    if (bad_chars && !pdn_aprs__tolerate(c, PDN_APRS_CODE_INVALID_AX25_ADDRESS_CHARACTERS))
         return PDN_APRS_ERR_HEADER;
-    if (empty_destination && !pdn_aprs__tolerate(&c, PDN_APRS_CODE_EMPTY_DESTINATION))
+    if (empty_destination && !pdn_aprs__tolerate(c, PDN_APRS_CODE_EMPTY_DESTINATION))
         return PDN_APRS_ERR_HEADER;
-    if (empty_path && !pdn_aprs__tolerate(&c, PDN_APRS_CODE_EMPTY_PATH_ENTRY))
+    if (empty_path && !pdn_aprs__tolerate(c, PDN_APRS_CODE_EMPTY_PATH_ENTRY))
         return PDN_APRS_ERR_HEADER;
+    *info_at = at + 2;
+    return PDN_APRS_OK;
+}
+
+int pdn_aprs_decode_ax25(const void *frame, size_t len, const pdn_aprs_decode_options *options,
+                         pdn_aprs_packet *packet)
+{
+    const uint8_t *f = (const uint8_t *)frame;
+    pdn_aprs__dctx c;
+    size_t at = 0;
+    int rc;
+    if (!packet || (!frame && len))
+        return PDN_APRS_ERR_ARGUMENT;
+    packet_reset(packet);
+    memset(&c, 0, sizeof c);
+    c.opt = options;
+    c.pkt = packet;
+    c.data = &packet->data;
+    packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
+    packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
+    rc = pdn_aprs__parse_ax25_header(&c, f, len, &packet->header, &at);
+    if (rc != PDN_APRS_OK)
+        return rc;
     packet->header_ok = 1;
     packet->data.reason = 0;
-    return decode_info_into(packet, options, f + at + 2, len - at - 2, 1, 0);
+    return decode_info_into(packet, options, f + at, len - at, 1, 0);
 }

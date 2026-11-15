@@ -685,7 +685,9 @@ static void check_build_case(const jval *c, const char *id)
     uint8_t buf[2048];
     recipe_result res;
     char why[512];
-    if (recipe_build(json_get(json_get(c, "input"), "build"), buf, sizeof buf - 1, &res) == RECIPE_LIMIT) {
+    const char *write = json_gets(json_get(c, "input"), "write");
+    int frame = write && strcmp(write, "ax25") == 0;
+    if (recipe_build_as(json_get(json_get(c, "input"), "build"), buf, sizeof buf - 1, &res, frame) == RECIPE_LIMIT) {
         /* the library's fixed capacity, not a reading (README Implementation
            limits), where the recipe really needs more than it holds */
         if (!needs_more_than(c, NULL, res.limit)) {
@@ -708,11 +710,27 @@ static void check_build_case(const jval *c, const char *id)
         report(id, "build", res.kind == RECIPE_REFUSED && (!wcode || (res.refusal && strcmp(res.refusal, wcode) == 0)),
                why, NULL, NULL);
     } else {
-        const char *want = json_gets(expect, "tnc2");
-        int ok = res.kind == RECIPE_BUILT && want && strlen(want) == res.len && memcmp(buf, want, res.len) == 0;
-        if (res.kind == RECIPE_BUILT)
-            snprintf(why, sizeof why, "built %s, want %s", ascii(buf, (int)res.len), want ? want : "?");
-        else
+        const char *want = json_gets(expect, frame ? "ax25_hex" : "tnc2");
+        int ok;
+        if (frame) {
+            /* the frame as hex, compared as bytes (either case of digit) */
+            char got[2 * 512 + 1];
+            size_t k;
+            ok = 0;
+            for (k = 0; res.kind == RECIPE_BUILT && k < res.len && k < 512; k++)
+                snprintf(got + 2 * k, 3, "%02X", buf[k]);
+            if (res.kind == RECIPE_BUILT && want && strlen(want) == 2 * res.len && res.len <= 512) {
+                for (k = 0, ok = 1; k < 2 * res.len; k++)
+                    ok = ok && (want[k] & ~0x20) == (got[k] & ~0x20);
+            }
+            if (res.kind == RECIPE_BUILT)
+                snprintf(why, sizeof why, "built frame %.200s, want %.200s", res.len <= 512 ? got : "(long)", want ? want : "?");
+        } else {
+            ok = res.kind == RECIPE_BUILT && want && strlen(want) == res.len && memcmp(buf, want, res.len) == 0;
+            if (res.kind == RECIPE_BUILT)
+                snprintf(why, sizeof why, "built %s, want %s", ascii(buf, (int)res.len), want ? want : "?");
+        }
+        if (res.kind != RECIPE_BUILT)
             snprintf(why, sizeof why, "%s: %s", res.kind == RECIPE_REFUSED ? "refused" : "unsupported",
                      res.reason ? res.reason : "");
         report(id, "build", ok, why, NULL, NULL);

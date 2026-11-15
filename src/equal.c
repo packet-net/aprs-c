@@ -1,6 +1,10 @@
 /*
- * equal.c - comparing decoded data the way the conformance vectors do:
- * strings exactly, numbers to 1e-9 relative, only fields that are present.
+ * equal.c - the read-back comparison (aprs-vectors README, Rules, Read-back):
+ * decoded data against the data given, strings byte for byte, numbers
+ * without steps to 1e-9, and a number its form holds in steps against the
+ * value given rounded once, as the Encoding rule rounds it, to the step of
+ * the form actually written (never within a tolerance). Only fields that
+ * are present are compared, in both directions.
  * The encoder uses it to check that what it wrote reads back the same.
  * SPDX-License-Identifier: MIT
  */
@@ -12,41 +16,112 @@ static int num_eq(double a, double b)
     return fabs(a - b) <= 1e-9 * (scale >= 1 ? scale : 1);
 }
 
-/* Loose comparison, for checking what the encoder wrote: numbers may differ
-   by what the format can carry (a compressed step, a hundredth of a minute,
-   a whole foot). */
-static int near(double a, double b, double abs_tol, double rel_tol, int loose)
-{
-    double scale = fabs(a) > fabs(b) ? fabs(a) : fabs(b);
-    if (num_eq(a, b))
-        return 1;
-    if (!loose)
-        return 0;
-    return fabs(a - b) <= abs_tol || fabs(a - b) <= rel_tol * scale;
-}
-
 static int str_eq(const char *a, const char *b)
 {
     return strcmp(a, b) == 0;
 }
 
-static int weather_eq(const pdn_aprs_weather *a, const pdn_aprs_weather *b, int loose)
+/* v to a whole number, halves away from zero (README Encoding). */
+static double rnd(double v)
+{
+    return pdn_aprs__round(v);
+}
+
+/* ---- the value a form holds ---- */
+
+enum { POS_HUNDREDTHS, POS_CUT, POS_THOUSANDTHS, POS_BASE91 };
+
+/* A latitude or longitude, in degrees, as its form holds it: hundredths of a
+   minute (rounded once from the degrees given, a carry going to the degree),
+   the DAO's thousandths or ninety-firsts of a hundredth, or, with ambiguity,
+   the centre of the box that holds the value (cut, a value within 1e-6 of the
+   edge above it, in the box's units, being on it). */
+static double position_value(double v, int mode, int amb)
+{
+    static const double box[5] = {1, 10, 100, 1000, 6000};
+    double mag = fabs(v), d = floor(mag), h = (mag - d) * 6000.0, r;
+    switch (mode) {
+    case POS_CUT: {
+        double b = box[amb >= 0 && amb <= 4 ? amb : 0];
+        r = d + (floor(h / b + 1e-6) * b + b / 2.0) / 6000.0;
+        break;
+    }
+    case POS_THOUSANDTHS:
+        r = d + rnd(h * 10.0) / 60000.0;
+        break;
+    case POS_BASE91:
+        r = d + rnd(h * 91.0) / 546000.0;
+        break;
+    default:
+        r = d + rnd(h) / 6000.0;
+        break;
+    }
+    return v < 0 ? -r : r;
+}
+
+/* The compressed position's steps: 380926 to a degree of latitude from the
+   north pole, 190463 of longitude from 180 west. */
+static double compressed_latitude(double v)
+{
+    double y = rnd(380926.0 * (90.0 - v));
+    return 90.0 - (y > 68574960.0 ? 68574960.0 : y) / 380926.0;
+}
+
+static double compressed_longitude(double v)
+{
+    double x = rnd(190463.0 * (180.0 + v));
+    return -180.0 + (x > 68574960.0 ? 68574960.0 : x) / 190463.0;
+}
+
+/* A speed in knots in a cs byte: 1.08^s - 1, s rounded once. */
+static double cs_speed(double knots)
+{
+    return pow(1.08, rnd(log(knots + 1.0) / log(1.08))) - 1.0;
+}
+
+/* A course in a cs byte: 4 degrees a step, north (360 and the steps either
+   side that round to it) reads back as 360. */
+static double cs_course(double degrees)
+{
+    long c = (long)rnd(degrees / 4.0) % 90;
+    return c == 0 ? 360.0 : (double)c * 4.0;
+}
+
+/* A weather value as it is read back, by its form: whole units, hundredths,
+   tenths, snowfall's three forms, or the wind in compressed cs bytes (north
+   reads back as 0). */
+static double weather_value(int i, double v, int cs)
+{
+    switch (i) {
+    case PDN_APRS_WX_WIND_DIRECTION_DEGREES:
+        return cs ? (double)((long)rnd(v / 4.0) % 90 * 4) : rnd(v);
+    case PDN_APRS_WX_WIND_SPEED_MPH:
+        return cs ? cs_speed(v / PDN_APRS__KNOTS_TO_MPH) * PDN_APRS__KNOTS_TO_MPH : rnd(v);
+    case PDN_APRS_WX_RAIN_1H_IN:
+    case PDN_APRS_WX_RAIN_24H_IN:
+    case PDN_APRS_WX_RAIN_MIDNIGHT_IN:
+        return rnd(v * 100.0) / 100.0;
+    case PDN_APRS_WX_PRESSURE_MBAR:
+        return rnd(v * 10.0) / 10.0;
+    case PDN_APRS_WX_SNOW_24H_IN: {
+        /* hundredths if that leaves it under 1, else tenths if under 10,
+           else whole inches */
+        double h = rnd(v * 100.0), t = rnd(v * 10.0);
+        return h < 100 ? h / 100.0 : t < 100 ? t / 10.0 : rnd(v);
+    }
+    default:
+        return rnd(v);
+    }
+}
+
+/* cs is set where the wind is read from compressed cs bytes. */
+static int weather_eq(const pdn_aprs_weather *a, const pdn_aprs_weather *b, int cs)
 {
     int i;
-    static const double tol[PDN_APRS_WX_COUNT] = {2.01, 0.51, 0.51, 0.51, 0.0051, 0.0051,
-                                                   0.0051, 0.51, 0.051, 0.51, 0.051, 0.51};
     for (i = 0; i < PDN_APRS_WX_COUNT; i++) {
-        double va = a->value[i], vb = b->value[i];
         if (!a->has[i] != !b->has[i])
             return 0;
-        /* a direction that rounds to 360 is written as north, which a
-           compressed wind reads back as 0 */
-        if (loose && i == PDN_APRS_WX_WIND_DIRECTION_DEGREES && fabs(va - vb) > 180)
-            va += va < vb ? 360 : -360;
-        /* snowfall is written in hundredths under 1 inch, tenths under 10,
-           and whole inches from there (ruling F3) */
-        if (a->has[i] && !near(va, vb, tol[i],
-                               i == PDN_APRS_WX_WIND_SPEED_MPH ? 0.045 : i == PDN_APRS_WX_SNOW_24H_IN ? 0.051 : 0, loose))
+        if (b->has[i] && !num_eq(a->value[i], weather_value(i, b->value[i], cs)))
             return 0;
     }
     if (a->software != b->software || !str_eq(a->unit, b->unit) || a->extra_count != b->extra_count)
@@ -57,55 +132,76 @@ static int weather_eq(const pdn_aprs_weather *a, const pdn_aprs_weather *b, int 
     return 1;
 }
 
-static int report_eq(const pdn_aprs_report *a, const pdn_aprs_report *b, int type, int loose)
+/* a is the report decoded, b the report given. */
+static int report_eq(const pdn_aprs_report *a, const pdn_aprs_report *b, int type)
 {
-    /* loose: an ambiguous position may move anywhere in its box */
-    static const double box[5] = {1e-4, 0.05 / 60 + 1e-9, 0.5 / 60 + 1e-9, 5.0 / 60 + 1e-9, 0.5 + 1e-9};
-    double tol = box[b->ambiguity <= 4 ? b->ambiguity : 0];
-    int i;
-    if (!near(a->latitude, b->latitude, tol, 0, loose) || !near(a->longitude, b->longitude, tol, 0, loose) ||
-        a->ambiguity != b->ambiguity ||
-        a->symbol.table != b->symbol.table || a->symbol.code != b->symbol.code || !a->compressed != !b->compressed)
+    int i, comp = b->compressed, mic = type == PDN_APRS_TYPE_MIC_E;
+    if (a->ambiguity != b->ambiguity || a->symbol.table != b->symbol.table || a->symbol.code != b->symbol.code ||
+        !a->compressed != !b->compressed)
         return 0;
-    /* loose: b is what the encoder was given; with no compression type, the
-       encoder writes a default one */
-    if ((!a->has_compression != !b->has_compression && !(loose && !b->has_compression)) ||
-        (a->has_compression && b->has_compression && (a->compression.fix != b->compression.fix ||
-                                a->compression.source != b->compression.source ||
-                                a->compression.origin != b->compression.origin)))
-        return 0;
-    if (!a->has_course != !b->has_course)
-        return 0;
-    if (a->has_course) {
-        double ca = a->course_degrees, cb = b->course_degrees;
-        /* loose: a course that rounds to 360 is written as north (ruling
-           E9), so 1 degree may read back as 360 */
-        if (loose && fabs(ca - cb) > 180)
-            ca += ca < cb ? 360 : -360;
-        if (!near(ca, cb, 2.01, 0, loose))
+    /* the position, in the step of the form written */
+    if (comp) {
+        if (!num_eq(a->latitude, compressed_latitude(b->latitude)) ||
+            !num_eq(a->longitude, compressed_longitude(b->longitude)))
+            return 0;
+    } else {
+        int mode = b->ambiguity ? POS_CUT
+                   : b->has_dao && b->dao.precision == PDN_APRS_DAO_THOUSANDTHS ? POS_THOUSANDTHS
+                   : b->has_dao && b->dao.precision == PDN_APRS_DAO_BASE91      ? POS_BASE91
+                                                                                : POS_HUNDREDTHS;
+        if (!num_eq(a->latitude, position_value(b->latitude, mode, b->ambiguity)) ||
+            !num_eq(a->longitude, position_value(b->longitude, mode, b->ambiguity)))
             return 0;
     }
-    /* loose: Mic-E always carries a speed, so one given with none is
-       written as 0 and reads back as 0 */
-    if (loose && type == PDN_APRS_TYPE_MIC_E && a->has_speed && !b->has_speed && a->speed_knots == 0) {
-        /* the same data */
+    /* the compression type: the one given, or, where the data gives none and
+       the cs bytes carry a value, exactly the default (current fix, other
+       source, software) */
+    if (b->has_compression) {
+        if (!a->has_compression || a->compression.fix != b->compression.fix ||
+            a->compression.source != b->compression.source || a->compression.origin != b->compression.origin)
+            return 0;
+    } else if (a->has_compression && (a->compression.fix != PDN_APRS_FIX_CURRENT ||
+                                      a->compression.source != PDN_APRS_SOURCE_OTHER ||
+                                      a->compression.origin != PDN_APRS_ORIGIN_SOFTWARE)) {
+        return 0;
+    }
+    if (!a->has_course != !b->has_course)
+        return 0;
+    if (a->has_course && !num_eq(a->course_degrees, comp ? cs_course(b->course_degrees) : rnd(b->course_degrees)))
+        return 0;
+    /* Mic-E always carries a speed: one the data leaves out reads back as 0 */
+    if (mic && a->has_speed && !b->has_speed) {
+        if (a->speed_knots != 0)
+            return 0;
     } else if (!a->has_speed != !b->has_speed ||
-               (a->has_speed && !near(a->speed_knots, b->speed_knots, 0.51, 0.041, loose))) {
+               (a->has_speed && !num_eq(a->speed_knots, comp ? cs_speed(b->speed_knots) : rnd(b->speed_knots)))) {
         return 0;
     }
-    /* loose: a compressed weather report's GGA altitude of 1 foot or less is
-       written as the nearest cs value, 1 foot, alone (README Encoding rule) */
-    if (loose && b->compressed && b->has_weather && a->has_altitude && b->has_altitude && a->altitude_feet == 1.0 &&
-        b->altitude_feet <= 1.0) {
-        /* the same data, rounded */
-    } else if (!a->has_altitude != !b->has_altitude ||
-               (a->has_altitude && !near(a->altitude_feet, b->altitude_feet, 1.65, 0.0011, loose))) {
+    /* the altitude: whole metres in the Mic-E bytes (unless a /A= won),
+       otherwise whole feet in a /A=, except in the cs bytes of a compressed
+       GGA report, which hold it where they hold it exactly, and always on a
+       weather report (no comment), as the nearest step, 1 foot or less
+       being 1 */
+    if (!a->has_altitude != !b->has_altitude)
         return 0;
+    if (a->has_altitude) {
+        double want = rnd(b->altitude_feet);
+        if (mic && !a->altitude_in_comment) {
+            want = rnd(b->altitude_feet * 0.3048) * (1.0 / 0.3048);
+        } else if (!mic && comp && b->has_compression && b->compression.source == PDN_APRS_SOURCE_GGA) {
+            double feet = b->altitude_feet, cs = feet < 1 ? 0.0 : fmin(rnd(log(feet) / log(1.002)), 8280.0);
+            double step = pow(1.002, cs);
+            if (b->has_weather || (feet >= 1 && fabs(step - feet) <= 1e-9 * feet))
+                want = step;
+        }
+        if (!num_eq(a->altitude_feet, want))
+            return 0;
     }
-    if (!a->has_phg != !b->has_phg ||
-        (a->has_phg && memcmp(&a->phg, &b->phg, sizeof a->phg) != 0))
+    if (!a->has_phg != !b->has_phg || (a->has_phg && memcmp(&a->phg, &b->phg, sizeof a->phg) != 0))
         return 0;
-    if (!a->has_range != !b->has_range || (a->has_range && !near(a->range_miles, b->range_miles, 0.51, 0.041, loose)))
+    if (!a->has_range != !b->has_range ||
+        (a->has_range &&
+         !num_eq(a->range_miles, comp ? 2.0 * pow(1.08, rnd(log(b->range_miles / 2.0) / log(1.08))) : rnd(b->range_miles))))
         return 0;
     if (!a->has_dfs != !b->has_dfs || (a->has_dfs && memcmp(&a->dfs, &b->dfs, sizeof a->dfs) != 0))
         return 0;
@@ -149,14 +245,17 @@ static int report_eq(const pdn_aprs_report *a, const pdn_aprs_report *b, int typ
     if (a->has_frequency) {
         const pdn_aprs_frequency *f = &a->frequency, *g = &b->frequency;
         int valued = f->tone == PDN_APRS_TONE_TONE || f->tone == PDN_APRS_TONE_CTCSS || f->tone == PDN_APRS_TONE_DCS;
-        if (!near(f->mhz, g->mhz, 0.0051, 0, loose) || f->tone != g->tone || (valued && f->tone_value != g->tone_value) ||
+        /* whole kHz, or whole 10 kHz where the form is that */
+        double per = g->ten_khz_resolution ? 100.0 : 1000.0;
+        if (!num_eq(f->mhz, rnd(g->mhz * per) / per) || f->tone != g->tone || (valued && f->tone_value != g->tone_value) ||
             !f->has_offset != !g->has_offset || (f->has_offset && f->offset_khz != g->offset_khz) ||
             !f->has_range != !g->has_range ||
             (f->has_range && (f->range != g->range || !f->range_km != !g->range_km)) || !f->narrow != !g->narrow ||
             !f->ten_khz_resolution != !g->ten_khz_resolution)
             return 0;
     }
-    if (!a->has_weather != !b->has_weather || (a->has_weather && !weather_eq(&a->weather, &b->weather, loose)))
+    /* a compressed report's wind is read from its cs bytes */
+    if (!a->has_weather != !b->has_weather || (a->has_weather && !weather_eq(&a->weather, &b->weather, comp)))
         return 0;
     if (!str_eq(a->signpost, b->signpost) || a->comment_len != b->comment_len ||
         memcmp(a->comment, b->comment, a->comment_len) != 0)
@@ -185,7 +284,8 @@ static int number_eq(const pdn_aprs_number *a, const pdn_aprs_number *b)
     return a->is_null || num_eq(a->value, b->value);
 }
 
-PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_aprs_data *b, int loose)
+/* a is the data decoded from the bytes written, b the data given. */
+PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_aprs_data *b)
 {
     unsigned i;
     if (a->type != b->type)
@@ -197,7 +297,7 @@ PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_apr
     case PDN_APRS_TYPE_MIC_E:
     case PDN_APRS_TYPE_OBJECT:
     case PDN_APRS_TYPE_ITEM:
-        return report_eq(&a->as.report, &b->as.report, a->type, loose);
+        return report_eq(&a->as.report, &b->as.report, a->type);
     case PDN_APRS_TYPE_MESSAGE:
     case PDN_APRS_TYPE_BULLETIN:
     case PDN_APRS_TYPE_NWS_BULLETIN: {
@@ -239,7 +339,7 @@ PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_apr
     case PDN_APRS_TYPE_STATUS: {
         const pdn_aprs_status *s = &a->as.status, *t = &b->as.status;
         return str_eq(s->timestamp, t->timestamp) && str_eq(s->locator, t->locator) &&
-               (!s->locator[0] || (s->symbol.table == t->symbol.table && s->symbol.code == t->symbol.code)) &&
+               s->symbol.table == t->symbol.table && s->symbol.code == t->symbol.code &&
                !s->has_beam == !t->has_beam &&
                (!s->has_beam || (s->beam_heading_code == t->beam_heading_code && s->beam_power_code == t->beam_power_code)) &&
                s->text_len == t->text_len && memcmp(s->text, t->text, s->text_len) == 0;
@@ -257,7 +357,7 @@ PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_apr
     }
     case PDN_APRS_TYPE_WEATHER:
         return str_eq(a->as.weather.timestamp, b->as.weather.timestamp) &&
-               weather_eq(&a->as.weather.weather, &b->as.weather.weather, loose) &&
+               weather_eq(&a->as.weather.weather, &b->as.weather.weather, 0) &&
                a->as.weather.comment_len == b->as.weather.comment_len &&
                memcmp(a->as.weather.comment, b->as.weather.comment, a->as.weather.comment_len) == 0;
     case PDN_APRS_TYPE_RAW_WEATHER:
@@ -267,7 +367,7 @@ PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_apr
     case PDN_APRS_TYPE_NMEA: {
         const pdn_aprs_nmea *s = &a->as.nmea, *t = &b->as.nmea;
         return s->sentence_len == t->sentence_len && memcmp(s->sentence, t->sentence, s->sentence_len) == 0 &&
-               !s->has_checksum == !t->has_checksum && s->comment_len == t->comment_len &&
+               (!t->has_checksum || s->has_checksum) && s->comment_len == t->comment_len &&
                memcmp(s->comment, t->comment, s->comment_len) == 0 &&
                /* the fields read from the sentence, those t gives: data whose
                   fields disagree with its sentence does not read back */
@@ -289,7 +389,7 @@ PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_apr
                (!a->as.query.has_footprint ||
                 (num_eq(a->as.query.latitude, b->as.query.latitude) &&
                  num_eq(a->as.query.longitude, b->as.query.longitude) &&
-                 near(a->as.query.radius_miles, b->as.query.radius_miles, 0.51, 0, loose)));
+                 num_eq(a->as.query.radius_miles, rnd(b->as.query.radius_miles))));
     case PDN_APRS_TYPE_CAPABILITIES: {
         const pdn_aprs_capabilities *s = &a->as.capabilities, *t = &b->as.capabilities;
         if (s->count != t->count)
