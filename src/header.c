@@ -207,14 +207,14 @@ PDN_APRS__PRIVATE int pdn_aprs__write_header_tnc2(pdn_aprs__buf *b, const pdn_ap
 
 /* One AX.25 address: callsign of 1-6 upper-case letters or digits, SSID 0-15.
    An SSID written with a leading zero, or -0, is refused: a frame gives it back as no SSID. */
-static int ax25_put_address(pdn_aprs__buf *b, const char *a, int last, int hbit, int cbit)
+static int ax25_put_address(pdn_aprs__buf *b, const char *a, int last, int hbit, int cbit, int blank_ok)
 {
     size_t n = 0, i;
     int ssid = 0;
     uint8_t out[7];
     while (a[n] && a[n] != '-')
         n++;
-    if (n == 0 || n > 6)
+    if ((n == 0 && !(blank_ok && !a[0])) || n > 6)
         return 0;
     for (i = 0; i < n; i++)
         if (!(A_UPPER(a[i]) || A_DIGIT(a[i])))
@@ -234,18 +234,21 @@ static int ax25_put_address(pdn_aprs__buf *b, const char *a, int last, int hbit,
     return 1;
 }
 
-PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest)
+/* as_received: a decoded packet's header, whose empty destination (a defect a
+   lenient decoder tolerates) is written as six spaces, which reads back empty. */
+PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest,
+                                                  int as_received)
 {
     unsigned i, count = h->path_count;
     if (count > 8)
         return PDN_APRS_ERR_REFUSED;
     /* a command frame: C bit set in the destination, clear in the source */
-    if (!ax25_put_address(b, dest, 0, 0, 1))
+    if (!ax25_put_address(b, dest, 0, 0, 1, as_received))
         return PDN_APRS_ERR_REFUSED;
-    if (!ax25_put_address(b, h->source, count == 0, 0, 0))
+    if (!ax25_put_address(b, h->source, count == 0, 0, 0, 0))
         return PDN_APRS_ERR_REFUSED;
     for (i = 0; i < count; i++)
-        if (!ax25_put_address(b, h->path[i].call, i + 1 == count, h->path[i].marked || h->path[i].used, 0))
+        if (!ax25_put_address(b, h->path[i].call, i + 1 == count, h->path[i].marked || h->path[i].used, 0, 0))
             return PDN_APRS_ERR_REFUSED;
     pdn_aprs__putc(b, 0x03);
     pdn_aprs__putc(b, 0xF0);

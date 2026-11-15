@@ -440,6 +440,47 @@ static int needs_more_than(const jval *c, const input_t *in, int limit)
 
 static const pdn_aprs_device_table *devices(void) { return dev_table(); }
 
+/* "pass_through" (README Read-back, Header): the lenient packet written with
+   pdn_aprs_write_tnc2 and pdn_aprs_write_ax25 is the line and the frame given,
+   or a refusal. The writers refuse with the one code of their form
+   (tnc2-cannot-carry, ax25-cannot-carry). */
+static void check_pass_through(const jval *c, const char *id, const input_t *in, const pdn_aprs_decode_options *lenient)
+{
+    const jval *pt = json_get(c, "pass_through");
+    const char *tnc2 = json_gets(pt, "tnc2"), *hex = json_gets(pt, "ax25_hex");
+    const char *tref = json_gets(pt, "tnc2_refusal"), *aref = json_gets(pt, "ax25_refusal");
+    char why[512];
+    uint8_t buf[2048];
+    int n;
+    if (decode(in, lenient, &pkt) != PDN_APRS_OK)
+        return;
+    if (tnc2 || tref) {
+        n = pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf);
+        if (tref)
+            snprintf(why, sizeof why, "tnc2 wrote %d, want a refusal (%s)", n, tref);
+        else
+            snprintf(why, sizeof why, "tnc2 wrote %.200s, want %s", n > 0 ? ascii(buf, n) : "nothing", tnc2);
+        report(id, "pass-through", tref ? (n == PDN_APRS_ERR_REFUSED && strcmp(tref, "tnc2-cannot-carry") == 0)
+                                        : (n >= 0 && (size_t)n == strlen(tnc2) && memcmp(buf, tnc2, (size_t)n) == 0),
+               why, NULL, NULL);
+    }
+    if (hex || aref) {
+        char got[2 * 512 + 1];
+        int k, ok = 0;
+        n = pdn_aprs_write_ax25(&pkt, buf, sizeof buf);
+        got[0] = 0;
+        for (k = 0; n > 0 && k < n && k < 512; k++)
+            snprintf(got + 2 * k, 3, "%02X", buf[k]);
+        if (aref)
+            ok = n == PDN_APRS_ERR_REFUSED && strcmp(aref, "ax25-cannot-carry") == 0;
+        else if (n > 0 && strlen(hex) == 2 * (size_t)n)
+            for (k = 0, ok = 1; k < 2 * n; k++)
+                ok = ok && (hex[k] & ~0x20) == (got[k] & ~0x20);
+        snprintf(why, sizeof why, "ax25 wrote %d: %.200s, want %.200s", n, got, aref ? aref : hex);
+        report(id, "pass-through", ok, why, NULL, NULL);
+    }
+}
+
 static void check_decode_case(const jval *c, const char *id)
 {
     input_t in;
@@ -498,6 +539,10 @@ static void check_decode_case(const jval *c, const char *id)
         }
     }
     report(id, "lenient", ok, why, ok ? NULL : got, ok ? NULL : expect);
+
+    /* pass through: the lenient packet written back with the packet writers */
+    if (json_get(c, "pass_through") && ok)
+        check_pass_through(c, id, &in, &lenient);
 
     /* re-encode, from the lenient data */
     if (reenc && pkt.header_ok) {

@@ -67,8 +67,8 @@ static int station_header(const pdn_aprs_station *st, pdn_aprs_header *h, pdn_ap
     return PDN_APRS_OK;
 }
 
-int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_data *data, void *buf, size_t cap,
-                   pdn_aprs_encoded *result)
+static int build_data(const pdn_aprs_station *station, const pdn_aprs_data *data, void *buf, size_t cap,
+                      pdn_aprs_encoded *result, int builder)
 {
     pdn_aprs_header h;
     pdn_aprs_encode_options o;
@@ -81,10 +81,16 @@ int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_data *data, v
     if (rc != PDN_APRS_OK)
         return rc;
     o.devices = station->devices;
-    rc = pdn_aprs__encode_packet(&h, data, &o, buf, cap, result, station->ax25 != 0);
+    rc = pdn_aprs__encode_packet(&h, data, &o, buf, cap, result, station->ax25 != 0, builder);
     if (rc < 0 && result && !result->reason)
         result->reason = pdn_aprs_strerror(rc);
     return rc;
+}
+
+int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_data *data, void *buf, size_t cap,
+                   pdn_aprs_encoded *result)
+{
+    return build_data(station, data, buf, cap, result, 0);
 }
 
 /* Copies src (NULL is "") into dst, which holds cap bytes with its NUL.
@@ -151,7 +157,7 @@ static int build_with(const pdn_aprs_station *station, const pdn_aprs_data *d, v
     int rc;
     if (!result)
         result = &local;
-    rc = pdn_aprs_build(station, d, buf, cap, result);
+    rc = build_data(station, d, buf, cap, result, 1);
     if (!p->code || (rc < 0 && rc != PDN_APRS_ERR_REFUSED && rc != PDN_APRS_ERR_BUFFER))
         return rc;
     /* the size of a record with a fault is not judged: the fault stands */
@@ -329,13 +335,14 @@ int pdn_aprs_build_mic_e(const pdn_aprs_station *station, const pdn_aprs_mic_e_a
     if (m->has_altitude || m->has_altitude_m) {
         double metres = m->has_altitude_m ? m->altitude_m : m->altitude_feet * 0.3048;
         r->has_altitude = 1;
+        /* the value as given: the encoder rounds it once to the metre when
+           it writes the Mic-E bytes, and a /A= (the second form) holds it
+           only if it is whole feet */
         r->altitude_feet = metres / 0.3048;
         if (metres == metres && fabs(metres) < 1e9) {
             double mm = pdn_aprs__round(metres);
             if (mm < -10000 || mm > 743570)
                 note(&pend, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "a Mic-E altitude is -10000 to 743570 metres");
-            else
-                r->altitude_feet = mm / 0.3048;
         }
     }
     r->altitude_in_comment = 0;

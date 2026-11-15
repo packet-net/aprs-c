@@ -308,12 +308,14 @@ typedef struct pdn_aprs__ectx {
     const char *deferred_why;
     char dest[PDN_APRS_ADDR_SIZE];
     int variant; /* 1: put a / before any comment, 2: a space */
+    int bytes_first; /* a builder: a Mic-E altitude goes in the Mic-E bytes first, whatever it is given in */
+    int alt_force; /* a Mic-E altitude goes in a /A= where the Mic-E bytes (the first form) did not read back */
 } pdn_aprs__ectx;
 
 /* pdn_aprs_encode_tnc2 or pdn_aprs_encode_ax25 (ax25 nonzero). */
 PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *data,
                                               const pdn_aprs_encode_options *options, void *buf, size_t cap,
-                                              pdn_aprs_encoded *encoded, int ax25);
+                                              pdn_aprs_encoded *encoded, int ax25, int builder);
 
 PDN_APRS__PRIVATE int pdn_aprs__refuse(pdn_aprs__ectx *e, int code, const char *why);
 /* Where a refusal code comes in the README's Refusal reasons order. */
@@ -330,6 +332,7 @@ extern void (*pdn_aprs__fault_hook)(uint8_t *info, size_t len, int data_type);
 extern void (*pdn_aprs__header_fault_hook)(uint8_t *head, size_t len, int ax25);
 #endif
 PDN_APRS__PRIVATE int pdn_aprs__write_header_tnc2(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest);
-PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest);
+PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest,
+                                                  int as_received);
 
 #endif

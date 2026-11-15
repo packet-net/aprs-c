@@ -1106,6 +1106,15 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const p
         put_wx_field(e, 's', w, PDN_APRS_WX_SNOW_24H_IN, 0);
     }
     put_wx_field(e, '#', w, PDN_APRS_WX_RAIN_RAW, 0);
+    /* a control character is a rule's fault, before the read-back judges
+       what free text reads as (README Read-back) */
+    for (i = 0; i < w->extra_count && i < PDN_APRS_MAX_WEATHER_EXTRA; i++)
+        if ((w->extra[i].letter && has_control(&w->extra[i].letter, 1)) || has_control(w->extra[i].value, strlen(w->extra[i].value)))
+            return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER,
+                                    "a weather extra field cannot contain a control character");
+    if ((w->software && has_control(&w->software, 1)) || has_control(w->unit, strlen(w->unit)))
+        return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_INVALID_CHARACTER,
+                                "a weather software type or unit cannot contain a control character");
     for (i = 0; i < w->extra_count && i < PDN_APRS_MAX_WEATHER_EXTRA; i++) {
         pdn_aprs__putc(e->b, w->extra[i].letter);
         pdn_aprs__puts(e->b, w->extra[i].value);
@@ -1557,7 +1566,7 @@ static int locator_fixed_form(const char *l)
    metre. Returns 0: the Mic-E bytes, with the value to write in *v; 1: a
    /A=; 2: out of range (the bytes cannot hold it and a /A= does not hold it
    exactly). *whole_feet is 1 for a whole number of feet within a /A=. */
-static int mic_e_altitude_form(const pdn_aprs_report *r, long *v, int *whole_feet)
+static int mic_e_altitude_form(const pdn_aprs_report *r, int bytes_first, long *v, int *whole_feet)
 {
     double f = r->altitude_feet, m, rf;
     int in_range, whole_m;
@@ -1571,9 +1580,22 @@ static int mic_e_altitude_form(const pdn_aprs_report *r, long *v, int *whole_fee
     *v = (long)pdn_aprs__round(m) + 10000;
     in_range = *v >= 0 && *v < 91L * 91 * 91;
     whole_m = in_range && fabs(m - pdn_aprs__round(m)) <= 1e-6;
-    if (*whole_feet && !whole_m)
+    if (*whole_feet && !whole_m && !bytes_first)
         return 1;
     return in_range ? 0 : 2;
+}
+
+/* 1 if neutral Mic-E data has an altitude that goes in the Mic-E bytes first
+   and that a /A= also holds exactly (a whole number of feet within six
+   digits): the second form, tried when the first does not read back (README
+   Read-back, a Mic-E altitude has two forms). */
+static int mic_e_altitude_has_second_form(const pdn_aprs_data *d, int bytes_first)
+{
+    long v;
+    int whole;
+    if (d->type != PDN_APRS_TYPE_MIC_E || !d->as.report.has_altitude)
+        return 0;
+    return mic_e_altitude_form(&d->as.report, bytes_first, &v, &whole) == 0 && whole;
 }
 
 PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_report *r)
@@ -1697,7 +1719,7 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
     {
         /* an altitude that needs a /A= and is past its field comes first */
         long av;
-        int whole, form = mic_e_altitude_form(r, &av, &whole);
+        int whole, form = mic_e_altitude_form(r, e->bytes_first, &av, &whole);
         if (r->has_altitude && form != 0) {
             if (not_a_number(e, r->altitude_feet))
                 return 0;
@@ -1746,7 +1768,10 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
         long v = 0;
         {
             int whole;
-            alt_b91 = mic_e_altitude_form(r, &v, &whole) == 0;
+            alt_b91 = mic_e_altitude_form(r, e->bytes_first, &v, &whole) == 0;
+            /* the second form: a /A= holding what the Mic-E bytes also hold */
+            if (alt_b91 && e->alt_force && whole)
+                alt_b91 = 0;
             /* with no type code, a first byte that is one reads back as it
                (ruling 28): a /A= holds the altitude if it is whole feet
                within its six digits, otherwise it has no form (revision B) */
@@ -2770,7 +2795,7 @@ static int data_bounds_ok(const pdn_aprs_data *d)
    when nothing else is wrong), and 0 when this variant's bytes do not read
    back (the reason is in e) and the next variant is to be tried. */
 static PDN_APRS__NOINLINE int judge_oversize(const pdn_aprs_data *data, const pdn_aprs_encode_options *options,
-                                             int variant, pdn_aprs__ectx *e)
+                                             int variant, int alt_force, int bytes_first, pdn_aprs__ectx *e)
 {
     uint8_t scratch[PDN_APRS_ENCODE_SCRATCH];
     pdn_aprs__buf b;
@@ -2779,6 +2804,8 @@ static PDN_APRS__NOINLINE int judge_oversize(const pdn_aprs_data *data, const pd
     pdn_aprs__buf_init(&b, scratch, sizeof scratch);
     e->b = &b;
     e->variant = variant;
+    e->alt_force = alt_force;
+    e->bytes_first = bytes_first;
     if (!encode_data(e, data))
         return 1;
     if (b.overflow || reads_back(data, scratch, b.len, e->dest)) {
@@ -2791,11 +2818,11 @@ static PDN_APRS__NOINLINE int judge_oversize(const pdn_aprs_data *data, const pd
 }
 
 static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf, size_t cap,
-                       pdn_aprs_encoded *encoded)
+                       pdn_aprs_encoded *encoded, int bytes_first)
 {
     pdn_aprs__buf b;
     pdn_aprs__ectx e;
-    int ok = 0, full = 0, variant;
+    int ok = 0, full = 0, variant, alt_force, attempt, attempts;
     size_t wrote = 0; /* the most any variant put in buf */
     if (encoded) {
         encoded->len = 0;
@@ -2810,11 +2837,18 @@ static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options 
     /* written straight into buf, whatever its length: the canonical form
        first; if that would not read back, the same with a / before the
        comment, then with a space */
-    for (variant = 0; variant < 3; variant++) {
+    /* a Mic-E altitude has two forms, the Mic-E bytes then a /A= that holds it
+       exactly, each tried with each of the three comment forms */
+    attempts = mic_e_altitude_has_second_form(data, bytes_first) ? 6 : 3;
+    for (attempt = 0; attempt < attempts; attempt++) {
+        variant = attempt % 3;
+        alt_force = attempt / 3;
         memset(&e, 0, sizeof e);
         pdn_aprs__buf_init(&b, buf, cap);
         e.b = &b;
         e.variant = variant;
+        e.alt_force = alt_force;
+        e.bytes_first = bytes_first;
         ok = encode_data(&e, data);
         if (b.total > wrote)
             wrote = b.total;
@@ -2824,7 +2858,7 @@ static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options 
             /* more than buf holds, and over the 256 bytes: the size is judged
                last, so the bytes are checked somewhere that holds them */
             ok = 0;
-            if (judge_oversize(data, options, variant, &e))
+            if (judge_oversize(data, options, variant, alt_force, bytes_first, &e))
                 break;
             continue;
         }
@@ -2865,7 +2899,7 @@ static int encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options 
 int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_options *options, void *buf, size_t cap,
                          pdn_aprs_encoded *encoded)
 {
-    return encode_info(data, options, buf, cap, encoded);
+    return encode_info(data, options, buf, cap, encoded, 0);
 }
 
 /* Room for any header: every address and a separator or two, or seven
@@ -2874,7 +2908,7 @@ int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_encode_option
 
 PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *data,
                                               const pdn_aprs_encode_options *options, void *buf, size_t cap,
-                                              pdn_aprs_encoded *encoded, int ax25)
+                                              pdn_aprs_encoded *encoded, int ax25, int builder)
 {
     uint8_t head[HEADER_ROOM];
     uint8_t *out = (uint8_t *)buf;
@@ -2901,7 +2935,7 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
            checked with a placeholder for it */
         const char *first = data->type == PDN_APRS_TYPE_MIC_E ? "APZ001" : header->destination;
         pdn_aprs__buf_init(&hb, head, sizeof head);
-        rc = ax25 ? pdn_aprs__write_header_ax25(&hb, header, first) : pdn_aprs__write_header_tnc2(&hb, header, first);
+        rc = ax25 ? pdn_aprs__write_header_ax25(&hb, header, first, 0) : pdn_aprs__write_header_tnc2(&hb, header, first);
         if (rc == PDN_APRS_ERR_REFUSED) {
             encoded->len = 0;
             encoded->destination[0] = 0;
@@ -2920,12 +2954,12 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
             return PDN_APRS_ERR_REFUSED;
         }
     }
-    n = encode_info(data, options, buf, cap, encoded);
+    n = encode_info(data, options, buf, cap, encoded, builder);
     if (n < 0)
         return n;
     dest = data->type == PDN_APRS_TYPE_MIC_E ? encoded->destination : header->destination;
     pdn_aprs__buf_init(&hb, head, sizeof head);
-    rc = ax25 ? pdn_aprs__write_header_ax25(&hb, header, dest) : pdn_aprs__write_header_tnc2(&hb, header, dest);
+    rc = ax25 ? pdn_aprs__write_header_ax25(&hb, header, dest, 0) : pdn_aprs__write_header_tnc2(&hb, header, dest);
     if (rc != PDN_APRS_OK) {
         encoded->len = 0;
         if (rc == PDN_APRS_ERR_REFUSED) {
@@ -2962,13 +2996,13 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
 int pdn_aprs_encode_tnc2(const pdn_aprs_header *header, const pdn_aprs_data *data,
                          const pdn_aprs_encode_options *options, char *buf, size_t cap, pdn_aprs_encoded *encoded)
 {
-    return pdn_aprs__encode_packet(header, data, options, buf, cap, encoded, 0);
+    return pdn_aprs__encode_packet(header, data, options, buf, cap, encoded, 0, 0);
 }
 
 int pdn_aprs_encode_ax25(const pdn_aprs_header *header, const pdn_aprs_data *data,
                          const pdn_aprs_encode_options *options, void *buf, size_t cap, pdn_aprs_encoded *encoded)
 {
-    return pdn_aprs__encode_packet(header, data, options, buf, cap, encoded, 1);
+    return pdn_aprs__encode_packet(header, data, options, buf, cap, encoded, 1, 0);
 }
 
 /* ---- a decoded packet written back as received ---- */
@@ -2992,7 +3026,7 @@ static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int a
         return PDN_APRS_ERR_TOO_LONG;
     pdn_aprs__buf_init(&hb, head, sizeof head);
     if (ax25) {
-        rc = pdn_aprs__write_header_ax25(&hb, &p->header, p->header.destination);
+        rc = pdn_aprs__write_header_ax25(&hb, &p->header, p->header.destination, 1);
     } else {
         /* a TNC2 line marks only the last entry that has been used */
         pdn_aprs_header h = p->header;
