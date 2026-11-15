@@ -1896,6 +1896,26 @@ static void test_round5(void)
           !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_OUT_OF_RANGE_VALUE, -1));
 }
 
+/* The Mic-E locator's space is judged on the text after a later altitude and the
+   telemetry it leaves between two bars are lifted. */
+static void test_mic_e_locator_space_after_lifted_altitude(void)
+{
+    const pdn_aprs_report *r;
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G|!:&0hl!Y[/>\"4e}='p| DG2MM") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(!pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, -1));
+    CHECK(pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MIC_E_ALTITUDE_NOT_FIRST, PDN_APRS_SEVERITY_WARNING));
+    CHECK(r->has_altitude && r->has_telemetry && strcmp(r->locator, "IO91") == 0);
+    CHECK(r->comment_len == 5 && memcmp(r->comment, "DG2MM", 5) == 0);
+    /* a longer spaced comment */
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G|!:&0hl!Y[/>\"4e}='p| hello there") == PDN_APRS_OK);
+    CHECK(!pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, -1));
+    CHECK(pkt.data.as.report.comment_len == 11);
+    /* a comment with no space after the telemetry still warns */
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G|!:&0hl!Y[/>\"4e}='p|DG2MM") == PDN_APRS_OK);
+    CHECK(pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING));
+}
+
 /* A garbled timestamp before an uncompressed position: seven bytes ending in z, / or h
    and an uncompressed position after them win over any reading straight after the DTI. */
 static void test_garbled_timestamp(void)
@@ -2124,6 +2144,7 @@ int main(void)
     test_capability_without_value();
     test_round4();
     test_round5();
+    test_mic_e_locator_space_after_lifted_altitude();
     test_garbled_timestamp();
     test_mic_e_codes();
     printf("%d checks, %d failed\n", checks, failures);

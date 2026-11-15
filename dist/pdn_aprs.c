@@ -3309,8 +3309,11 @@ PDN_APRS__PRIVATE size_t pdn_aprs__mic_e_locator_len(const uint8_t *s, size_t n)
 /* Whether the status text after a locator, once base-91 telemetry and a
    !DAO! are out of it, is empty or starts with a space: the locator is read
    as if they had been lifted (ruling F16), while a later altitude is looked
-   for before they are, so they are lifted here only from a copy. */
-static int rest_is_spaced(pdn_aprs__dctx *c, const uint8_t *t, size_t tl)
+   for before they are, so they are lifted here only from a copy. A later
+   altitude (when none was given first and it is not declined) is lifted from
+   the copy before them, as the comment's own reading does, so telemetry it
+   leaves between two bars is out too. */
+static int rest_is_spaced(pdn_aprs__dctx *c, const uint8_t *t, size_t tl, int has_altitude)
 {
     pdn_aprs__cbuf copy;
     pdn_aprs_report scratch;
@@ -3318,6 +3321,16 @@ static int rest_is_spaced(pdn_aprs__dctx *c, const uint8_t *t, size_t tl)
     memset(&scratch, 0, sizeof scratch);
     if (!pdn_aprs__cbuf_set(c, &copy, t, tl))
         return 0;
+    if (!has_altitude && !pdn_aprs__rejects(c, PDN_APRS_CODE_MIC_E_ALTITUDE_NOT_FIRST)) {
+        size_t k;
+        for (k = 0; k + 4 <= copy.n; k++) {
+            if (A_B91(copy.b[k]) && A_B91(copy.b[k + 1]) && A_B91(copy.b[k + 2]) && copy.b[k + 3] == '}') {
+                pdn_aprs__cbuf_cut(&copy, k, 4);
+                copy.cut = k + 1;
+                break;
+            }
+        }
+    }
     pdn_aprs__lift_telemetry_dao(&copy, &scratch, dao);
     return copy.n == 0 || copy.b[0] == ' ';
 }
@@ -3506,7 +3519,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
                 if (t[0] == ' ') {
                     t++;
                     tl--;
-                } else if (!rest_is_spaced(c, t, tl) &&
+                } else if (!rest_is_spaced(c, t, tl, r->has_altitude) &&
                            !pdn_aprs__tolerate(c, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR)) {
                     return;
                 }

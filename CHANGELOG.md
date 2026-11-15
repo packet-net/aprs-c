@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Round 5 of the shared vectors (aprs-vectors `round-5`, pinned at b118424e59fb62194ded6552c1796ad9280f188d). In a `/` or `@` position report whose timestamp is not valid, seven bytes ending in `z`, `/` or `h` followed by an uncompressed position (`@R30549z2831.07N/08142.92W_015/001`) are read as a garbled timestamp and the position is read after them, with `malformed-timestamp`; before, a garbled timestamp could read as a compressed position straight after the DTI.
+Round 5 of the shared vectors (aprs-vectors `round-5`, pinned at 201f7b26182d02894b53ada5493c363a692db889). In a `/` or `@` position report whose timestamp is not valid, seven bytes ending in `z`, `/` or `h` followed by an uncompressed position (`@R30549z2831.07N/08142.92W_015/001`) are read as a garbled timestamp and the position is read after them, with `malformed-timestamp`; before, a garbled timestamp could read as a compressed position straight after the DTI. A Mic-E locator's space is judged after a later altitude and the base-91 telemetry it leaves between two `|` are lifted too, so `|...|` altitude then ` DG2MM` no longer gives `missing-space-after-locator` (`mic-e/telemetry-left-once-an-altitude-is-lifted-then-a-spaced-comment`); the vectors test runner skips the single-tolerance check for a case whose strict result is rejected by a different code, and prints how many cases it ran on.
 
 ## 1.2.0 (2026-11-14)
 
