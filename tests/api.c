@@ -2206,6 +2206,33 @@ static void test_lifting_never_joins(void)
     r = &pkt.data.as.report;
     CHECK(r->has_frequency && r->frequency.tone == PDN_APRS_TONE_NONE && r->has_altitude && r->has_dao &&
           strcmp(r->comment, "T100 x") == 0);
+    /* a space before a /A= does not reach a field after it, and braces
+       between a frequency and its fields cut them off: both are comment text,
+       and written back the text follows an altitude straight on and braces
+       after one space, with no / */
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W-146.520MHz T100 /A=000100-060 x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->frequency.tone_value == 100 && !r->frequency.has_offset && strcmp(r->comment, "-060 x") == 0 &&
+          reencodes_as("!4903.50N/07201.75W-146.520MHz T100/A=000100-060 x"));
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W-146.520MHz T100 -060 /A=000100R25m x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->frequency.has_offset && !r->frequency.has_range && strcmp(r->comment, "R25m x") == 0 &&
+          reencodes_as("!4903.50N/07201.75W-146.520MHz T100 -060/A=000100R25m x"));
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W-146.520MHz/A=000100 T100 x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->frequency.tone == PDN_APRS_TONE_TONE && strcmp(r->comment, "x") == 0);
+    CHECK(decode("N0CALL>APZ001:;SIGN     *092345z4903.50N\\07201.75Wm146.520MHz{55} T100 x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->frequency.tone == PDN_APRS_TONE_NONE && strcmp(r->signpost, "55") == 0 && strcmp(r->comment, "T100 x") == 0 &&
+          reencodes_as(";SIGN     *092345z4903.50N\\07201.75Wm146.520MHz{55} T100 x"));
+    CHECK(decode("N0CALL>APZ001:;SIGN     *092345z4903.50N\\07201.75Wm146.520MHz T100{55} R25m x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->frequency.tone_value == 100 && !r->frequency.has_range && strcmp(r->comment, "R25m x") == 0 &&
+          reencodes_as(";SIGN     *092345z4903.50N\\07201.75Wm146.520MHz T100{55} R25m x"));
+    CHECK(decode("N0CALL>APZ001:;SIGN     *092345z4903.50N\\07201.75Wm146.520MHz{55}-060") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(!r->frequency.has_offset && strcmp(r->comment, "-060") == 0 &&
+          reencodes_as(";SIGN     *092345z4903.50N\\07201.75Wm146.520MHz{55} -060"));
     /* Mic-E: telemetry split by a !DAO! is text, and a strict decoder reads a
        later altitude as text and never rejects by it */
     CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G |!:&!W12!0'p| x") == PDN_APRS_OK);

@@ -773,9 +773,11 @@ static void put_telemetry(pdn_aprs__buf *b, const pdn_aprs_comment_telemetry *t)
    decoder's opening elements have been passed. For a position, object or
    item: 0 if nothing follows the symbol yet, else 1. For Mic-E status text:
    0 nothing written, 1 after the type code, 2 after the altitude, 3 after the
-   locator, 4 after an extension or anything later. */
+   locator, 4 after an extension or anything later. after_freq: what the caller
+   wrote between the frequency (with its fields) and the comment: 1 braces,
+   2 an altitude and no braces, 0 nothing. */
 static int put_comment_part(pdn_aprs__ectx *e, const pdn_aprs_report *r, int at_ext, int open, int ext_counts,
-                            int mic_e)
+                            int mic_e, int after_freq)
 {
     const char *c = r->comment;
     size_t n = r->comment_len;
@@ -829,10 +831,16 @@ static int put_comment_part(pdn_aprs__ectx *e, const pdn_aprs_report *r, int at_
                 pdn_aprs__putc(e->b, '/');
             pdn_aprs__encode_frequency(e, f);
         }
-        if (n > 0 && !slash && starts_freq_field(c, n) > last) {
+        if (n > 0 && after_freq == 1) {
+            /* braces came after the frequency, and a field cannot follow
+               them: the ordinary one space, then the comment */
+            pdn_aprs__putc(e->b, ' ');
+        } else if (n > 0 && !slash && starts_freq_field(c, n) > last) {
             /* the comment would read as one of the frequency's fields: straight
-               after the frequency when it has none, else after a delimiter */
-            if (last) {
+               after the frequency when it has none, and straight after a /A=
+               written after the fields (bytes straight after a lifted /A=
+               are no field), else after a delimiter */
+            if (last && !after_freq) {
                 pdn_aprs__putc(e->b, ' ');
                 slash = 1;
             }
@@ -1442,7 +1450,11 @@ static int encode_report(pdn_aprs__ectx *e, const pdn_aprs_data *d)
         at_ext = 0;
     }
     if (!r->has_weather)
-        put_comment_part(e, r, at_ext, e->b->total != symbol_end, ext_counts, 0);
+        put_comment_part(e, r, at_ext, e->b->total != symbol_end, ext_counts, 0,
+                         !r->has_frequency ? 0
+                         : (r->signpost[0] || (r->has_area && r->area.has_corridor)) ? 1
+                         : (r->has_altitude && !alt_in_cs) ? 2
+                                                           : 0);
     if (r->has_dao)
         pdn_aprs__put(e->b, dao, 5);
     return 1;
@@ -1737,7 +1749,7 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_r
                 open = 3;
             if (r->has_phg || r->has_range || r->has_dfs || (r->has_altitude && !alt_b91))
                 open = 4;
-            put_comment_part(e, r, at_ext, open, ext_counts, 1);
+            put_comment_part(e, r, at_ext, open, ext_counts, 1, 0);
         }
     }
     if (r->has_dao) {
