@@ -1067,6 +1067,19 @@ static void test_under_the_header_written(void)
     strcpy(pkt.header.destination, "APZ001");
     CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
           enc.refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE);
+    /* a held Mic-E report put under any other Mic-E destination: other latitude digits, other
+       destination SSID; under its own it is written */
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>S32U6T:`(_fn\"Oj/", 23, NULL, &pkt) == PDN_APRS_OK && pkt.data.type == PDN_APRS_TYPE_MIC_E);
+    strcpy(pkt.header.destination, "S32U7T");
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE);
+    CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE);
+    strcpy(pkt.header.destination, "S32U6T-3");
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE);
+    strcpy(pkt.header.destination, "S32U6T");
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, &enc) > 0);
     /* an inner packet re-addressed */
     CHECK(pdn_aprs_decode_tnc2(nested, strlen(nested), NULL, &pkt) == PDN_APRS_OK);
     CHECK(pdn_aprs_decode_third_party(&pkt.data, NULL, inner) == PDN_APRS_OK);

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Round 5 of the shared vectors (aprs-vectors `round-5`, pinned at 3c6da1dc0eabf2c696e34584afa3332f73b8995c).
+Round 5 of the shared vectors (aprs-vectors `round-5`, pinned at 1490ec9fc796ac42e5619d03532351bf5fdd5b78).
 
 This release is 1.3.0 and is not source compatible with 1.2.0 in three places, all listed under Public API against 1.2.0 below: `pdn_aprs_write_tnc2()` and `pdn_aprs_write_ax25()` take a last argument; `pdn_aprs_third_party.as_received` is a `uint32_t` hash set by the decoder, where it was a `uint8_t` flag; and a program can no longer make the encoder skip the inner-packet check by setting it. The promise of source compatibility within 1.x holds from 1.3.0 on.
 
@@ -41,7 +41,7 @@ Every call that writes bytes from data (`pdn_aprs_encode_info`, `pdn_aprs_encode
 - The dump tool follows the vectors' list of number fields: a fraction in a field that never rounds (PHG and DFS digits, ambiguity, Agrelo quality, comment telemetry sequence and values, area offsets and corridor width, storm fields, a DF bearing's four fields, a voice frequency's tone value and offset) is `value-out-of-range`; the library already refuses a whole-kHz voice offset that is not a multiple of 10 as `value-has-no-form`.
 - Second review: `altitude_in_comment` is honoured only while a `/A=` holds the value exactly (Mic-E altitude 1000.4 feet with the flag set was written `/A=001000`; it is now the Mic-E bytes), and the comparison no longer takes the form from the decode alone. Third-party data nested past the fourth level is `invalid-third-party-header` through the library API as well as the dump tool, unless it is data the decoder read. Data with nothing to encode is `not-encodable` ahead of a bad header address. A station path ending in a comma is refused as `invalid-address`, as an empty entry in the middle is.
 - Round 28 (R28): test data and user-defined data with a CR or LF inside are written as an information field (a line is `tnc2-cannot-carry`); only data ending in one is `invalid-character`. A corridor width on an area that is not a line is `field-not-allowed`. A NaN or an infinity in any numeric field of any type (found by walking the data, not field by field) is `not-a-number`, ranked as the order says.
-- A packet written with a header is read back under the destination actually written, so a held packet re-addressed so that its information field reads as other data (Mic-E bytes under a Mic-E destination, a Mic-E report under a plain one) is refused `not-encodable` by `pdn_aprs_write_tnc2()` and `pdn_aprs_write_ax25()`, and the dump tool refuses inner Mic-E data given a destination other than the one it computes.
+- A packet written with a header is read back under the destination actually written, so a held packet re-addressed so that its information field reads as other data (Mic-E bytes under a Mic-E destination, a Mic-E report under a plain one) is refused `not-encodable` by `pdn_aprs_write_tnc2()` and `pdn_aprs_write_ax25()`, and so is a held Mic-E report put under any Mic-E destination other than the one its data computes (other latitude digits, message bits, hemisphere, longitude offset or destination SSID), and the dump tool refuses inner Mic-E data given a destination other than the one it computes.
 - Windows MSVC: `e` and `b` in `encode_info` are initialised (warning C4701, an error with `/WX`).
 - Comment tests: `tests/comment_test.c` (the later-altitude search with variations, a full boundary table, all six lifts in one comment, an overflowing copy, 200 KB comments).
 
