@@ -989,7 +989,7 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
         static const char *const bk[] = {"bearing_degrees", "number", "range", "quality", NULL};
         keys_only(cv, v, bk);
         r->has_df_bearing = 1;
-        int_ranged(cv, v, "bearing_degrees", 0, 65535, &n, 0);
+        int_ranged(cv, v, "bearing_degrees", 0, 65535, &n, 1);
         r->df_bearing.bearing_degrees = (uint16_t)n;
         int_whole(cv, v, "number", 0, 255, &n);
         r->df_bearing.number = (uint8_t)n;
@@ -1078,9 +1078,9 @@ static void report_in(conv *cv, const jval *o, int type, pdn_aprs_report *r)
         num_in(cv, v, "mhz", &f->mhz);
         enum_in(cv, v, "tone", tone_names, 6, &e);
         f->tone = (uint8_t)e;
-        int_in(cv, v, "tone_value", 0, 65535, &n);
+        int_whole(cv, v, "tone_value", 0, 65535, &n);
         f->tone_value = (uint16_t)n;
-        f->has_offset = (uint8_t)int_in(cv, v, "offset_khz", -32768, 32767, &n);
+        f->has_offset = (uint8_t)int_whole(cv, v, "offset_khz", -32768, 32767, &n);
         f->offset_khz = (int16_t)n;
         f->has_range = (uint8_t)int_in(cv, v, "range", 0, 255, &n);
         f->range = (uint8_t)n;
