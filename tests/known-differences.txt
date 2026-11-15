@@ -4,11 +4,3 @@
 # Cases beyond this library's fixed capacity gives
 # error:implementation-limit, and the runner skips the whole case for that
 # (it is counted on its own line), as the README's Implementation limits say (those are not listed).
-
-# R27 (vectors 2f1ad6a): the expectations below disagree with the rule text and with the
-# three other cases of the same shape, as aprs-py and aprs-cs found too; reported to the
-# coordinator, to be settled by the referee. Remove these lines once the vectors say which.
-position/dao-after-telemetry-before-text-with-bars [lenient]	`|!W12!y|` is a valid block between neighbouring bars and the last, but the case reads the first block
-position/dao-after-telemetry-before-text-with-bars [strict]	as above
-corpus/1232 [lenient]	`|!+&P'i|` is a valid block like corpus/0845, 1000 and 1285, but the case has no telemetry
-corpus/1232 [reencode equivalent]	as above
