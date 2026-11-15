@@ -740,8 +740,14 @@ static int int_in(conv *cv, const jval *o, const char *k, double lo, double hi, 
     *out = 0;
     if (!num_in(cv, o, k, &v))
         return 0;
-    if (v != floor(v) || v < lo || v > hi)
+    if (v != floor(v))
         return cannot(cv, "does not fit the C field (a whole number of limited size)", k);
+    if (v < lo || v > hi) {
+        /* an integer the C type cannot hold: refused by its value alone, with 0 as the stand-in */
+        note_pending(PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "a whole number outside the field's range");
+        *out = 0;
+        return 1;
+    }
     *out = (long)v;
     return 1;
 }
@@ -1365,6 +1371,12 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         int ok = sl >= 1 && sl <= 9;
         for (q = 0; ok && q < sl; q++)
             ok = src[q] >= 0x20 && src[q] <= 0x7E && src[q] != '>' && src[q] != ':';
+        {
+            const jval *sv = json_get(p, "source"), *dv = json_get(p, "destination");
+            /* a NUL inside the text is no address character (the C strings stop at it) */
+            if ((sv && sv->t == J_STR && sv->len != strlen(sv->str)) || (dv && dv->t == J_STR && dv->len != strlen(dv->str)))
+                ok = 0;
+        }
         if (!ok || (dst[0] && !tnc2_address_ok(dst, strlen(dst))))
             header_fault = "inner packet: the header has an address that is not one";
         for (k = 0; path && path->t == J_ARR && k < path->count; k++) {

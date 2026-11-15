@@ -654,6 +654,11 @@ static int build(const jval *r, uint8_t *buf, size_t cap)
     station.devices = dev_table();
     if ((pv = json_get(st, "path")) != NULL && pv->t == J_ARR) {
         size_t o = 0;
+        for (k = 0; k < pv->count && o < sizeof path; k++) {
+            /* a path entry is an address: one with a comma (the builder would read two) or a NUL is not */
+            if (pv->items[k]->t == J_STR && (strlen(pv->items[k]->str) != pv->items[k]->len || strchr(pv->items[k]->str, ',')))
+                extra(PDN_APRS_REFUSAL_INVALID_ADDRESS, "a path entry holds a separator or a NUL: not an address");
+        }
         for (k = 0; k < pv->count && o < sizeof path; k++)
             o += (size_t)snprintf(path + o, sizeof path - o, "%s%s", k ? "," : "", pv->items[k]->str);
         station.path = path;

@@ -141,7 +141,28 @@ PDN_APRS__PRIVATE void pdn_aprs__putd(pdn_aprs__buf *b, double v)
         for (; p > 0; p--)
             pdn_aprs__putc(b, '0');
     } else if (mag >= 9.0e15) {
-        put_scaled(b, (uint64_t)floor(mag + 0.5), 0);
+        /* below 2^64: the fewest significant digits that give the same double, then zeros
+           (-2^63 is -9223372036854776000, not its exact value) */
+        int sd, p = 0, digits = (int)floor(log10(mag)) + 1;
+        uint64_t r = (uint64_t)mag;
+        for (sd = 1; sd <= 17; sd++) {
+            double back;
+            uint64_t q;
+            p = digits - sd;
+            if (p < 0)
+                p = 0;
+            q = (uint64_t)(mag / pdn_aprs__pow10i(p) + 0.5);
+            back = (double)q * pdn_aprs__pow10i(p);
+            if (back == mag) {
+                r = q;
+                break;
+            }
+        }
+        if (sd > 17)
+            p = 0;
+        put_scaled(b, r, 0);
+        for (; p > 0; p--)
+            pdn_aprs__putc(b, '0');
     } else {
         for (d = 15; d > 0 && mag * pdn_aprs__pow10i(d) >= 9.0e15; d--)
             ;
