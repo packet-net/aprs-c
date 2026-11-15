@@ -205,6 +205,7 @@ PDN_APRS__PRIVATE void pdn_aprs__find_telemetry_dao(const pdn_aprs__cbuf *cb, pd
    a positioned report's comment lifts (telemetry, a !DAO!): the "end" of the
    weather text for the run-on rule. */
 PDN_APRS__PRIVATE int pdn_aprs__lifted_run_to_end(const pdn_aprs__cbuf *cb, size_t at);
+PDN_APRS__PRIVATE int pdn_aprs__apply_lifted_dao(pdn_aprs__dctx *c, pdn_aprs_report *r, const uint8_t dao[5]);
 PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs_report *r, uint8_t dao[5]);
 /* Lifts a /A= altitude; returns 1 if found. */
 PDN_APRS__PRIVATE int pdn_aprs__lift_altitude(pdn_aprs__cbuf *cb, double *feet);

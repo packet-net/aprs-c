@@ -346,10 +346,8 @@ static int find_braces(const pdn_aprs__cbuf *cb, int digits, size_t *at, size_t 
 
 /* ---- the whole comment ---- */
 
-PDN_APRS__PRIVATE int pdn_aprs__lift_comment_start(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r)
+PDN_APRS__PRIVATE int pdn_aprs__apply_lifted_dao(pdn_aprs__dctx *c, pdn_aprs_report *r, const uint8_t dao[5])
 {
-    uint8_t dao[5];
-    pdn_aprs__lift_telemetry_dao(cb, r, dao);
     if (r->has_dao) {
         if (r->ambiguity && !r->compressed) {
             if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_DAO_WITH_AMBIGUITY))
@@ -359,6 +357,13 @@ PDN_APRS__PRIVATE int pdn_aprs__lift_comment_start(pdn_aprs__dctx *c, pdn_aprs__
         }
     }
     return 1;
+}
+
+PDN_APRS__PRIVATE int pdn_aprs__lift_comment_start(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r)
+{
+    uint8_t dao[5];
+    pdn_aprs__lift_telemetry_dao(cb, r, dao);
+    return pdn_aprs__apply_lifted_dao(c, r, dao);
 }
 
 PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r,

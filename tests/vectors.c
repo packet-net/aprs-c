@@ -21,7 +21,7 @@
 
 static int verbose = 0;
 /* passes per kind of check: lenient, strict, tolerance, reencode, encode, build */
-static int tolerance_ran, tolerance_skipped_other;
+static int tolerance_ran, tolerance_ran_other, tolerance_eligible;
 static const char *const kinds[] = {"lenient", "strict", "tolerance", "reencode", "encode", "build"};
 static int kind_passed[6];
 static const char *filter = NULL;
@@ -602,18 +602,32 @@ static void check_decode_case(const jval *c, const char *id)
         }
         jval *st = json_get(c, "strict");
         const char *by = st ? json_gets(st, "rejected_by") : NULL;
-        /* skipped when strict is rejected by a code other than this one */
-        if (count == 1 && by && strcmp(by, pdn_aprs_code_name(code)) != 0)
-            tolerance_skipped_other++;
-        if (count == 1 && !(by && strcmp(by, pdn_aprs_code_name(code)) != 0)) {
+        if (count == 1) {
             pdn_aprs_decode_options one = lenient;
+            int other = by && strcmp(by, pdn_aprs_code_name(code)) != 0;
             one.reject[code] = 1;
             rc = decode(&in, &one, &pkt);
             got = neutral_result(&pkt, rc, &one);
-            ok = strict_matches(got, c, why, sizeof why);
+            if (other) {
+                /* strict is rejected by a different code: turning off the one
+                   tolerance must give a reading whose diagnostics include that
+                   code as a warning */
+                jval *d = json_get(got, "data");
+                char want[128];
+                const char *ty = d ? json_gets(d, "type") : NULL;
+                snprintf(want, sizeof want, "warning:%s", by);
+                ok = ty && strcmp(ty, "unrecognized") != 0 && has_diag(json_get(got, "diagnostics"), want);
+                if (!ok)
+                    snprintf(why, sizeof why, "expected a reading with %s", want);
+            } else {
+                ok = strict_matches(got, c, why, sizeof why);
+            }
             tolerance_ran++;
+            if (other)
+                tolerance_ran_other++;
             report(id, "tolerance", ok, why, ok ? NULL : got, NULL);
             json_free(got);
+            tolerance_eligible++;
         }
     }
 }
@@ -762,10 +776,10 @@ int main(int argc, char **argv)
     }
     printf("passed by check: lenient %d, strict %d, single tolerance %d, re-encode %d, encode %d, build %d\n",
            kind_passed[0], kind_passed[1], kind_passed[2], kind_passed[3], kind_passed[4], kind_passed[5]);
-    printf("single tolerance ran on %d cases, skipped on %d (strict rejected by another code)\n", tolerance_ran,
-           tolerance_skipped_other);
-    if (!filter && tolerance_skipped_other != 1) {
-        printf("expected the tolerance check to be skipped on exactly 1 case\n");
+    printf("single tolerance ran on %d cases (%d of them where strict is rejected by another code)\n", tolerance_ran,
+           tolerance_ran_other);
+    if (!filter && (tolerance_ran != tolerance_eligible || tolerance_ran < 726)) {
+        printf("the tolerance check did not run on every case with exactly one tolerable code\n");
         failed++;
     }
     printf("%d passed, %d failed, %d skipped (known differences), %d cases skipped (implementation limit)\n", passed,

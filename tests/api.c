@@ -694,6 +694,35 @@ static void test_batch2(void)
     CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91SX/G PHG1060}AB") == PDN_APRS_OK && pkt.data.as.report.has_phg &&
           !pkt.data.as.report.has_altitude && strcmp(pkt.data.as.report.locator, "IO91SX") == 0);
 
+    /* a locator with its space only once what the decoder lifts is out: that
+       space separates it and the comment loses one more leading space, so two
+       spaces give "x" and three give " x", with no missing-space warning
+       (round 5, Mic-E locator space) */
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G\"4e}  x") == PDN_APRS_OK &&
+          !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
+          pkt.data.as.report.comment_len == 1 && strcmp(pkt.data.as.report.comment, "x") == 0);
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91SX/G\"4e}   x") == PDN_APRS_OK &&
+          !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
+          strcmp(pkt.data.as.report.comment, " x") == 0);
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G|!:&0'p|  x") == PDN_APRS_OK &&
+          !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
+          pkt.data.as.report.has_telemetry && strcmp(pkt.data.as.report.comment, "x") == 0);
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91SX/G|!:&0'p|   x") == PDN_APRS_OK &&
+          !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
+          pkt.data.as.report.has_telemetry && strcmp(pkt.data.as.report.comment, " x") == 0);
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G|!:&0hl!Y[/>\"4e}='p|  x") == PDN_APRS_OK &&
+          !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
+          pkt.data.as.report.has_telemetry && pkt.data.as.report.has_altitude &&
+          strcmp(pkt.data.as.report.comment, "x") == 0);
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91SX/G|!:&0hl!Y[/>\"4e}='p|   x") == PDN_APRS_OK &&
+          !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
+          strcmp(pkt.data.as.report.comment, " x") == 0);
+    /* a !DAO! that exists only by joining across a lifted altitude is text, so
+       the locator has no space and the text stays */
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G!W1\"4e}2! hi") == PDN_APRS_OK && !pkt.data.as.report.has_dao &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
+          strcmp(pkt.data.as.report.comment, "!W12! hi") == 0);
+
     /* where a Mic-E altitude was sent is data (altitude_in_comment): zero feet
        sent as a /A= is written as a /A= again, and the same data without the
        field is written in the Mic-E bytes */
