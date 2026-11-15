@@ -153,6 +153,19 @@ static int header_address_ok(const char *a)
     return address_ok((const uint8_t *)a, n);
 }
 
+/* 1 if the source, the destination and every path entry is an APRS-IS address
+   (1-9 letters, digits or -): the check that comes first, in either form. */
+PDN_APRS__PRIVATE int pdn_aprs__header_addresses_ok(const pdn_aprs_header *h, const char *dest)
+{
+    unsigned i;
+    if (!header_address_ok(h->source) || !header_address_ok(dest))
+        return 0;
+    for (i = 0; i < h->path_count && i < PDN_APRS_MAX_PATH; i++)
+        if (!header_address_ok(h->path[i].call))
+            return 0;
+    return 1;
+}
+
 /* 1 if an entry used (marked, or flagged used) comes after one that is not.
    A line reads every entry before the last mark as used, and a frame reads
    its H bits the same way, so no form carries such a path (README Read-back,

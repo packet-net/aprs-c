@@ -331,6 +331,7 @@ extern void (*pdn_aprs__fault_hook)(uint8_t *info, size_t len, int data_type);
 /* The same for the header bytes written (a TNC2 header, or an AX.25 address field). */
 extern void (*pdn_aprs__header_fault_hook)(uint8_t *head, size_t len, int ax25);
 #endif
+PDN_APRS__PRIVATE int pdn_aprs__header_addresses_ok(const pdn_aprs_header *h, const char *dest);
 PDN_APRS__PRIVATE int pdn_aprs__write_header_tnc2(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest);
 PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest,
                                                   int as_received);

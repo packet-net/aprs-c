@@ -979,7 +979,12 @@ typedef struct pdn_aprs_third_party {
        the decoder, which read the packet as received): the encoder writes
        them as they are. Data a program builds has 0, and the encoder's
        read-back then requires every inner packet, at every depth, to decode
-       with no warning or error (infos are not compared). */
+       with no warning or error (infos are not compared). The flag stands
+       for the diagnostics the decoder gave, which this struct has no list
+       for, so one limit: a program that edits `packet` of decoded data and
+       leaves the flag set has its edited bytes accepted as received, where
+       the rule would compare the old diagnostics and refuse. Clear the flag
+       when editing. */
     uint8_t as_received;
 } pdn_aprs_third_party;
 

@@ -2915,7 +2915,7 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
     pdn_aprs_encoded local;
     pdn_aprs__buf hb;
     int n, rc;
-    const char *dest;
+    const char *dest, *cannot_reason = NULL;
     if (!header || !data || (!buf && cap))
         return PDN_APRS_ERR_ARGUMENT;
     if (header->path_count > PDN_APRS_MAX_PATH)
@@ -2928,35 +2928,42 @@ PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, con
     /* the information field first, at the start of buf, then moved along
        to make room for the header, which for Mic-E carries what the encoder
        computed */
-    /* the header comes before the data in what is refused (ruling 1): one that
-       needs no computed destination is checked first */
+    /* the refusal order (README Refusal reasons): an address that is no
+       address first, then the data's faults, then the read-back's, then a
+       header the form cannot carry, and the size last. A header the form
+       cannot carry is noted here and raised after the data is judged. */
     {
         /* Mic-E computes only its destination, so the source and path are
            checked with a placeholder for it */
         const char *first = data->type == PDN_APRS_TYPE_MIC_E ? "APZ001" : header->destination;
         pdn_aprs__buf_init(&hb, head, sizeof head);
-        rc = ax25 ? pdn_aprs__write_header_ax25(&hb, header, first, 0) : pdn_aprs__write_header_tnc2(&hb, header, first);
-        if (rc == PDN_APRS_ERR_REFUSED) {
+        if (!pdn_aprs__header_addresses_ok(header, first)) {
             encoded->len = 0;
             encoded->destination[0] = 0;
-            encoded->refusal = ax25 ? PDN_APRS_REFUSAL_AX25_CANNOT_CARRY : PDN_APRS_REFUSAL_INVALID_ADDRESS;
-            encoded->reason = ax25 ? "a header address or the path is more than an AX.25 frame can carry"
-                                   : "a header address is not 1-9 letters, digits or -";
-            return rc;
+            encoded->refusal = PDN_APRS_REFUSAL_INVALID_ADDRESS;
+            encoded->reason = "a header address is not 1-9 letters, digits or -";
+            return PDN_APRS_ERR_REFUSED;
         }
         /* an entry not used before one that is reads back used, in a line and
            in a frame alike: no form carries it */
-        if (pdn_aprs__path_has_gap(header)) {
-            encoded->len = 0;
-            encoded->destination[0] = 0;
-            encoded->refusal = ax25 ? PDN_APRS_REFUSAL_AX25_CANNOT_CARRY : PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY;
-            encoded->reason = "a path entry that is not used comes before one that is, which reads back used";
-            return PDN_APRS_ERR_REFUSED;
+        rc = ax25 ? pdn_aprs__write_header_ax25(&hb, header, first, 0) : PDN_APRS_OK;
+        if (rc == PDN_APRS_ERR_REFUSED) {
+            cannot_reason = "a header address or the path is more than an AX.25 frame can carry";
+        } else if (pdn_aprs__path_has_gap(header)) {
+            cannot_reason = "a path entry that is not used comes before one that is, which reads back used";
         }
     }
     n = encode_info(data, options, buf, cap, encoded, builder);
-    if (n < 0)
+    if (n < 0 && !(cannot_reason && encoded->refusal == PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG))
         return n;
+    if (cannot_reason) {
+        encoded->len = 0;
+        encoded->refusal = ax25 ? PDN_APRS_REFUSAL_AX25_CANNOT_CARRY : PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY;
+        encoded->reason = cannot_reason;
+        if (n >= 0 && buf && cap)
+            memset(buf, 0, cap < (size_t)n ? cap : (size_t)n);
+        return PDN_APRS_ERR_REFUSED;
+    }
     dest = data->type == PDN_APRS_TYPE_MIC_E ? encoded->destination : header->destination;
     pdn_aprs__buf_init(&hb, head, sizeof head);
     rc = ax25 ? pdn_aprs__write_header_ax25(&hb, header, dest, 0) : pdn_aprs__write_header_tnc2(&hb, header, dest);
