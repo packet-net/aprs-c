@@ -103,33 +103,35 @@ static int dao_at(const uint8_t *s)
 }
 
 /* Finds, without taking anything out, the base-91 telemetry and the !DAO! the
-   comment's start lifts: the last two | around a valid telemetry body, and
-   the last !DAO! outside it. */
+   comment's start lifts. The telemetry is the LAST pair of neighbouring | (as
+   sent) whose contents are 4 to 14 bytes, an even number, each 0x21 to 0x7B
+   (R27: the last valid block wins, whatever bars follow it or come before);
+   when no pair qualifies there is none and the bars stay text. Then the last
+   !DAO! outside it. One pass from the end, each pair judged on at most 14
+   bytes, so linear in the comment however many bars it holds. */
 PDN_APRS__PRIVATE void pdn_aprs__find_telemetry_dao(const pdn_aprs__cbuf *cb, pdn_aprs__lifted *f)
 {
-    size_t last = cb->n, prev = cb->n, i;
+    size_t right = cb->n, i;
     memset(f, 0, sizeof *f);
     for (i = cb->n; i > 0; i--) {
-        if (cb->b[i - 1] == '|') {
-            if (last == cb->n) {
-                last = i - 1;
-            } else {
-                prev = i - 1;
+        size_t left;
+        if (cb->b[i - 1] != '|')
+            continue;
+        left = i - 1;
+        if (right < cb->n) {
+            size_t len = right - left - 1, k;
+            int ok = len >= 4 && len <= 14 && len % 2 == 0 && !pdn_aprs__cbuf_spans(cb, left, right + 1);
+            for (k = left + 1; ok && k < right; k++)
+                if (!A_B91(cb->b[k]))
+                    ok = 0;
+            if (ok) {
+                f->have_tlm = 1;
+                f->tstart = left;
+                f->tend = right + 1;
                 break;
             }
         }
-    }
-    if (last < cb->n && prev < cb->n) {
-        size_t len = last - prev - 1, k;
-        int ok = len >= 4 && len <= 14 && len % 2 == 0 && !pdn_aprs__cbuf_spans(cb, prev, last + 1);
-        for (k = prev + 1; ok && k < last; k++)
-            if (!A_B91(cb->b[k]))
-                ok = 0;
-        if (ok) {
-            f->have_tlm = 1;
-            f->tstart = prev;
-            f->tend = last + 1;
-        }
+        right = left;
     }
     /* the last !DAO! outside the telemetry */
     if (cb->n >= 5) {

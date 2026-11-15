@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "internal.h"
 
@@ -190,12 +191,48 @@ static void test_hostile_sizes(void)
     free(line);
 }
 
+/* The telemetry search looks at each pair of neighbouring bars once, from the
+   end, and each on at most 14 bytes: the time to decode a comment of nothing
+   but bars (in the shapes that make every pair a near miss) grows in
+   proportion to its length. Measured as the ratio of the time per byte at 480
+   bytes to that at 120: about 1 when linear, 4 or more if it were quadratic. */
+static double time_per_byte(const char *unit, size_t bytes, int reps, int mic_e)
+{
+    char line[1024];
+    size_t n = (size_t)sprintf(line, mic_e ? "N0CALL>S32UVT:`(_fn\"Oj/`" : "N0CALL>APRS:!4903.50N/07201.75W-"), ul = strlen(unit), start = n;
+    clock_t t0;
+    int i;
+    while (n - start + ul <= bytes) {
+        memcpy(line + n, unit, ul);
+        n += ul;
+    }
+    line[n] = 0;
+    t0 = clock();
+    for (i = 0; i < reps; i++)
+        decode(line, 0);
+    return (double)(clock() - t0) / (double)(n - start) / (double)reps;
+}
+
+static void test_bars_linear(void)
+{
+    static const char *const unit[] = {"|", "||", "|!!!!!|", "|!!|", "|!!!!|a", "|!!!!!!!!!!!!!!!!|", "x|!!!!|y"};
+    size_t u;
+    int mic;
+    for (mic = 0; mic < 2; mic++)
+        for (u = 0; u < sizeof unit / sizeof unit[0]; u++) {
+            double small = time_per_byte(unit[u], 120, 40000, mic), big = time_per_byte(unit[u], 480, 10000, mic);
+            if (small > 0)
+                check(big / small < 2.5, "bars: time per byte does not grow with the comment's length");
+        }
+}
+
 int main(void)
 {
     test_altitude_search();
     test_cbuf();
     test_six_lifts();
     test_hostile_sizes();
+    test_bars_linear();
     printf("%s\n", failures ? "failed" : "ok");
     return failures ? 1 : 0;
 }
