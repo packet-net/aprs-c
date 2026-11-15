@@ -440,11 +440,52 @@ static int needs_more_than(const jval *c, const input_t *in, int limit)
 
 static const pdn_aprs_device_table *devices(void) { return dev_table(); }
 
+static void check_writers_as(const jval *pt, const char *key, const char *id, const pdn_aprs_packet *p);
+
 /* "pass_through" and "pass_through_inner" (README Read-back, Header): the
    lenient packet, or for the inner key the inner packet of its third-party
    data, written with pdn_aprs_write_tnc2 and pdn_aprs_write_ax25 is the line
    and the frame given, or a refusal with exactly the code given. */
-static void check_writers(const jval *pt, const char *key, const char *id, const pdn_aprs_packet *p)
+/* The optional "header" of a pass-through case (source, destination, path): the held packet's
+   information field is written under it, so the packet is re-addressed first (a copy). */
+static void readdress(pdn_aprs_packet *q, const jval *h)
+{
+    const jval *path = json_get(h, "path");
+    const char *v;
+    size_t k;
+    if ((v = json_gets(h, "source")) != NULL)
+        snprintf(q->header.source, sizeof q->header.source, "%s", v);
+    if ((v = json_gets(h, "destination")) != NULL)
+        snprintf(q->header.destination, sizeof q->header.destination, "%s", v);
+    if (path && path->t == J_ARR) {
+        q->header.path_count = 0;
+        for (k = 0; k < path->count && k < PDN_APRS_MAX_PATH; k++) {
+            pdn_aprs_path_entry *e = &q->header.path[q->header.path_count++];
+            size_t n = path->items[k]->len;
+            memset(e, 0, sizeof *e);
+            if (n && path->items[k]->str[n - 1] == '*') {
+                e->marked = e->used = 1;
+                n--;
+            }
+            snprintf(e->call, sizeof e->call, "%.*s", (int)n, path->items[k]->str);
+        }
+    }
+}
+
+static void check_writers(const jval *pt, const char *key, const char *id, const pdn_aprs_packet *held)
+{
+    pdn_aprs_packet *copy = (pdn_aprs_packet *)malloc(sizeof *copy);
+    const pdn_aprs_packet *p = held;
+    if (copy && json_get(pt, "header")) {
+        *copy = *held;
+        readdress(copy, json_get(pt, "header"));
+        p = copy;
+    }
+    check_writers_as(pt, key, id, p);
+    free(copy);
+}
+
+static void check_writers_as(const jval *pt, const char *key, const char *id, const pdn_aprs_packet *p)
 {
     const char *tnc2 = json_gets(pt, "tnc2"), *hex = json_gets(pt, "ax25_hex");
     const char *tref = json_gets(pt, "tnc2_refusal"), *aref = json_gets(pt, "ax25_refusal");

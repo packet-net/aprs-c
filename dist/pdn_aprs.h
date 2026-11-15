@@ -1597,7 +1597,10 @@ PDN_APRS_API int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_
    PDN_APRS_REFUSAL_AX25_CANNOT_CARRY (an empty, over-long or lower-case call,
    an SSID a frame cannot hold, over 8 path entries); and
    PDN_APRS_REFUSAL_DOES_NOT_READ_BACK if the header written does not read back
-   as the header held. */
+   as the header held. A packet whose header was changed after the decode, so that
+   its information field reads as other data under the header written (a Mic-E
+   field put under a Mic-E destination, a Mic-E report under a plain one), is
+   PDN_APRS_REFUSAL_NOT_ENCODABLE, judged first. */
 PDN_APRS_API int pdn_aprs_write_tnc2(const pdn_aprs_packet *packet, char *buf, size_t cap, pdn_aprs_encoded *result);
 PDN_APRS_API int pdn_aprs_write_ax25(const pdn_aprs_packet *packet, void *buf, size_t cap, pdn_aprs_encoded *result);
 

@@ -1039,6 +1039,44 @@ static void test_second_review(void)
     CHECK(encode(&enc) == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_FIELD_NOT_ALLOWED);
 }
 
+/* ---- the read-back is under the header written ---- */
+
+static void test_under_the_header_written(void)
+{
+    pdn_aprs_encoded enc;
+    pdn_aprs_packet *inner = (pdn_aprs_packet *)malloc(sizeof *inner);
+    static uint8_t buf[300];
+    static const char line[] = "N0CALL>APZ001:`(_fn\"Oj/";
+    static const char nested[] = "N0CALL>APZ001:}N0CALL>APZ001:`(_fn\"Oj/";
+    int n;
+    no_fault();
+    /* raw bytes that are no data under a plain destination are written under it and refused
+       under one that makes them a Mic-E position; and the reverse */
+    CHECK(pdn_aprs_decode_tnc2(line, strlen(line), NULL, &pkt) == PDN_APRS_OK && pkt.data.type == PDN_APRS_TYPE_UNRECOGNIZED);
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, &enc) > 0);
+    strcpy(pkt.header.destination, "S32U6T");
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE);
+    CHECK(pdn_aprs_write_ax25(&pkt, buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE);
+    strcpy(pkt.header.destination, "APRS");
+    n = pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, &enc);
+    CHECK(n > 0 && memcmp(buf, "N0CALL>APRS:`(_fn\"Oj/", (size_t)n) == 0);
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>S32U6T:`(_fn\"Oj/", 23, NULL, &pkt) == PDN_APRS_OK && pkt.data.type == PDN_APRS_TYPE_MIC_E);
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, &enc) > 0);
+    strcpy(pkt.header.destination, "APZ001");
+    CHECK(pdn_aprs_write_tnc2(&pkt, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE);
+    /* an inner packet re-addressed */
+    CHECK(pdn_aprs_decode_tnc2(nested, strlen(nested), NULL, &pkt) == PDN_APRS_OK);
+    CHECK(pdn_aprs_decode_third_party(&pkt.data, NULL, inner) == PDN_APRS_OK);
+    CHECK(pdn_aprs_write_tnc2(inner, (char *)buf, sizeof buf, &enc) > 0);
+    strcpy(inner->header.destination, "S32U6T");
+    CHECK(pdn_aprs_write_tnc2(inner, (char *)buf, sizeof buf, &enc) == PDN_APRS_ERR_REFUSED &&
+          enc.refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE);
+    free(inner);
+}
+
 int main(void)
 {
     test_every_type();
@@ -1054,6 +1092,7 @@ int main(void)
     test_header_diagnostics();
     test_writer_codes();
     test_second_review();
+    test_under_the_header_written();
     no_fault();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

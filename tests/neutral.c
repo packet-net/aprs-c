@@ -1437,6 +1437,16 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
             return -1;
         }
     }
+    /* inner Mic-E data is written under the destination it computes, never under another: a
+       destination given that is not that one makes the field read as other data (not-encodable,
+       which comes before any fault of the header) */
+    if (inner && inner->type == PDN_APRS_TYPE_MIC_E && dst[0] && strcmp(dst, enc.destination) != 0) {
+        free(inner);
+        snprintf(cv->err, cv->errlen, "inner packet: Mic-E data reads as other data under a destination it does not compute");
+        last_refusal = PDN_APRS_REFUSAL_NOT_ENCODABLE;
+        last_via_tool = 1;
+        return -1;
+    }
     if (header_fault) {
         free(inner);
         snprintf(cv->err, cv->errlen, "%s", header_fault);

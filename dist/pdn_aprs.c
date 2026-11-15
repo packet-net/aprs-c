@@ -8745,6 +8745,18 @@ int pdn_aprs_encode_ax25(const pdn_aprs_header *header, const pdn_aprs_data *dat
 
 /* ---- a decoded packet written back as received ---- */
 
+/* 1 if the held packet's information field, decoded again under the header it is held with,
+   gives the data it holds: a copy of the packet, so what the caller holds is not touched. */
+static PDN_APRS__NOINLINE int held_reads_the_same(const pdn_aprs_packet *p)
+{
+    pdn_aprs_packet q;
+    pdn_aprs_decode_options o;
+    memset(&o, 0, sizeof o);
+    if (pdn_aprs_decode_info_unbounded(&p->header, p->info, p->info_len, &o, &q) != PDN_APRS_OK)
+        return 0;
+    return q.data.type == p->data.type && pdn_aprs__data_equal(&q.data, &p->data);
+}
+
 /* Writes the information field as received and reads the header back, as a
    user's decode of the form reads it (the outer header rules, whatever the
    packet's origin). An empty destination, which a lenient decode takes with
@@ -8784,6 +8796,17 @@ static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int a
     if (fault) {
         result->refusal = fault;
         result->reason = why;
+        return PDN_APRS_ERR_REFUSED;
+    }
+    /* the information field is read under the header written: the header changes a reading only
+       through a Mic-E destination (data type identifier ` ' 0x1C 0x1D), so a field that reads as
+       other data under this header than it was held as (Mic-E bytes put under a Mic-E destination,
+       a Mic-E report put under a plain one) is not-encodable */
+    if (p->info_len > 0 && (p->data.type == PDN_APRS_TYPE_MIC_E || p->info[0] == '`' || p->info[0] == '\'' ||
+                            p->info[0] == 0x1c || p->info[0] == 0x1d) &&
+        !held_reads_the_same(p)) {
+        result->refusal = PDN_APRS_REFUSAL_NOT_ENCODABLE;
+        result->reason = "the information field reads as other data under the header given";
         return PDN_APRS_ERR_REFUSED;
     }
     if (!ax25 && line_cannot_carry(p->info, p->info_len)) {
