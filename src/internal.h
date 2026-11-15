@@ -179,11 +179,24 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_maidenhead(pdn_aprs__dctx *c);
    bytes and the elements around it. */
 /* Where an element was lifted out of the text a boundary is left, so that no
    later recogniser reads across it (an element is read only where its bytes
-   stand whole as sent). Each comment lifts at most six elements that leave a
-   boundary (a later Mic-E altitude, telemetry, a !DAO!, a /A= altitude,
-   braces, a late PHG, RNG or DFS), each at most once; the voice frequency
-   and the leading delimiter are cut from the start, which is no boundary. */
-#define PDN_APRS__MAX_BREAKS 8
+   stand whole as sent). The kinds of element a comment lifts that leave a
+   boundary, each at most once; the voice frequency and the leading delimiter
+   are cut from the start, which is no boundary. A new kind goes here, and
+   the table (PDN_APRS_MAX_COMMENT_BOUNDARIES) must hold one place for it: the
+   check below fails to compile otherwise. A table that is full is never
+   quietly left a boundary short: it is the implementation limit
+   comment-boundaries. */
+enum {
+    PDN_APRS__LIFT_MICE_ALTITUDE, /* a later Mic-E altitude */
+    PDN_APRS__LIFT_TELEMETRY,
+    PDN_APRS__LIFT_DAO,
+    PDN_APRS__LIFT_ALTITUDE,      /* a /A= altitude */
+    PDN_APRS__LIFT_BRACES,        /* signpost or corridor braces */
+    PDN_APRS__LIFT_LATE_EXTENSION, /* a late PHG, RNG or DFS */
+    PDN_APRS__LIFT_KINDS
+};
+#define PDN_APRS__MAX_BREAKS PDN_APRS_MAX_COMMENT_BOUNDARIES
+typedef char pdn_aprs__breaks_hold_every_lift[PDN_APRS__MAX_BREAKS >= PDN_APRS__LIFT_KINDS ? 1 : -1];
 typedef struct pdn_aprs__cbuf {
     uint8_t b[PDN_APRS_TEXT_SIZE + 256];
     size_t n;
@@ -194,6 +207,7 @@ typedef struct pdn_aprs__cbuf {
     size_t brk[PDN_APRS__MAX_BREAKS];
     uint8_t brk_alt[PDN_APRS__MAX_BREAKS];
     int nbrk;
+    struct pdn_aprs__dctx *ctx; /* where a full table is reported */
 } pdn_aprs__cbuf;
 
 /* What the comment's start lifts: base-91 telemetry (from its first | to
@@ -222,6 +236,9 @@ PDN_APRS__PRIVATE void pdn_aprs__find_telemetry_dao(const pdn_aprs__cbuf *cb, pd
 PDN_APRS__PRIVATE int pdn_aprs__lifted_run_to_end(const pdn_aprs__cbuf *cb, size_t at);
 PDN_APRS__PRIVATE int pdn_aprs__apply_lifted_dao(pdn_aprs__dctx *c, pdn_aprs_report *r, const uint8_t dao[5]);
 PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs_report *r, uint8_t dao[5]);
+/* 1 if a whole /A= altitude (/A= and six digits, or - and five) starts at s
+   with n bytes left; its value goes in *feet when feet is not NULL. */
+PDN_APRS__PRIVATE int pdn_aprs__altitude_at(const uint8_t *s, size_t n, double *feet);
 /* Lifts a /A= altitude; returns 1 if found. */
 PDN_APRS__PRIVATE int pdn_aprs__lift_altitude(pdn_aprs__cbuf *cb, double *feet);
 /* The length of a PHG/PHGR, RNG or DFS data extension at s, or 0. */

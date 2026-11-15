@@ -142,6 +142,17 @@ PDN_APRS__PRIVATE size_t pdn_aprs__mic_e_locator_len(const uint8_t *s, size_t n)
     return 0;
 }
 
+/* 1 if [at, at + len) shares a byte with a whole /A= altitude in b[0, n). A
+   /A= starts at most 8 bytes before the first byte and at the last byte. */
+static int overlaps_whole_altitude(const uint8_t *b, size_t n, size_t at, size_t len)
+{
+    size_t i = at >= 8 ? at - 8 : 0;
+    for (; i < at + len && i + 9 <= n; i++)
+        if (pdn_aprs__altitude_at(b + i, n - i, NULL))
+            return 1;
+    return 0;
+}
+
 PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
 {
     pdn_aprs_report *r = &c->data->as.report;
@@ -326,12 +337,17 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
             }
         }
     }
-    pdn_aprs__cbuf_set(c, &cb, t, tl);
+    if (!pdn_aprs__cbuf_set(c, &cb, t, tl))
+        return;
     if (!r->has_altitude) {
-        /* an altitude later in the text: the first xxx} */
+        /* an altitude later in the text: the first xxx} that shares no byte
+           with a /A= standing whole as sent (that altitude is read as the
+           altitude, as a locator's bytes and a PHG's at the start are not
+           searched either) */
         size_t k;
         for (k = 0; k + 4 <= cb.n; k++) {
-            if (A_B91(cb.b[k]) && A_B91(cb.b[k + 1]) && A_B91(cb.b[k + 2]) && cb.b[k + 3] == '}')
+            if (A_B91(cb.b[k]) && A_B91(cb.b[k + 1]) && A_B91(cb.b[k + 2]) && cb.b[k + 3] == '}' &&
+                !overlaps_whole_altitude(cb.b, cb.n, k, 4))
                 break;
         }
         /* looked for before telemetry and a !DAO! are lifted, as sent */

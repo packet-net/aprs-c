@@ -10,12 +10,15 @@ PDN_APRS__PRIVATE int pdn_aprs__cbuf_set(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, 
 {
     if (n > sizeof cb->b) {
         cb->n = 0;
+        cb->nbrk = 0;
+        cb->ctx = c;
         return pdn_aprs__overflow(c);
     }
     if (n)
         memmove(cb->b, s, n);
     cb->n = n;
     cb->nbrk = 0;
+    cb->ctx = c;
     return 1;
 }
 
@@ -44,9 +47,11 @@ PDN_APRS__PRIVATE void pdn_aprs__cbuf_cut(pdn_aprs__cbuf *cb, size_t at, size_t 
     }
     cb->nbrk = m;
     if (at > 0 && at < cb->n) {
-        /* insert in order; at most PDN_APRS__MAX_BREAKS - 2 are ever held
-           before this one (see the cbuf) */
-        if (cb->nbrk < PDN_APRS__MAX_BREAKS) {
+        /* insert in order; one place for each kind of lift (see the cbuf),
+           and a full table is a limit, never a boundary left out */
+        if (cb->nbrk >= PDN_APRS__MAX_BREAKS) {
+            pdn_aprs__overflow_limit(cb->ctx, PDN_APRS_LIMIT_COMMENT_BOUNDARIES);
+        } else {
             for (k = cb->nbrk; k > 0 && cb->brk[k - 1] > at; k--) {
                 cb->brk[k] = cb->brk[k - 1];
                 cb->brk_alt[k] = cb->brk_alt[k - 1];
@@ -233,29 +238,34 @@ PDN_APRS__PRIVATE void pdn_aprs__apply_dao(pdn_aprs__dctx *c, pdn_aprs_report *r
 
 /* ---- altitude ---- */
 
+PDN_APRS__PRIVATE int pdn_aprs__altitude_at(const uint8_t *s, size_t n, double *feet)
+{
+    long v;
+    if (n < 9 || s[0] != '/' || s[1] != 'A' || s[2] != '=')
+        return 0;
+    if (s[3] == '-') {
+        v = pdn_aprs__digits(s + 4, 5);
+        if (v < 0)
+            return 0;
+        v = -v;
+    } else {
+        v = pdn_aprs__digits(s + 3, 6);
+        if (v < 0)
+            return 0;
+    }
+    if (feet)
+        *feet = (double)v;
+    return 1;
+}
+
 PDN_APRS__PRIVATE int pdn_aprs__lift_altitude(pdn_aprs__cbuf *cb, double *feet)
 {
     size_t i;
-    if (cb->n < 9)
-        return 0;
     for (i = 0; i + 9 <= cb->n; i++) {
-        const uint8_t *s = cb->b + i;
-        long v;
-        if (s[0] != '/' || s[1] != 'A' || s[2] != '=' || pdn_aprs__cbuf_spans(cb, i, i + 9))
-            continue;
-        if (s[3] == '-') {
-            v = pdn_aprs__digits(s + 4, 5);
-            if (v < 0)
-                continue;
-            v = -v;
-        } else {
-            v = pdn_aprs__digits(s + 3, 6);
-            if (v < 0)
-                continue;
+        if (!pdn_aprs__cbuf_spans(cb, i, i + 9) && pdn_aprs__altitude_at(cb->b + i, cb->n - i, feet)) {
+            pdn_aprs__cbuf_cut(cb, i, 9, 1);
+            return 1;
         }
-        *feet = (double)v;
-        pdn_aprs__cbuf_cut(cb, i, 9, 1);
-        return 1;
     }
     return 0;
 }

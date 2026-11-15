@@ -117,6 +117,14 @@ PDN_APRS_API const char *pdn_aprs_version(void);
    library. A ninth one is unrecognized data with the error
    PDN_APRS_CODE_IMPLEMENTATION_LIMIT, in a lenient decode and a strict one. */
 #define PDN_APRS_MAX_WEATHER_EXTRA 8
+/* Places in one comment where an element was lifted and a boundary is kept,
+   so that no later reading spans it: a later Mic-E altitude, telemetry, a
+   !DAO!, a /A= altitude, braces and a late PHG, RNG or DFS, each lifted at
+   most once. A capacity of this library sized to those six kinds; a decode
+   that would need one more is unrecognized data with the error
+   PDN_APRS_CODE_IMPLEMENTATION_LIMIT (limit comment-boundaries), never a
+   boundary left out. No packet reaches it today. */
+#define PDN_APRS_MAX_COMMENT_BOUNDARIES 6
 
 /* ------------------------------------------------------------------------ */
 /* Results                                                                  */
@@ -227,7 +235,8 @@ typedef enum pdn_aprs_limit {
     PDN_APRS_LIMIT_PATH,              /* PDN_APRS_MAX_PATH: path entries, in the header or an inner one */
     PDN_APRS_LIMIT_CAPABILITIES,      /* PDN_APRS_MAX_CAPABILITIES */
     PDN_APRS_LIMIT_WEATHER_EXTRAS,    /* PDN_APRS_MAX_WEATHER_EXTRA */
-    PDN_APRS_LIMIT_WEATHER_EXTRA_VALUE /* an extra field's value of more than 23 characters */
+    PDN_APRS_LIMIT_WEATHER_EXTRA_VALUE, /* an extra field's value of more than 23 characters */
+    PDN_APRS_LIMIT_COMMENT_BOUNDARIES   /* PDN_APRS_MAX_COMMENT_BOUNDARIES: no packet reaches it */
 } pdn_aprs_limit;
 
 /* The limits.json key for a pdn_aprs_limit ("path"), or NULL for none or out of range. */

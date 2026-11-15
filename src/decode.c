@@ -92,6 +92,8 @@ const char *pdn_aprs_limit_name(int limit)
         return "weather-extras";
     case PDN_APRS_LIMIT_WEATHER_EXTRA_VALUE:
         return "weather-extra-value";
+    case PDN_APRS_LIMIT_COMMENT_BOUNDARIES:
+        return "comment-boundaries";
     default:
         return NULL;
     }

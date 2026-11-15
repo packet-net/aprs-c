@@ -186,11 +186,24 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_maidenhead(pdn_aprs__dctx *c);
    bytes and the elements around it. */
 /* Where an element was lifted out of the text a boundary is left, so that no
    later recogniser reads across it (an element is read only where its bytes
-   stand whole as sent). Each comment lifts at most six elements that leave a
-   boundary (a later Mic-E altitude, telemetry, a !DAO!, a /A= altitude,
-   braces, a late PHG, RNG or DFS), each at most once; the voice frequency
-   and the leading delimiter are cut from the start, which is no boundary. */
-#define PDN_APRS__MAX_BREAKS 8
+   stand whole as sent). The kinds of element a comment lifts that leave a
+   boundary, each at most once; the voice frequency and the leading delimiter
+   are cut from the start, which is no boundary. A new kind goes here, and
+   the table (PDN_APRS_MAX_COMMENT_BOUNDARIES) must hold one place for it: the
+   check below fails to compile otherwise. A table that is full is never
+   quietly left a boundary short: it is the implementation limit
+   comment-boundaries. */
+enum {
+    PDN_APRS__LIFT_MICE_ALTITUDE, /* a later Mic-E altitude */
+    PDN_APRS__LIFT_TELEMETRY,
+    PDN_APRS__LIFT_DAO,
+    PDN_APRS__LIFT_ALTITUDE,      /* a /A= altitude */
+    PDN_APRS__LIFT_BRACES,        /* signpost or corridor braces */
+    PDN_APRS__LIFT_LATE_EXTENSION, /* a late PHG, RNG or DFS */
+    PDN_APRS__LIFT_KINDS
+};
+#define PDN_APRS__MAX_BREAKS PDN_APRS_MAX_COMMENT_BOUNDARIES
+typedef char pdn_aprs__breaks_hold_every_lift[PDN_APRS__MAX_BREAKS >= PDN_APRS__LIFT_KINDS ? 1 : -1];
 typedef struct pdn_aprs__cbuf {
     uint8_t b[PDN_APRS_TEXT_SIZE + 256];
     size_t n;
@@ -201,6 +214,7 @@ typedef struct pdn_aprs__cbuf {
     size_t brk[PDN_APRS__MAX_BREAKS];
     uint8_t brk_alt[PDN_APRS__MAX_BREAKS];
     int nbrk;
+    struct pdn_aprs__dctx *ctx; /* where a full table is reported */
 } pdn_aprs__cbuf;
 
 /* What the comment's start lifts: base-91 telemetry (from its first | to
@@ -229,6 +243,9 @@ PDN_APRS__PRIVATE void pdn_aprs__find_telemetry_dao(const pdn_aprs__cbuf *cb, pd
 PDN_APRS__PRIVATE int pdn_aprs__lifted_run_to_end(const pdn_aprs__cbuf *cb, size_t at);
 PDN_APRS__PRIVATE int pdn_aprs__apply_lifted_dao(pdn_aprs__dctx *c, pdn_aprs_report *r, const uint8_t dao[5]);
 PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs_report *r, uint8_t dao[5]);
+/* 1 if a whole /A= altitude (/A= and six digits, or - and five) starts at s
+   with n bytes left; its value goes in *feet when feet is not NULL. */
+PDN_APRS__PRIVATE int pdn_aprs__altitude_at(const uint8_t *s, size_t n, double *feet);
 /* Lifts a /A= altitude; returns 1 if found. */
 PDN_APRS__PRIVATE int pdn_aprs__lift_altitude(pdn_aprs__cbuf *cb, double *feet);
 /* The length of a PHG/PHGR, RNG or DFS data extension at s, or 0. */
@@ -749,6 +766,8 @@ const char *pdn_aprs_limit_name(int limit)
         return "weather-extras";
     case PDN_APRS_LIMIT_WEATHER_EXTRA_VALUE:
         return "weather-extra-value";
+    case PDN_APRS_LIMIT_COMMENT_BOUNDARIES:
+        return "comment-boundaries";
     default:
         return NULL;
     }
@@ -2354,12 +2373,15 @@ PDN_APRS__PRIVATE int pdn_aprs__cbuf_set(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, 
 {
     if (n > sizeof cb->b) {
         cb->n = 0;
+        cb->nbrk = 0;
+        cb->ctx = c;
         return pdn_aprs__overflow(c);
     }
     if (n)
         memmove(cb->b, s, n);
     cb->n = n;
     cb->nbrk = 0;
+    cb->ctx = c;
     return 1;
 }
 
@@ -2388,9 +2410,11 @@ PDN_APRS__PRIVATE void pdn_aprs__cbuf_cut(pdn_aprs__cbuf *cb, size_t at, size_t 
     }
     cb->nbrk = m;
     if (at > 0 && at < cb->n) {
-        /* insert in order; at most PDN_APRS__MAX_BREAKS - 2 are ever held
-           before this one (see the cbuf) */
-        if (cb->nbrk < PDN_APRS__MAX_BREAKS) {
+        /* insert in order; one place for each kind of lift (see the cbuf),
+           and a full table is a limit, never a boundary left out */
+        if (cb->nbrk >= PDN_APRS__MAX_BREAKS) {
+            pdn_aprs__overflow_limit(cb->ctx, PDN_APRS_LIMIT_COMMENT_BOUNDARIES);
+        } else {
             for (k = cb->nbrk; k > 0 && cb->brk[k - 1] > at; k--) {
                 cb->brk[k] = cb->brk[k - 1];
                 cb->brk_alt[k] = cb->brk_alt[k - 1];
@@ -2577,29 +2601,34 @@ PDN_APRS__PRIVATE void pdn_aprs__apply_dao(pdn_aprs__dctx *c, pdn_aprs_report *r
 
 /* ---- altitude ---- */
 
+PDN_APRS__PRIVATE int pdn_aprs__altitude_at(const uint8_t *s, size_t n, double *feet)
+{
+    long v;
+    if (n < 9 || s[0] != '/' || s[1] != 'A' || s[2] != '=')
+        return 0;
+    if (s[3] == '-') {
+        v = pdn_aprs__digits(s + 4, 5);
+        if (v < 0)
+            return 0;
+        v = -v;
+    } else {
+        v = pdn_aprs__digits(s + 3, 6);
+        if (v < 0)
+            return 0;
+    }
+    if (feet)
+        *feet = (double)v;
+    return 1;
+}
+
 PDN_APRS__PRIVATE int pdn_aprs__lift_altitude(pdn_aprs__cbuf *cb, double *feet)
 {
     size_t i;
-    if (cb->n < 9)
-        return 0;
     for (i = 0; i + 9 <= cb->n; i++) {
-        const uint8_t *s = cb->b + i;
-        long v;
-        if (s[0] != '/' || s[1] != 'A' || s[2] != '=' || pdn_aprs__cbuf_spans(cb, i, i + 9))
-            continue;
-        if (s[3] == '-') {
-            v = pdn_aprs__digits(s + 4, 5);
-            if (v < 0)
-                continue;
-            v = -v;
-        } else {
-            v = pdn_aprs__digits(s + 3, 6);
-            if (v < 0)
-                continue;
+        if (!pdn_aprs__cbuf_spans(cb, i, i + 9) && pdn_aprs__altitude_at(cb->b + i, cb->n - i, feet)) {
+            pdn_aprs__cbuf_cut(cb, i, 9, 1);
+            return 1;
         }
-        *feet = (double)v;
-        pdn_aprs__cbuf_cut(cb, i, 9, 1);
-        return 1;
     }
     return 0;
 }
@@ -3387,6 +3416,17 @@ PDN_APRS__PRIVATE size_t pdn_aprs__mic_e_locator_len(const uint8_t *s, size_t n)
     return 0;
 }
 
+/* 1 if [at, at + len) shares a byte with a whole /A= altitude in b[0, n). A
+   /A= starts at most 8 bytes before the first byte and at the last byte. */
+static int overlaps_whole_altitude(const uint8_t *b, size_t n, size_t at, size_t len)
+{
+    size_t i = at >= 8 ? at - 8 : 0;
+    for (; i < at + len && i + 9 <= n; i++)
+        if (pdn_aprs__altitude_at(b + i, n - i, NULL))
+            return 1;
+    return 0;
+}
+
 PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
 {
     pdn_aprs_report *r = &c->data->as.report;
@@ -3571,12 +3611,17 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
             }
         }
     }
-    pdn_aprs__cbuf_set(c, &cb, t, tl);
+    if (!pdn_aprs__cbuf_set(c, &cb, t, tl))
+        return;
     if (!r->has_altitude) {
-        /* an altitude later in the text: the first xxx} */
+        /* an altitude later in the text: the first xxx} that shares no byte
+           with a /A= standing whole as sent (that altitude is read as the
+           altitude, as a locator's bytes and a PHG's at the start are not
+           searched either) */
         size_t k;
         for (k = 0; k + 4 <= cb.n; k++) {
-            if (A_B91(cb.b[k]) && A_B91(cb.b[k + 1]) && A_B91(cb.b[k + 2]) && cb.b[k + 3] == '}')
+            if (A_B91(cb.b[k]) && A_B91(cb.b[k + 1]) && A_B91(cb.b[k + 2]) && cb.b[k + 3] == '}' &&
+                !overlaps_whole_altitude(cb.b, cb.n, k, 4))
                 break;
         }
         /* looked for before telemetry and a !DAO! are lifted, as sent */

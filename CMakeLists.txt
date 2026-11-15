@@ -179,6 +179,17 @@ if(PDN_APRS_BUILD_TESTS)
       target_link_libraries(pdn_aprs_mice_codes_test PRIVATE m)
     endif()
     add_test(NAME mice_codes COMMAND pdn_aprs_mice_codes_test)
+
+    # the comment working copy and the Mic-E altitude search, which reach private functions
+    add_executable(pdn_aprs_comment_test tests/comment_test.c ${PDN_APRS_SOURCES})
+    target_include_directories(pdn_aprs_comment_test PRIVATE ${PDN_APRS_INCLUDE} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_options(pdn_aprs_comment_test PRIVATE ${PDN_APRS_WARNINGS})
+    if(MSVC)
+      target_compile_definitions(pdn_aprs_comment_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+      target_link_libraries(pdn_aprs_comment_test PRIVATE m)
+    endif()
+    add_test(NAME comment COMMAND pdn_aprs_comment_test)
   endif()
 
   if(PDN_APRS_CXX_CHECK)

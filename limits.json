@@ -3,5 +3,6 @@
   "path": 16,
   "capabilities": 64,
   "weather-extras": 8,
-  "weather-extra-value": 23
+  "weather-extra-value": 23,
+  "comment-boundaries": 6
 }
