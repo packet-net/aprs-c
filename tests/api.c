@@ -2243,6 +2243,59 @@ static void test_lifting_never_joins(void)
           !pkt.data.as.report.has_altitude && strcmp(pkt.data.as.report.comment, "x\"4e}y") == 0);
 }
 
+/* A defect of one field or entry is listed once for each occurrence; a judgement about a whole, once.
+   A full list never loses the error that stopped the decode. */
+static void test_diagnostics_per_occurrence(void)
+{
+    static pdn_aprs_packet p;
+    static const uint8_t frame_two[] = {0x82, 0xA0, 0xA4, 0xA6, 0x40, 0x40, 0x60, 0x9C, 0x60, 0x86, 0x82, 0x98, 0x98, 0x60,
+                                        0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x60, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x61,
+                                        0x03, 0xF0, '>', 'h', 'i'};
+    char line[200];
+    int i, n, count;
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APRS,A,,B,,C:>hi", 23, NULL, &p) == PDN_APRS_OK);
+    for (i = 0, count = 0; i < p.diagnostic_count; i++)
+        count += p.diagnostics[i].code == PDN_APRS_CODE_EMPTY_PATH_ENTRY;
+    CHECK(count == 2 && p.header.path_count == 3);
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APRS:}N0CALL>APRS,A,,B,,C:>hi", 36, NULL, &p) == PDN_APRS_OK);
+    {
+        pdn_aprs_packet *in = (pdn_aprs_packet *)malloc(sizeof *in);
+        CHECK(pdn_aprs_decode_third_party(&p.data, NULL, in) == PDN_APRS_OK);
+        for (i = 0, count = 0; i < in->diagnostic_count; i++)
+            count += in->diagnostics[i].code == PDN_APRS_CODE_EMPTY_PATH_ENTRY;
+        CHECK(count == 2);
+        free(in);
+    }
+    /* two empty digipeater addresses in a frame */
+    CHECK(pdn_aprs_decode_ax25(frame_two, sizeof frame_two, NULL, &p) == PDN_APRS_OK);
+    for (i = 0, count = 0; i < p.diagnostic_count; i++)
+        count += p.diagnostics[i].code == PDN_APRS_CODE_EMPTY_PATH_ENTRY;
+    CHECK(count == 2 && p.header.path_count == 0);
+    /* several used markers are one judgement of the path */
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APRS,A*,B*,C*:>hi", 24, NULL, &p) == PDN_APRS_OK);
+    for (i = 0, count = 0; i < p.diagnostic_count; i++)
+        count += p.diagnostics[i].code == PDN_APRS_CODE_MULTIPLE_USED_MARKERS;
+    CHECK(count == 1);
+    /* a header with dozens of empty entries fills the list: the error that stops the decode is still there */
+    n = sprintf(line, "N0CALL>APRS,A");
+    for (i = 0; i < 40; i++)
+        line[n++] = ',';
+    n += sprintf(line + n, ":!junk");
+    pdn_aprs_decode_tnc2(line, (size_t)n, NULL, &p);
+    CHECK(p.diagnostic_count == PDN_APRS_MAX_DIAGNOSTICS);
+    CHECK(pdn_aprs_has_diagnostic(&p, -1, PDN_APRS_SEVERITY_ERROR));
+    /* a strict decoder stops at the first */
+    {
+        pdn_aprs_decode_options o;
+        memset(&o, 0, sizeof o);
+        o.strict = 1;
+        pdn_aprs_decode_tnc2("N0CALL>APRS,A,,B,,C:>hi", 23, &o, &p);
+        for (i = 0, count = 0; i < p.diagnostic_count; i++)
+            count += p.diagnostics[i].code == PDN_APRS_CODE_EMPTY_PATH_ENTRY;
+        CHECK(count == 1);
+    }
+}
+
 int main(void)
 {
     test_basics();
@@ -2261,6 +2314,7 @@ int main(void)
     test_round3();
     test_hostile_lengths();
     test_too_long_and_line_end();
+    test_diagnostics_per_occurrence();
     test_unterminated_strings();
     test_unterminated_header();
     test_unbounded_too_long();

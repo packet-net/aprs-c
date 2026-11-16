@@ -105,7 +105,10 @@ PDN_APRS_API const char *pdn_aprs_version(void);
 /* The room reject[] in the decode options has for diagnostic codes: fixed, so
    that adding a code never changes the struct. */
 #define PDN_APRS_MAX_CODES 128
-/* The most diagnostics kept for one packet; any beyond are dropped. */
+/* The most diagnostics kept for one packet. A defect of one field or entry is listed once for each
+   occurrence (two empty path entries give two warnings), so a header with many of them can fill the
+   list: warnings beyond it are dropped, but an error that stops the decode takes the last place, so it
+   is never the one left out. */
 #define PDN_APRS_MAX_DIAGNOSTICS 24
 /* Base-91 comment telemetry and telemetry reports carry up to 5 analog
    channels; telemetry metadata names up to 13 channels and gives up to 15

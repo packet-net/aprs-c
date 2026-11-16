@@ -16,6 +16,11 @@ PDN_APRS__PRIVATE void pdn_aprs__diag(pdn_aprs__dctx *c, int severity, int code)
         p->diagnostics[p->diagnostic_count].severity = (uint8_t)severity;
         p->diagnostics[p->diagnostic_count].code = (uint8_t)code;
         p->diagnostic_count++;
+    } else if (severity == PDN_APRS_SEVERITY_ERROR) {
+        /* the list is full (a header with dozens of empty path entries lists a warning for each):
+           an error that stops the decode is never the one left out, so it takes the last place */
+        p->diagnostics[PDN_APRS_MAX_DIAGNOSTICS - 1].severity = (uint8_t)severity;
+        p->diagnostics[PDN_APRS_MAX_DIAGNOSTICS - 1].code = (uint8_t)code;
     }
 }
 
@@ -708,6 +713,16 @@ static int ax25_address(pdn_aprs__dctx *c, const uint8_t *a, char *out, int *nul
     return 1;
 }
 
+/* The same, counting each address with a defect once, so that the defect is listed for each
+   address that has it (README Comments: a defect of one entry is listed once for each occurrence). */
+static int ax25_address_counted(pdn_aprs__dctx *c, const uint8_t *a, char *out, int *nul_padded, int *bad_chars)
+{
+    int np = 0, bc = 0, r = ax25_address(c, a, out, &np, &bc);
+    *nul_padded += np;
+    *bad_chars += bc;
+    return r;
+}
+
 /* The address field of an AX.25 UI frame, control and PID: the header into
    h, and in *info_at where the information field starts. Returns
    PDN_APRS_OK, or PDN_APRS_ERR_HEADER with the reason in c's diagnostics. */
@@ -735,22 +750,22 @@ PDN_APRS__PRIVATE int pdn_aprs__parse_ax25_header(pdn_aprs__dctx *c, const uint8
         pdn_aprs__fail(c, PDN_APRS_CODE_TOO_MANY_DIGIPEATERS);
         return PDN_APRS_ERR_HEADER;
     }
-    if (ax25_address(c, f + 7, h->source, &nul_padded, &bad_chars) != 1 ||
-        (k = ax25_address(c, f, h->destination, &nul_padded, &bad_chars)) < 0) {
+    if (ax25_address_counted(c, f + 7, h->source, &nul_padded, &bad_chars) != 1 ||
+        (k = ax25_address_counted(c, f, h->destination, &nul_padded, &bad_chars)) < 0) {
         pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_ADDRESS);
         return PDN_APRS_ERR_HEADER;
     }
     empty_destination = k == 0;
     for (i = 2; i < naddr; i++) {
         pdn_aprs_path_entry *e = &h->path[h->path_count];
-        k = ax25_address(c, f + 7 * i, e->call, &nul_padded, &bad_chars);
+        k = ax25_address_counted(c, f + 7 * i, e->call, &nul_padded, &bad_chars);
         if (k < 0) {
             pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_ADDRESS);
             return PDN_APRS_ERR_HEADER;
         }
         if (k == 0) {
             /* an empty digipeater is left out of the path, as in TNC2 */
-            empty_path = 1;
+            empty_path++;
             continue;
         }
         if (f[7 * i + 6] & 0x80) {
@@ -761,14 +776,18 @@ PDN_APRS__PRIVATE int pdn_aprs__parse_ax25_header(pdn_aprs__dctx *c, const uint8
     }
     for (i = 0; (int)i <= last_marked; i++)
         h->path[i].used = 1;
-    if (nul_padded && !pdn_aprs__tolerate(c, PDN_APRS_CODE_NUL_PADDED_ADDRESS))
-        return PDN_APRS_ERR_HEADER;
-    if (bad_chars && !pdn_aprs__tolerate(c, PDN_APRS_CODE_INVALID_AX25_ADDRESS_CHARACTERS))
-        return PDN_APRS_ERR_HEADER;
+    /* one diagnostic for each address or entry that has the defect */
+    for (k = 0; k < nul_padded; k++)
+        if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_NUL_PADDED_ADDRESS))
+            return PDN_APRS_ERR_HEADER;
+    for (k = 0; k < bad_chars; k++)
+        if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_INVALID_AX25_ADDRESS_CHARACTERS))
+            return PDN_APRS_ERR_HEADER;
     if (empty_destination && !pdn_aprs__tolerate(c, PDN_APRS_CODE_EMPTY_DESTINATION))
         return PDN_APRS_ERR_HEADER;
-    if (empty_path && !pdn_aprs__tolerate(c, PDN_APRS_CODE_EMPTY_PATH_ENTRY))
-        return PDN_APRS_ERR_HEADER;
+    for (k = 0; k < empty_path; k++)
+        if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_EMPTY_PATH_ENTRY))
+            return PDN_APRS_ERR_HEADER;
     *info_at = at + 2;
     return PDN_APRS_OK;
 }

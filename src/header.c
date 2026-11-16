@@ -62,7 +62,7 @@ PDN_APRS__PRIVATE size_t pdn_aprs__parse_tnc2_header(pdn_aprs__dctx *c, const ui
                                                      pdn_aprs_header *h, int third_party)
 {
     size_t colon, gt, i, start;
-    int field = 0, marks = 0, last_marked = -1, empty_path = 0;
+    int field = 0, marks = 0, last_marked = -1, empty_path = 0, k;
     memset(h, 0, sizeof *h);
     h->q_construct = -1;
     for (colon = 0; colon < n && s[colon] != ':'; colon++)
@@ -103,7 +103,7 @@ PDN_APRS__PRIVATE size_t pdn_aprs__parse_tnc2_header(pdn_aprs__dctx *c, const ui
                     h->destination[len] = 0;
                 }
             } else if (len == 0) {
-                empty_path = 1;
+                empty_path++;
             } else {
                 if (e[len - 1] == '*') {
                     marked = 1;
@@ -134,8 +134,11 @@ PDN_APRS__PRIVATE size_t pdn_aprs__parse_tnc2_header(pdn_aprs__dctx *c, const ui
     }
     if (h->destination[0] == 0 && !pdn_aprs__tolerate(c, PDN_APRS_CODE_EMPTY_DESTINATION))
         return 0;
-    if (empty_path && !pdn_aprs__tolerate(c, PDN_APRS_CODE_EMPTY_PATH_ENTRY))
-        return 0;
+    /* one diagnostic for each empty entry; several used markers are a judgement of the whole path and
+       are listed once */
+    for (k = 0; k < empty_path; k++)
+        if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_EMPTY_PATH_ENTRY))
+            return 0;
     if (marks > 1 && !pdn_aprs__tolerate(c, PDN_APRS_CODE_MULTIPLE_USED_MARKERS))
         return 0;
     for (i = 0; (int)i <= last_marked; i++)
