@@ -1029,8 +1029,8 @@ static int put_wx_field(pdn_aprs__ectx *e, char letter, const pdn_aprs_weather *
         if (pdn_aprs__round(v) == 100.0)
             v = 0;
         else if (pdn_aprs__round(v) < 1.0) {
-            /* 0 to 0.5 rounds to 0, which has no form; a negative humidity is outside the field */
-            if (v < 0)
+            /* a value that rounds to 0 (-0.5 to 0.5) has no form; one that rounds below 0 is outside the field */
+            if (pdn_aprs__round(v) < 0.0)
                 return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "humidity out of range");
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "humidity out of range");
         }

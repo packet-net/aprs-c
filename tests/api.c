@@ -366,7 +366,7 @@ static void test_exact_bytes(void)
         /* a humidity that rounds to 0 has no form; a negative one is outside the field */
         static const double h[] = {0.4, 0.0, -0.4, -0.6, -5.0, 100.4, 100.6};
         static const int want[] = {PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM,
-                                   PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE,
+                                   PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE,
                                    PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, 0, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE};
         char o[300];
         unsigned k;
