@@ -143,6 +143,11 @@ if(PDN_APRS_BUILD_TESTS)
   target_compile_options(pdn_aprs_json_test PRIVATE ${PDN_APRS_WARNINGS})
   add_test(NAME json COMMAND pdn_aprs_json_test)
 
+  add_executable(pdn_aprs_neutral_test tests/neutral_test.c)
+  target_link_libraries(pdn_aprs_neutral_test PRIVATE pdn_aprs_test_support)
+  target_compile_options(pdn_aprs_neutral_test PRIVATE ${PDN_APRS_WARNINGS})
+  add_test(NAME neutral COMMAND pdn_aprs_neutral_test)
+
   add_executable(pdn_aprs_sweep_test tests/sweep.c)
   target_link_libraries(pdn_aprs_sweep_test PRIVATE pdn_aprs)
   target_compile_options(pdn_aprs_sweep_test PRIVATE ${PDN_APRS_WARNINGS})

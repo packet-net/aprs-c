@@ -1163,6 +1163,9 @@ static void meta_strings_in(conv *cv, const jval *a, const char *k, pdn_aprs_tel
 }
 
 static int last_refusal;
+/* A finding of the read-back that no rule check made (Mic-E data under a destination it does not compute):
+   it comes after every rule check (README Read-back), so a fault of the data or the header beside it wins. */
+static int pending_readback;
 /* A fault the C data has no field to carry, noted while the conversion went
    on, so the encoder's own faults are still found: the refusal names the one
    first in the README's order. */
@@ -1219,8 +1222,18 @@ int neutral_encode(const pdn_aprs_data *d, const pdn_aprs_encode_options *o, voi
 {
     int code = pending_refusal, rc = pdn_aprs_encode_info(d, o, buf, cap, enc);
     const char *why = pending_why;
+    int readback = pending_readback;
     pending_refusal = 0;
+    pending_readback = 0;
     last_via_tool = 0;
+    if (!code && readback && (rc >= 0 || neutral_refusal_rank(enc->refusal) >= neutral_refusal_rank(PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD))) {
+        /* no rule check refused it: the read-back finds the destination wrong */
+        enc->len = 0;
+        enc->refusal = PDN_APRS_REFUSAL_NOT_ENCODABLE;
+        enc->reason = "inner packet: Mic-E data reads as other data under a destination it does not compute";
+        last_via_tool = 1;
+        return PDN_APRS_ERR_REFUSED;
+    }
     if (!code)
         return rc;
     /* the 256 bytes of the field are judged only for a record with no other
@@ -1340,7 +1353,8 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
     size_t n = 0, k, last = 0;
     int rc, i;
     const char *header_fault = NULL;
-    int given_diagnostics = 0;
+    int given_diagnostics = 0, mic_dest_mismatch = 0, saved_refusal = 0;
+    const char *saved_why = NULL;
     memset(&enc, 0, sizeof enc);
     keys_only(cv, p, keys);
     if (cv->bad)
@@ -1414,6 +1428,8 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         i = 0;
         memset(&enc, 0, sizeof enc);
     } else {
+        saved_refusal = pending_refusal;
+        saved_why = pending_why;
         rc = neutral_to_data(data, inner, cv->err, cv->errlen);
         if (rc == -1 && last_refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE) {
             free(inner);
@@ -1430,6 +1446,9 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         }
         i = rc == 1 ? neutral_encode(inner, NULL, line + 2 * PDN_APRS_MAX_INFO, 2 * PDN_APRS_MAX_INFO, &enc)
                     : PDN_APRS_ERR_REFUSED;
+        /* what this level had noted survives the inner conversion, which starts afresh */
+        pending_refusal = saved_refusal;
+        pending_why = saved_why;
         if (rc == 1 && i < 0 && !header_fault) {
             free(inner);
             snprintf(cv->err, cv->errlen, "inner packet: %s", enc.reason ? enc.reason : pdn_aprs_strerror(i));
@@ -1438,15 +1457,10 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         }
     }
     /* inner Mic-E data is written under the destination it computes, never under another: a
-       destination given that is not that one makes the field read as other data (not-encodable,
-       which comes before any fault of the header) */
-    if (inner && inner->type == PDN_APRS_TYPE_MIC_E && dst[0] && strcmp(dst, enc.destination) != 0) {
-        free(inner);
-        snprintf(cv->err, cv->errlen, "inner packet: Mic-E data reads as other data under a destination it does not compute");
-        last_refusal = PDN_APRS_REFUSAL_NOT_ENCODABLE;
-        last_via_tool = 1;
-        return -1;
-    }
+       destination given that is not that one makes the field read as other data, which the
+       read-back finds after every rule check (a fault of the header or the data wins) */
+    if (inner && inner->type == PDN_APRS_TYPE_MIC_E && dst[0] && strcmp(dst, enc.destination) != 0)
+        mic_dest_mismatch = 1;
     if (header_fault) {
         free(inner);
         snprintf(cv->err, cv->errlen, "%s", header_fault);
@@ -1476,9 +1490,26 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         n = h + 1 + (size_t)i;
     }
     t->len = (uint16_t)n;
+    if (mic_dest_mismatch)
+        pending_readback = 1;
     if (given_diagnostics)
         inner_diagnostics_given(p, t);
     return 1;
+}
+
+/* A non-finite number is not-a-number wherever it is, in any field, at any depth and in any list item,
+   the surplus items past what the C data holds included, before every other check but the header's
+   and the names' (it ranks as the README's order says): noted for the call's result. */
+static void scan_nonfinite(const jval *j)
+{
+    size_t i;
+    if (!j)
+        return;
+    if (j->t == J_NUM && !(j->num - j->num == 0.0))
+        note_pending(PDN_APRS_REFUSAL_NOT_A_NUMBER, "a number is NaN or infinite");
+    if (j->t == J_ARR || j->t == J_OBJ)
+        for (i = 0; i < j->count; i++)
+            scan_nonfinite(j->items[i]);
 }
 
 int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
@@ -1498,6 +1529,8 @@ int neutral_to_data(const jval *j, pdn_aprs_data *d, char *err, size_t errlen)
     last_refusal = 0;
     last_via_tool = 0;
     pending_refusal = 0;
+    pending_readback = 0;
+    scan_nonfinite(j);
     if (!type) {
         snprintf(err, errlen, "no type");
         return 0;
