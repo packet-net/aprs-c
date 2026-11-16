@@ -1028,8 +1028,12 @@ static int put_wx_field(pdn_aprs__ectx *e, char letter, const pdn_aprs_weather *
         /* h00 is 100%, so a humidity that rounds to 0 has no form */
         if (pdn_aprs__round(v) == 100.0)
             v = 0;
-        else if (pdn_aprs__round(v) < 1.0)
+        else if (pdn_aprs__round(v) < 1.0) {
+            /* 0 to 0.5 rounds to 0, which has no form; a negative humidity is outside the field */
+            if (v < 0)
+                return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, "humidity out of range");
             return pdn_aprs__refuse(e, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, "humidity out of range");
+        }
         break;
     case 'l':
         /* rounded first: 999.5 is 1000, l000 */
@@ -3193,15 +3197,31 @@ int pdn_aprs_encode_ax25(const pdn_aprs_header *header, const pdn_aprs_data *dat
 /* ---- a decoded packet written back as received ---- */
 
 /* 1 if the held packet's information field, decoded again under the header it is held with,
-   gives the data it holds: a copy of the packet, so what the caller holds is not touched. */
+   gives exactly the data it holds, byte for byte (a packet read from bytes holds what a decode of
+   them gives, so any difference is an edit: a changed latitude, text or inner byte, in place or
+   in a copy). Two fields of third-party data are not part of the reading: the depth, which says
+   where the packet was read from, and the as-received mark, judged by the encoder's own check.
+   A copy of the packet is decoded, so what the caller holds is not touched. */
 static PDN_APRS__NOINLINE int held_reads_the_same(const pdn_aprs_packet *p)
 {
     pdn_aprs_packet q;
+    pdn_aprs_data held;
     pdn_aprs_decode_options o;
     memset(&o, 0, sizeof o);
     if (pdn_aprs_decode_info_unbounded(&p->header, p->info, p->info_len, &o, &q) != PDN_APRS_OK)
         return 0;
-    return q.data.type == p->data.type && pdn_aprs__data_equal(&q.data, &p->data);
+    /* a third-party packet at the deepest level the decoder reads is held as unrecognized, where
+       the same bytes decoded on their own (at the outside) are third-party data */
+    if (q.data.type == PDN_APRS_TYPE_THIRD_PARTY && p->data.type == PDN_APRS_TYPE_UNRECOGNIZED &&
+        p->data.reason == PDN_APRS_UNRECOGNIZED_MALFORMED &&
+        pdn_aprs_has_diagnostic(p, PDN_APRS_CODE_INVALID_THIRD_PARTY, -1))
+        return 1;
+    held = p->data;
+    if (held.type == PDN_APRS_TYPE_THIRD_PARTY) {
+        held.as.third_party.depth = q.data.as.third_party.depth;
+        held.as.third_party.as_received = q.data.as.third_party.as_received;
+    }
+    return memcmp(&held, &q.data, sizeof held) == 0;
 }
 
 /* Writes the information field as received and reads the header back, as a
@@ -3245,15 +3265,15 @@ static int write_received(const pdn_aprs_packet *p, void *buf, size_t cap, int a
         result->reason = why;
         return PDN_APRS_ERR_REFUSED;
     }
-    /* the information field is read under the header written: the header changes a reading only
-       through a Mic-E destination (data type identifier ` ' 0x1C 0x1D), so a field that reads as
-       other data under this header than it was held as (Mic-E bytes put under a Mic-E destination,
-       a Mic-E report put under a plain one) is not-encodable */
-    if (p->info_len > 0 && (p->data.type == PDN_APRS_TYPE_MIC_E || p->info[0] == '`' || p->info[0] == '\'' ||
-                            p->info[0] == 0x1c || p->info[0] == 0x1d) &&
-        !held_reads_the_same(p)) {
+    /* the information field is read under the header written, and what it reads as is compared
+       with the data held (the README Read-back rule: a held field read back under the header
+       written is compared with the held data, whatever its type): data and information bytes
+       that no longer agree, however that came about, are not-encodable. A packet that keeps
+       no information field (an unbounded decode, an inner packet too long to copy) writes
+       the header alone, so no data is written to disagree with the bytes. */
+    if (p->info_len > 0 && !held_reads_the_same(p)) {
         result->refusal = PDN_APRS_REFUSAL_NOT_ENCODABLE;
-        result->reason = "the information field reads as other data under the header given";
+        result->reason = "the information field does not read as the data held, under the header given";
         return PDN_APRS_ERR_REFUSED;
     }
     if (!ax25 && line_cannot_carry(p->info, p->info_len)) {

@@ -49,6 +49,17 @@ static int nonfinite(double v)
     return !(v - v == 0.0);
 }
 
+/* a finite value is never refused as not-a-number (a conversion overflowing to infinity is a range
+   refusal, never that) */
+static int finite_not_refused_as_nan(double v, int rc, const pdn_aprs_encoded *enc)
+{
+    if (nonfinite(v))
+        return 1;
+    if (rc == PDN_APRS_ERR_REFUSED && enc->refusal == PDN_APRS_REFUSAL_NOT_A_NUMBER)
+        printf("finite value %g refused as not-a-number\n", v);
+    return !(rc == PDN_APRS_ERR_REFUSED && enc->refusal == PDN_APRS_REFUSAL_NOT_A_NUMBER);
+}
+
 static const char *const samples[] = {
     "N0CALL>APZ001:!4903.50N/07201.75W>088/036/A=001000Test",
     "N0CALL>APZ001:!4903.50N/07201.75W-RNG0050",
@@ -189,6 +200,7 @@ static void sweep_fields(void)
             memset(&enc, 0, sizeof enc);
             rc = pdn_aprs_encode_info(&d, NULL, out, sizeof out, &enc);
             CHECK(answer_ok(rc, &enc));
+            CHECK(finite_not_refused_as_nan(special[v], rc, &enc));
             if (nonfinite(special[v])) {
                 if (!(rc == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_NOT_A_NUMBER))
                     printf("not refused as not-a-number: sample %lu field %s value %g (rc %d refusal %d)\n",
@@ -238,6 +250,7 @@ static void sweep_builders(void)
             memset(&enc, 0, sizeof enc);
             rc = pdn_aprs_build_position(&st, &p, out, sizeof out, &enc);
             CHECK(answer_ok(rc, &enc));
+            CHECK(finite_not_refused_as_nan(x, rc, &enc));
             if (nonfinite(x))
                 CHECK(rc == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_NOT_A_NUMBER);
             p.name = "OBJNAME";
@@ -245,11 +258,13 @@ static void sweep_builders(void)
             memset(&enc, 0, sizeof enc);
             rc = pdn_aprs_build_object(&st, &p, out, sizeof out, &enc);
             CHECK(answer_ok(rc, &enc));
+            CHECK(finite_not_refused_as_nan(x, rc, &enc));
             if (nonfinite(x))
                 CHECK(rc == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_NOT_A_NUMBER);
             memset(&enc, 0, sizeof enc);
             rc = pdn_aprs_build_item(&st, &p, out, sizeof out, &enc);
             CHECK(answer_ok(rc, &enc));
+            CHECK(finite_not_refused_as_nan(x, rc, &enc));
             if (nonfinite(x))
                 CHECK(rc == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_NOT_A_NUMBER);
         }
@@ -275,6 +290,7 @@ static void sweep_builders(void)
             memset(&enc, 0, sizeof enc);
             rc = pdn_aprs_build_mic_e(&st, &m, out, sizeof out, &enc);
             CHECK(answer_ok(rc, &enc));
+            CHECK(finite_not_refused_as_nan(x, rc, &enc));
             if (nonfinite(x))
                 CHECK(rc == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_NOT_A_NUMBER);
         }
@@ -287,6 +303,7 @@ static void sweep_builders(void)
             memset(&enc, 0, sizeof enc);
             rc = pdn_aprs_build_telemetry(&st, &t, out, sizeof out, &enc);
             CHECK(answer_ok(rc, &enc));
+            CHECK(finite_not_refused_as_nan(x, rc, &enc));
             if (nonfinite(x))
                 CHECK(rc == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_NOT_A_NUMBER);
         }
@@ -297,6 +314,7 @@ static void sweep_builders(void)
             memset(&enc, 0, sizeof enc);
             rc = pdn_aprs_build_telemetry_coefficients(&st, NULL, co, 3, out, sizeof out, &enc);
             CHECK(answer_ok(rc, &enc));
+            CHECK(finite_not_refused_as_nan(x, rc, &enc));
             if (nonfinite(x))
                 CHECK(rc == PDN_APRS_ERR_REFUSED && enc.refusal == PDN_APRS_REFUSAL_NOT_A_NUMBER);
         }

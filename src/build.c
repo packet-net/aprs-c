@@ -407,6 +407,10 @@ static int build_mic_e_(const pdn_aprs_station *station, const pdn_aprs_mic_e_ar
            it writes the Mic-E bytes, and a /A= (the second form) holds it
            only if it is whole feet */
         r->altitude_feet = m->has_altitude_m ? m->altitude_m / 0.3048 : m->altitude_feet;
+        /* a finite value stays finite: metres too many to hold as feet are as far out of range
+           as any other, never a non-number */
+        if (m->has_altitude_m && metres - metres == 0.0 && r->altitude_feet - r->altitude_feet != 0.0)
+            r->altitude_feet = metres < 0 ? -1e300 : 1e300;
         if (metres == metres && fabs(metres) < 1e9) {
             double mm = pdn_aprs__round(metres);
             if (mm < -10000 || mm > 743570)

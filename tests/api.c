@@ -261,6 +261,85 @@ static int reencodes_as(const char *want)
     return strcmp(out, want) == 0;
 }
 
+/* A held packet is written only while its information bytes and its data agree, whatever the
+   type: a changed latitude, text or inner byte (in place or in a copy, at any depth) is
+   not-encodable in a line and in a frame, and a packet left as decoded is written as received. */
+static int refused_as_disagreeing(const pdn_aprs_packet *p)
+{
+    char line[2048];
+    uint8_t frame[2048];
+    pdn_aprs_encoded e1, e2;
+    int a = pdn_aprs_write_tnc2(p, line, sizeof line, &e1), b = pdn_aprs_write_ax25(p, frame, sizeof frame, &e2);
+    return a == PDN_APRS_ERR_REFUSED && b == PDN_APRS_ERR_REFUSED && e1.refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE &&
+           e2.refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE;
+}
+
+static int written_as_received(const pdn_aprs_packet *p)
+{
+    char line[2048];
+    uint8_t frame[2048];
+    return pdn_aprs_write_tnc2(p, line, sizeof line, NULL) > 0 && pdn_aprs_write_ax25(p, frame, sizeof frame, NULL) > 0;
+}
+
+static void test_write_agrees_with_data(void)
+{
+    static pdn_aprs_packet outer, inner, inner2, copy;
+    static const char *const all[] = {
+        ">hello", "!4903.50N/07201.75W>088/036/A=001000Test", "_10090556c...s...g...t...h50",
+        ":K4CCC-9  :testing{6136", "}M0LTE>APRS,TCPIP*:>hello",
+    };
+    unsigned i;
+    for (i = 0; i < sizeof all / sizeof all[0]; i++) {
+        char line[300];
+        snprintf(line, sizeof line, "N0CALL>APZ001:%s", all[i]);
+        CHECK(decode(line) == PDN_APRS_OK && written_as_received(&pkt));
+    }
+    /* status text edited in the data, then in the bytes */
+    CHECK(decode("N0CALL>APZ001:>hello") == PDN_APRS_OK && written_as_received(&pkt));
+    memcpy(pkt.data.as.status.text, "evil!", 5);
+    CHECK(refused_as_disagreeing(&pkt));
+    CHECK(decode("N0CALL>APZ001:>hello") == PDN_APRS_OK);
+    pkt.info[1] = 'j';
+    CHECK(refused_as_disagreeing(&pkt));
+    /* a position whose latitude was changed, even by less than a step of the form */
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W>088/036") == PDN_APRS_OK);
+    pkt.data.as.report.latitude += 0.01;
+    CHECK(refused_as_disagreeing(&pkt));
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W>088/036") == PDN_APRS_OK);
+    copy = pkt;
+    copy.data.as.report.latitude += 1e-9;
+    CHECK(refused_as_disagreeing(&copy) && written_as_received(&pkt));
+    /* a held outer packet whose inner bytes were edited, and inner packets edited at depth 1 and 2 */
+    CHECK(decode("N0CALL>APZ001:}M0LTE>APRS,TCPIP*:}G0ABC>APRS,TCPIP*:>hello") == PDN_APRS_OK);
+    CHECK(written_as_received(&pkt));
+    outer = pkt;
+    CHECK(pdn_aprs_decode_third_party(&outer.data, NULL, &inner) == PDN_APRS_OK && written_as_received(&inner));
+    CHECK(pdn_aprs_decode_third_party(&inner.data, NULL, &inner2) == PDN_APRS_OK && written_as_received(&inner2));
+    copy = outer;
+    copy.data.as.third_party.packet[copy.data.as.third_party.len - 1] = 'X';
+    CHECK(refused_as_disagreeing(&copy));
+    copy = inner;
+    copy.data.as.third_party.packet[copy.data.as.third_party.len - 1] = 'X';
+    CHECK(refused_as_disagreeing(&copy));
+    copy = inner2;
+    memcpy(copy.data.as.status.text, "evil!", 5);
+    CHECK(refused_as_disagreeing(&copy));
+    /* the deepest level the decoder reads is held as unrecognized, and is written as read */
+    CHECK(decode("N0CALL>APZ001:}A>B:}C>D:}E>F:}G>H:}I>J:>hi") == PDN_APRS_OK);
+    {
+        pdn_aprs_packet cur = pkt, nx;
+        int d;
+        for (d = 0; d < 5 && cur.data.type == PDN_APRS_TYPE_THIRD_PARTY; d++) {
+            CHECK(pdn_aprs_decode_third_party(&cur.data, NULL, &nx) == PDN_APRS_OK && written_as_received(&nx));
+            cur = nx;
+        }
+        CHECK(d >= 4);
+    }
+    copy = inner;
+    strcpy(copy.header.destination, "APZ999");
+    CHECK(written_as_received(&copy));
+}
+
 static void test_exact_bytes(void)
 {
     pdn_aprs_position_args p;
@@ -283,6 +362,26 @@ static void test_exact_bytes(void)
     CHECK(reencodes_as("_10090556c...s...g...t...h00"));
     pkt.data.as.weather.weather.value[PDN_APRS_WX_HUMIDITY_PERCENT] = 0.4;
     CHECK(reencodes_as(NULL));
+    {
+        /* a humidity that rounds to 0 has no form; a negative one is outside the field */
+        static const double h[] = {0.4, 0.0, -0.4, -0.6, -5.0, 100.4, 100.6};
+        static const int want[] = {PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM,
+                                   PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE,
+                                   PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, 0, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE};
+        char o[300];
+        unsigned k;
+        for (k = 0; k < sizeof h / sizeof h[0]; k++) {
+            pdn_aprs_encoded enc;
+            int n;
+            pkt.data.as.weather.weather.value[PDN_APRS_WX_HUMIDITY_PERCENT] = h[k];
+            memset(&enc, 0, sizeof enc);
+            n = pdn_aprs_encode_info(&pkt.data, NULL, o, sizeof o, &enc);
+            if (want[k])
+                CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == want[k]);
+            else
+                CHECK(n > 0);
+        }
+    }
     CHECK(decode("N0CALL>APZ001:!5130.00N/00007.00W>090/998") == PDN_APRS_OK);
     pkt.data.as.report.speed_knots = 999.4;
     CHECK(reencodes_as("!5130.00N/00007.00W>090/999"));
@@ -2303,6 +2402,7 @@ int main(void)
     test_devices();
     test_encoding();
     test_exact_bytes();
+    test_write_agrees_with_data();
     test_builders();
     test_timestamp();
     test_reading();

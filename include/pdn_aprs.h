@@ -1584,7 +1584,11 @@ PDN_APRS_API int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_
    PDN_APRS_ERR_BUFFER, or PDN_APRS_ERR_ARGUMENT for a length or path count
    that does not fit its array, or a fixed string in the header with no NUL. A
    packet whose decode returned PDN_APRS_ERR_TOO_LONG has info_dropped set and
-   is not written: PDN_APRS_ERR_TOO_LONG. A packet decoded with
+   is not written: PDN_APRS_ERR_TOO_LONG. The information field is decoded
+   again under the header written and compared byte for byte with the data the
+   packet holds: data and bytes that no longer agree (a field of the data
+   changed, in a copy too, at any depth of third-party packets) are
+   PDN_APRS_REFUSAL_NOT_ENCODABLE. A packet decoded with
    pdn_aprs_decode_info_unbounded keeps no information field, so only its
    header is written (unless it returned TOO_LONG, as above).
 
