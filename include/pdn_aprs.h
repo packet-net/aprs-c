@@ -56,9 +56,9 @@ extern "C" {
 #endif
 
 #define PDN_APRS_VERSION_MAJOR 1
-#define PDN_APRS_VERSION_MINOR 2
+#define PDN_APRS_VERSION_MINOR 3
 #define PDN_APRS_VERSION_PATCH 0
-#define PDN_APRS_VERSION "1.2.0"
+#define PDN_APRS_VERSION "1.3.0"
 
 /* The version of the library that was compiled, as "MAJOR.MINOR.PATCH". */
 PDN_APRS_API const char *pdn_aprs_version(void);
