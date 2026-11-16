@@ -142,43 +142,14 @@ PDN_APRS__PRIVATE size_t pdn_aprs__mic_e_locator_len(const uint8_t *s, size_t n)
     return 0;
 }
 
-/* Whether the status text after a locator, once base-91 telemetry and a
-   !DAO! are out of it, is empty or starts with a space: the locator is read
-   as if they had been lifted (ruling F16), while a later altitude is looked
-   for before they are, so they are lifted here only from a copy. */
-static int rest_is_spaced(pdn_aprs__dctx *c, const uint8_t *t, size_t tl)
+/* 1 if [at, at + len) shares a byte with a whole /A= altitude in b[0, n). A
+   /A= starts at most 8 bytes before the first byte and at the last byte. */
+static int overlaps_whole_altitude(const uint8_t *b, size_t n, size_t at, size_t len)
 {
-    pdn_aprs__cbuf copy;
-    pdn_aprs_report scratch;
-    uint8_t dao[5];
-    memset(&scratch, 0, sizeof scratch);
-    if (!pdn_aprs__cbuf_set(c, &copy, t, tl))
-        return 0;
-    pdn_aprs__lift_telemetry_dao(&copy, &scratch, dao);
-    return copy.n == 0 || copy.b[0] == ' ';
-}
-
-/* Whether lifting telemetry and a !DAO! from cb would leave an altitude
-   formed across a place one was taken from; one the bytes already held is
-   not joined. */
-static int joins_altitude(pdn_aprs__dctx *c, const pdn_aprs__cbuf *cb)
-{
-    pdn_aprs__cbuf copy;
-    pdn_aprs_report scratch;
-    uint8_t dao[5];
-    size_t k;
-    memset(&scratch, 0, sizeof scratch);
-    if (!pdn_aprs__cbuf_set(c, &copy, cb->b, cb->n))
-        return 0;
-    pdn_aprs__lift_telemetry_dao(&copy, &scratch, dao);
-    for (k = 0; k + 4 <= copy.n; k++) {
-        int g;
-        if (!(A_B91(copy.b[k]) && A_B91(copy.b[k + 1]) && A_B91(copy.b[k + 2]) && copy.b[k + 3] == '}'))
-            continue;
-        for (g = 0; g < copy.gaps; g++)
-            if (k < copy.gap[g] && copy.gap[g] < k + 4)
-                return 1;
-    }
+    size_t i = at >= 8 ? at - 8 : 0;
+    for (; i < at + len && i + 9 <= n; i++)
+        if (pdn_aprs__altitude_at(b + i, n - i, NULL))
+            return 1;
     return 0;
 }
 
@@ -187,7 +158,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
     pdn_aprs_report *r = &c->data->as.report;
     size_t n = 0, i, tl;
     const uint8_t *s, *t;
-    int msg = 0, amb = 0, west = 0, lon100 = 0, had_ext = 0;
+    int msg = 0, amb = 0, west = 0, lon100 = 0, had_ext = 0, space_pending = 0;
     double lat = 0;
     pdn_aprs__cbuf cb;
     uint8_t dti = c->info[0];
@@ -342,9 +313,11 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
                 if (t[0] == ' ') {
                     t++;
                     tl--;
-                } else if (!rest_is_spaced(c, t, tl) &&
-                           !pdn_aprs__tolerate(c, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR)) {
-                    return;
+                } else {
+                    /* no space where it stands: judged below, on the text
+                       the decoder itself leaves once everything it lifts is
+                       out */
+                    space_pending = 1;
                 }
             }
         }
@@ -355,32 +328,50 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_mic_e(pdn_aprs__dctx *c)
             had_ext = 1;
             t += e;
             tl -= e;
+            /* a PHG or RNG straight after the locator is read in the
+               separator's place: it needs the space */
+            if (space_pending) {
+                space_pending = 0;
+                if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR))
+                    return;
+            }
         }
     }
-    pdn_aprs__cbuf_set(c, &cb, t, tl);
+    if (!pdn_aprs__cbuf_set(c, &cb, t, tl))
+        return;
     if (!r->has_altitude) {
-        /* an altitude later in the text: the first xxx} */
+        /* an altitude later in the text: the first xxx} that shares no byte
+           with a /A= standing whole as sent (that altitude is read as the
+           altitude, as a locator's bytes and a PHG's at the start are not
+           searched either) */
         size_t k;
         for (k = 0; k + 4 <= cb.n; k++) {
-            if (A_B91(cb.b[k]) && A_B91(cb.b[k + 1]) && A_B91(cb.b[k + 2]) && cb.b[k + 3] == '}')
+            if (A_B91(cb.b[k]) && A_B91(cb.b[k + 1]) && A_B91(cb.b[k + 2]) && cb.b[k + 3] == '}' &&
+                !overlaps_whole_altitude(cb.b, cb.n, k, 4))
                 break;
         }
-        /* looked for before telemetry and a !DAO! are lifted, so bytes
-           either side of a !DAO! never join into one */
+        /* looked for before telemetry and a !DAO! are lifted, as sent */
         if (k + 4 <= cb.n && !pdn_aprs__rejects(c, PDN_APRS_CODE_MIC_E_ALTITUDE_NOT_FIRST)) {
             pdn_aprs__diag(c, PDN_APRS_SEVERITY_WARNING, PDN_APRS_CODE_MIC_E_ALTITUDE_NOT_FIRST);
             r->has_altitude = 1;
             r->altitude_feet = (double)(pdn_aprs__b91(cb.b + k, 3) - 10000) * FEET_PER_METRE;
-            pdn_aprs__cbuf_cut(&cb, k, 4);
-            cb.cut = k + 1;
-        } else if (k + 4 <= cb.n && joins_altitude(c, &cb)) {
-            /* a later altitude declined: left as text, lifting the !DAO!
-               would make one that is not in the bytes. With no later
-               altitude there is nothing to decline, and a strict decoder
-               reads the text as a lenient one does */
-            pdn_aprs__fail(c, PDN_APRS_CODE_MIC_E_ALTITUDE_NOT_FIRST);
-            return;
+            pdn_aprs__cbuf_cut(&cb, k, 4, 0);
         }
     }
+    /* the comment's own lifting of base-91 telemetry and a !DAO!, here so the
+       locator's space is judged on what it leaves */
+    {
+        uint8_t dao[5];
+        pdn_aprs__lift_telemetry_dao(&cb, r, dao);
+        if (space_pending && cb.n > 0 && cb.b[0] != ' ' &&
+            !pdn_aprs__tolerate(c, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR))
+            return;
+        if (!pdn_aprs__apply_lifted_dao(c, r, dao))
+            return;
+    }
+    /* a locator with its space: that space separates it and is not comment */
+    if (space_pending && cb.n > 0 && cb.b[0] == ' ')
+        pdn_aprs__cbuf_cut(&cb, 0, 1, 0);
+    had_ext |= PDN_APRS__LIFTED;
     pdn_aprs__finish_comment(c, &cb, r, had_ext);
 }

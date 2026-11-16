@@ -10,23 +10,78 @@ PDN_APRS__PRIVATE int pdn_aprs__cbuf_set(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, 
 {
     if (n > sizeof cb->b) {
         cb->n = 0;
+        cb->nbrk = 0;
+        cb->ctx = c;
         return pdn_aprs__overflow(c);
     }
     if (n)
         memmove(cb->b, s, n);
     cb->n = n;
-    cb->cut = 0;
+    cb->nbrk = 0;
+    cb->ctx = c;
     return 1;
 }
 
-PDN_APRS__PRIVATE void pdn_aprs__cbuf_cut(pdn_aprs__cbuf *cb, size_t at, size_t n)
+PDN_APRS__PRIVATE void pdn_aprs__cbuf_cut(pdn_aprs__cbuf *cb, size_t at, size_t n, int alt)
 {
+    int k, m = 0;
     if (at >= cb->n)
         return;
     if (n > cb->n - at)
         n = cb->n - at;
     memmove(cb->b + at, cb->b + at + n, cb->n - at - n);
     cb->n -= n;
+    /* boundaries after the bytes move up; one inside them joins the new one;
+       one at the start or the end of the text is no boundary */
+    for (k = 0; k < cb->nbrk; k++) {
+        size_t p = cb->brk[k];
+        uint8_t a = cb->brk_alt[k];
+        if (p > at)
+            p = p >= at + n ? p - n : at;
+        if (p == at) {
+            alt = alt && a;
+            continue;
+        }
+        cb->brk[m] = p;
+        cb->brk_alt[m++] = a;
+    }
+    cb->nbrk = m;
+    if (at > 0 && at < cb->n) {
+        /* insert in order; one place for each kind of lift (see the cbuf),
+           and a full table is a limit, never a boundary left out */
+        if (cb->nbrk >= PDN_APRS__MAX_BREAKS) {
+            pdn_aprs__overflow_limit(cb->ctx, PDN_APRS_LIMIT_COMMENT_BOUNDARIES);
+        } else {
+            for (k = cb->nbrk; k > 0 && cb->brk[k - 1] > at; k--) {
+                cb->brk[k] = cb->brk[k - 1];
+                cb->brk_alt[k] = cb->brk_alt[k - 1];
+            }
+            cb->brk[k] = at;
+            cb->brk_alt[k] = (uint8_t)(alt != 0);
+            cb->nbrk++;
+        }
+    }
+    /* a boundary the cut left at the end of the text is no boundary */
+    while (cb->nbrk > 0 && cb->brk[cb->nbrk - 1] >= cb->n)
+        cb->nbrk--;
+}
+
+PDN_APRS__PRIVATE int pdn_aprs__cbuf_spans(const pdn_aprs__cbuf *cb, size_t from, size_t to)
+{
+    int k;
+    for (k = 0; k < cb->nbrk; k++)
+        if (cb->brk[k] > from && cb->brk[k] < to)
+            return 1;
+    return 0;
+}
+
+PDN_APRS__PRIVATE int pdn_aprs__cbuf_break_at(const pdn_aprs__cbuf *cb, size_t p)
+{
+    int k;
+    for (k = 0; k < cb->nbrk; k++)
+        if (cb->brk[k] == p)
+            return cb->brk_alt[k];
+    return -1;
 }
 
 /* ---- base-91 telemetry and !DAO! ---- */
@@ -48,33 +103,35 @@ static int dao_at(const uint8_t *s)
 }
 
 /* Finds, without taking anything out, the base-91 telemetry and the !DAO! the
-   comment's start lifts: the last two | around a valid telemetry body, and
-   the last !DAO! outside it. */
+   comment's start lifts. The telemetry is the LAST pair of neighbouring | (as
+   sent) whose contents are 4 to 14 bytes, an even number, each 0x21 to 0x7B
+   (R27: the last valid block wins, whatever bars follow it or come before);
+   when no pair qualifies there is none and the bars stay text. Then the last
+   !DAO! outside it. One pass from the end, each pair judged on at most 14
+   bytes, so linear in the comment however many bars it holds. */
 PDN_APRS__PRIVATE void pdn_aprs__find_telemetry_dao(const pdn_aprs__cbuf *cb, pdn_aprs__lifted *f)
 {
-    size_t last = cb->n, prev = cb->n, i;
+    size_t right = cb->n, i;
     memset(f, 0, sizeof *f);
     for (i = cb->n; i > 0; i--) {
-        if (cb->b[i - 1] == '|') {
-            if (last == cb->n) {
-                last = i - 1;
-            } else {
-                prev = i - 1;
+        size_t left;
+        if (cb->b[i - 1] != '|')
+            continue;
+        left = i - 1;
+        if (right < cb->n) {
+            size_t len = right - left - 1, k;
+            int ok = len >= 4 && len <= 14 && len % 2 == 0 && !pdn_aprs__cbuf_spans(cb, left, right + 1);
+            for (k = left + 1; ok && k < right; k++)
+                if (!A_B91(cb->b[k]))
+                    ok = 0;
+            if (ok) {
+                f->have_tlm = 1;
+                f->tstart = left;
+                f->tend = right + 1;
                 break;
             }
         }
-    }
-    if (last < cb->n && prev < cb->n) {
-        size_t len = last - prev - 1, k;
-        int ok = len >= 4 && len <= 14 && len % 2 == 0;
-        for (k = prev + 1; ok && k < last; k++)
-            if (!A_B91(cb->b[k]))
-                ok = 0;
-        if (ok) {
-            f->have_tlm = 1;
-            f->tstart = prev;
-            f->tend = last + 1;
-        }
+        right = left;
     }
     /* the last !DAO! outside the telemetry */
     if (cb->n >= 5) {
@@ -82,8 +139,8 @@ PDN_APRS__PRIVATE void pdn_aprs__find_telemetry_dao(const pdn_aprs__cbuf *cb, pd
             size_t k = i - 1;
             if (f->have_tlm && k + 5 > f->tstart && k < f->tend)
                 continue;
-            /* bytes either side of what was taken out never join into one */
-            if (cb->cut && k + 1 < cb->cut && cb->cut - 1 < k + 5)
+            /* bytes either side of what was lifted never join into one */
+            if (pdn_aprs__cbuf_spans(cb, k, k + 5))
                 continue;
             if (dao_at(cb->b + k)) {
                 f->dao_pos = k;
@@ -130,21 +187,15 @@ PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs
     }
     if (have_dao)
         memcpy(dao, cb->b + dao_pos, 5);
-    cb->gaps = 0;
+    /* the later one first, so the earlier one's place is not moved */
     if (have_dao && have_tlm && dao_pos > tstart) {
-        pdn_aprs__cbuf_cut(cb, dao_pos, 5);
-        pdn_aprs__cbuf_cut(cb, tstart, tend - tstart);
-        cb->gap[cb->gaps++] = tstart;
-        cb->gap[cb->gaps++] = dao_pos - (tend - tstart);
+        pdn_aprs__cbuf_cut(cb, dao_pos, 5, 0);
+        pdn_aprs__cbuf_cut(cb, tstart, tend - tstart, 0);
     } else {
         if (have_tlm)
-            pdn_aprs__cbuf_cut(cb, tstart, tend - tstart);
+            pdn_aprs__cbuf_cut(cb, tstart, tend - tstart, 0);
         if (have_dao)
-            pdn_aprs__cbuf_cut(cb, dao_pos, 5);
-        if (have_tlm)
-            cb->gap[cb->gaps++] = have_dao ? tstart - 5 : tstart;
-        if (have_dao)
-            cb->gap[cb->gaps++] = dao_pos;
+            pdn_aprs__cbuf_cut(cb, dao_pos, 5, 0);
     }
     if (have_dao) {
         r->has_dao = 1;
@@ -189,29 +240,34 @@ PDN_APRS__PRIVATE void pdn_aprs__apply_dao(pdn_aprs__dctx *c, pdn_aprs_report *r
 
 /* ---- altitude ---- */
 
+PDN_APRS__PRIVATE int pdn_aprs__altitude_at(const uint8_t *s, size_t n, double *feet)
+{
+    long v;
+    if (n < 9 || s[0] != '/' || s[1] != 'A' || s[2] != '=')
+        return 0;
+    if (s[3] == '-') {
+        v = pdn_aprs__digits(s + 4, 5);
+        if (v < 0)
+            return 0;
+        v = -v;
+    } else {
+        v = pdn_aprs__digits(s + 3, 6);
+        if (v < 0)
+            return 0;
+    }
+    if (feet)
+        *feet = (double)v;
+    return 1;
+}
+
 PDN_APRS__PRIVATE int pdn_aprs__lift_altitude(pdn_aprs__cbuf *cb, double *feet)
 {
     size_t i;
-    if (cb->n < 9)
-        return 0;
     for (i = 0; i + 9 <= cb->n; i++) {
-        const uint8_t *s = cb->b + i;
-        long v;
-        if (s[0] != '/' || s[1] != 'A' || s[2] != '=')
-            continue;
-        if (s[3] == '-') {
-            v = pdn_aprs__digits(s + 4, 5);
-            if (v < 0)
-                continue;
-            v = -v;
-        } else {
-            v = pdn_aprs__digits(s + 3, 6);
-            if (v < 0)
-                continue;
+        if (!pdn_aprs__cbuf_spans(cb, i, i + 9) && pdn_aprs__altitude_at(cb->b + i, cb->n - i, feet)) {
+            pdn_aprs__cbuf_cut(cb, i, 9, 1);
+            return 1;
         }
-        *feet = (double)v;
-        pdn_aprs__cbuf_cut(cb, i, 9);
-        return 1;
     }
     return 0;
 }
@@ -223,11 +279,19 @@ static int mhz_word(const uint8_t *s)
     return (s[0] == 'M' || s[0] == 'm') && (s[1] == 'H' || s[1] == 'h') && (s[2] == 'Z' || s[2] == 'z');
 }
 
-/* A field of a frequency: needs a space before (checked by the caller) and a
-   space or the end after. */
+/* A field of a frequency: a space then four bytes standing whole, then a
+   space, the end or a boundary. Only a lifted /A= may stand before its
+   space: a /A= does not cut the fields off (APRS12c ch. 6, the altitude may
+   appear anywhere in the comment). */
+static int field_at(const pdn_aprs__cbuf *cb, size_t p)
+{
+    return p + 5 <= cb->n && cb->b[p] == ' ' && pdn_aprs__cbuf_break_at(cb, p) != 0 &&
+           !pdn_aprs__cbuf_spans(cb, p, p + 5);
+}
+
 static int field_end_ok(const pdn_aprs__cbuf *cb, size_t end)
 {
-    return end == cb->n || cb->b[end] == ' ';
+    return end == cb->n || cb->b[end] == ' ' || pdn_aprs__cbuf_break_at(cb, end) >= 0;
 }
 
 PDN_APRS__PRIVATE int pdn_aprs__lift_frequency(pdn_aprs__cbuf *cb, pdn_aprs_frequency *f)
@@ -243,7 +307,7 @@ PDN_APRS__PRIVATE int pdn_aprs__lift_frequency(pdn_aprs__cbuf *cb, pdn_aprs_freq
                 return 0;
             start = 1;
         }
-        if (cb->n < start + 10)
+        if (cb->n < start + 10 || pdn_aprs__cbuf_spans(cb, start, start + 10))
             continue;
         s = cb->b + start;
         if (A_DIGIT(s[0])) {
@@ -269,7 +333,7 @@ PDN_APRS__PRIVATE int pdn_aprs__lift_frequency(pdn_aprs__cbuf *cb, pdn_aprs_freq
         f->mhz = mhz;
         p = start + 10;
         /* tone */
-        if (p + 5 <= cb->n && cb->b[p] == ' ') {
+        if (field_at(cb, p)) {
             const uint8_t *t = cb->b + p + 1;
             int ok = 0;
             if ((t[0] == 'T' || t[0] == 't') && t[1] == 'o' && t[2] == 'f' && t[3] == 'f') {
@@ -295,7 +359,7 @@ PDN_APRS__PRIVATE int pdn_aprs__lift_frequency(pdn_aprs__cbuf *cb, pdn_aprs_freq
             }
         }
         /* offset */
-        if (p + 5 <= cb->n && cb->b[p] == ' ' && (cb->b[p + 1] == '+' || cb->b[p + 1] == '-') &&
+        if (field_at(cb, p) && (cb->b[p + 1] == '+' || cb->b[p + 1] == '-') &&
             pdn_aprs__digits(cb->b + p + 2, 3) >= 0 && field_end_ok(cb, p + 5)) {
             long v = pdn_aprs__digits(cb->b + p + 2, 3) * 10;
             f->has_offset = 1;
@@ -303,7 +367,7 @@ PDN_APRS__PRIVATE int pdn_aprs__lift_frequency(pdn_aprs__cbuf *cb, pdn_aprs_freq
             p += 5;
         }
         /* range */
-        if (p + 5 <= cb->n && cb->b[p] == ' ' && cb->b[p + 1] == 'R' && A_DIGIT(cb->b[p + 2]) &&
+        if (field_at(cb, p) && cb->b[p + 1] == 'R' && A_DIGIT(cb->b[p + 2]) &&
             A_DIGIT(cb->b[p + 3]) && (cb->b[p + 4] == 'm' || cb->b[p + 4] == 'k') && field_end_ok(cb, p + 5)) {
             f->has_range = 1;
             f->range = (uint8_t)((cb->b[p + 2] - '0') * 10 + (cb->b[p + 3] - '0'));
@@ -313,7 +377,7 @@ PDN_APRS__PRIVATE int pdn_aprs__lift_frequency(pdn_aprs__cbuf *cb, pdn_aprs_freq
         end = p;
         if (end < cb->n && cb->b[end] == ' ')
             end++;
-        pdn_aprs__cbuf_cut(cb, 0, end);
+        pdn_aprs__cbuf_cut(cb, 0, end, 0);
         return 1;
     }
     return 0;
@@ -335,7 +399,7 @@ static int find_braces(const pdn_aprs__cbuf *cb, int digits, size_t *at, size_t 
         for (k = i + 1; k < cb->n && k <= i + 4 && cb->b[k] != '}' && cb->b[k] != '{'; k++)
             if (digits ? !A_DIGIT(cb->b[k]) : !A_PRINT(cb->b[k]))
                 ok = 0;
-        if (ok && k < cb->n && cb->b[k] == '}' && k - i - 1 >= 1 && k - i - 1 <= 3) {
+        if (ok && k < cb->n && !pdn_aprs__cbuf_spans(cb, i, k + 1) && cb->b[k] == '}' && k - i - 1 >= 1 && k - i - 1 <= 3) {
             *at = i;
             *len = k - i + 1;
             return 1;
@@ -346,10 +410,8 @@ static int find_braces(const pdn_aprs__cbuf *cb, int digits, size_t *at, size_t 
 
 /* ---- the whole comment ---- */
 
-PDN_APRS__PRIVATE int pdn_aprs__lift_comment_start(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r)
+PDN_APRS__PRIVATE int pdn_aprs__apply_lifted_dao(pdn_aprs__dctx *c, pdn_aprs_report *r, const uint8_t dao[5])
 {
-    uint8_t dao[5];
-    pdn_aprs__lift_telemetry_dao(cb, r, dao);
     if (r->has_dao) {
         if (r->ambiguity && !r->compressed) {
             if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_DAO_WITH_AMBIGUITY))
@@ -359,6 +421,13 @@ PDN_APRS__PRIVATE int pdn_aprs__lift_comment_start(pdn_aprs__dctx *c, pdn_aprs__
         }
     }
     return 1;
+}
+
+PDN_APRS__PRIVATE int pdn_aprs__lift_comment_start(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r)
+{
+    uint8_t dao[5];
+    pdn_aprs__lift_telemetry_dao(cb, r, dao);
+    return pdn_aprs__apply_lifted_dao(c, r, dao);
 }
 
 PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, pdn_aprs_report *r,
@@ -382,12 +451,12 @@ PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf
         if (find_braces(cb, 1, &at, &len)) {
             r->area.has_corridor = 1;
             r->area.corridor_width_miles = (uint16_t)pdn_aprs__digits(cb->b + at + 1, len - 2);
-            pdn_aprs__cbuf_cut(cb, at, len);
+            pdn_aprs__cbuf_cut(cb, at, len, 0);
         }
     } else if (r->symbol.table == '\\' && r->symbol.code == 'm' && find_braces(cb, 0, &at, &len)) {
         /* a signpost overlay is printable ASCII, as every overlay is */
         pdn_aprs__memlcpy(r->signpost, sizeof r->signpost, cb->b + at + 1, len - 2);
-        pdn_aprs__cbuf_cut(cb, at, len);
+        pdn_aprs__cbuf_cut(cb, at, len, 0);
     }
     if (!had_extension && !pdn_aprs__rejects(c, PDN_APRS_CODE_DATA_EXTENSION_IN_COMMENT)) {
         static const char *const kinds[3] = {"PHG", "RNG", "DFS"};
@@ -396,13 +465,19 @@ PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf
             size_t i;
             int found = 0;
             for (i = 0; i + 7 <= cb->n; i++) {
-                size_t used;
-                if (memcmp(cb->b + i, kinds[k], 3) != 0 || !pdn_aprs__ext_len(cb->b + i, cb->n - i))
+                size_t used, avail = cb->n - i;
+                int q;
+                /* only the bytes up to the next boundary: a PHG's optional
+                   beacon rate split off by one is not part of it */
+                for (q = 0; q < cb->nbrk; q++)
+                    if (cb->brk[q] > i && cb->brk[q] - i < avail)
+                        avail = cb->brk[q] - i;
+                if (memcmp(cb->b + i, kinds[k], 3) != 0 || !pdn_aprs__ext_len(cb->b + i, avail))
                     continue;
                 /* the report has no extension yet: this one becomes it */
-                used = pdn_aprs__parse_phg_rng_dfs(cb->b + i, cb->n - i, r);
+                used = pdn_aprs__parse_phg_rng_dfs(cb->b + i, avail, r);
                 pdn_aprs__diag(c, PDN_APRS_SEVERITY_WARNING, PDN_APRS_CODE_DATA_EXTENSION_IN_COMMENT);
-                pdn_aprs__cbuf_cut(cb, i, used);
+                pdn_aprs__cbuf_cut(cb, i, used, 0);
                 found = 1;
                 break;
             }
@@ -413,7 +488,7 @@ PDN_APRS__PRIVATE int pdn_aprs__finish_comment(pdn_aprs__dctx *c, pdn_aprs__cbuf
     if (pdn_aprs__lift_frequency(cb, &r->frequency))
         r->has_frequency = 1;
     if (cb->n > 0 && (cb->b[0] == ' ' || cb->b[0] == '/'))
-        pdn_aprs__cbuf_cut(cb, 0, 1);
+        pdn_aprs__cbuf_cut(cb, 0, 1, 0);
     if (!pdn_aprs__check_text(c, cb->b, cb->n))
         return 0;
     r->comment_len = (uint16_t)pdn_aprs__take_text(c, r->comment, sizeof r->comment, cb->b, cb->n);

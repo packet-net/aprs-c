@@ -177,15 +177,37 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_maidenhead(pdn_aprs__dctx *c);
 /* Comment processing (comment.c). A working copy of a comment, as bytes:
    room for the longest the encoder writes, a comment of PDN_APRS_TEXT_SIZE
    bytes and the elements around it. */
+/* Where an element was lifted out of the text a boundary is left, so that no
+   later recogniser reads across it (an element is read only where its bytes
+   stand whole as sent). The kinds of element a comment lifts that leave a
+   boundary, each at most once; the voice frequency and the leading delimiter
+   are cut from the start, which is no boundary. A new kind goes here, and
+   the table (PDN_APRS_MAX_COMMENT_BOUNDARIES) must hold one place for it: the
+   check below fails to compile otherwise. A table that is full is never
+   quietly left a boundary short: it is the implementation limit
+   comment-boundaries. */
+enum {
+    PDN_APRS__LIFT_MICE_ALTITUDE, /* a later Mic-E altitude */
+    PDN_APRS__LIFT_TELEMETRY,
+    PDN_APRS__LIFT_DAO,
+    PDN_APRS__LIFT_ALTITUDE,      /* a /A= altitude */
+    PDN_APRS__LIFT_BRACES,        /* signpost or corridor braces */
+    PDN_APRS__LIFT_LATE_EXTENSION, /* a late PHG, RNG or DFS */
+    PDN_APRS__LIFT_KINDS
+};
+#define PDN_APRS__MAX_BREAKS PDN_APRS_MAX_COMMENT_BOUNDARIES
+typedef char pdn_aprs__breaks_hold_every_lift[PDN_APRS__MAX_BREAKS >= PDN_APRS__LIFT_KINDS ? 1 : -1];
 typedef struct pdn_aprs__cbuf {
     uint8_t b[PDN_APRS_TEXT_SIZE + 256];
     size_t n;
-    /* 1 + where a Mic-E altitude was taken out, or 0: no !DAO! spans it */
-    size_t cut;
-    /* where pdn_aprs__lift_telemetry_dao took telemetry or a !DAO! out, in
-       the text left: the bytes either side were not next to each other */
-    size_t gap[2];
-    int gaps;
+    /* boundaries, ascending, each strictly inside the text left: a boundary
+       at p lies between b[p - 1] and b[p]; brk_alt[k] is set when only
+       lifted /A= altitudes stand there (they do not cut a voice frequency
+       off from its fields) */
+    size_t brk[PDN_APRS__MAX_BREAKS];
+    uint8_t brk_alt[PDN_APRS__MAX_BREAKS];
+    int nbrk;
+    struct pdn_aprs__dctx *ctx; /* where a full table is reported */
 } pdn_aprs__cbuf;
 
 /* What the comment's start lifts: base-91 telemetry (from its first | to
@@ -197,7 +219,14 @@ typedef struct pdn_aprs__lifted {
 
 /* Returns 1, or 0 (after pdn_aprs__overflow) if [s, s+n) does not fit. */
 PDN_APRS__PRIVATE int pdn_aprs__cbuf_set(pdn_aprs__dctx *c, pdn_aprs__cbuf *cb, const uint8_t *s, size_t n);
-PDN_APRS__PRIVATE void pdn_aprs__cbuf_cut(pdn_aprs__cbuf *cb, size_t at, size_t n);
+/* Takes n bytes out at at and leaves a boundary there; alt: the bytes were a
+   /A= altitude. */
+PDN_APRS__PRIVATE void pdn_aprs__cbuf_cut(pdn_aprs__cbuf *cb, size_t at, size_t n, int alt);
+/* 1 if a boundary lies strictly inside [from, to). */
+PDN_APRS__PRIVATE int pdn_aprs__cbuf_spans(const pdn_aprs__cbuf *cb, size_t from, size_t to);
+/* The boundary at p: -1 none, 0 something other than /A= lifted there, 1
+   only /A= altitudes. */
+PDN_APRS__PRIVATE int pdn_aprs__cbuf_break_at(const pdn_aprs__cbuf *cb, size_t p);
 /* Lifts base-91 telemetry (between the last two |) and the last !DAO!
    outside it. */
 PDN_APRS__PRIVATE void pdn_aprs__find_telemetry_dao(const pdn_aprs__cbuf *cb, pdn_aprs__lifted *f);
@@ -205,7 +234,11 @@ PDN_APRS__PRIVATE void pdn_aprs__find_telemetry_dao(const pdn_aprs__cbuf *cb, pd
    a positioned report's comment lifts (telemetry, a !DAO!): the "end" of the
    weather text for the run-on rule. */
 PDN_APRS__PRIVATE int pdn_aprs__lifted_run_to_end(const pdn_aprs__cbuf *cb, size_t at);
+PDN_APRS__PRIVATE int pdn_aprs__apply_lifted_dao(pdn_aprs__dctx *c, pdn_aprs_report *r, const uint8_t dao[5]);
 PDN_APRS__PRIVATE void pdn_aprs__lift_telemetry_dao(pdn_aprs__cbuf *cb, pdn_aprs_report *r, uint8_t dao[5]);
+/* 1 if a whole /A= altitude (/A= and six digits, or - and five) starts at s
+   with n bytes left; its value goes in *feet when feet is not NULL. */
+PDN_APRS__PRIVATE int pdn_aprs__altitude_at(const uint8_t *s, size_t n, double *feet);
 /* Lifts a /A= altitude; returns 1 if found. */
 PDN_APRS__PRIVATE int pdn_aprs__lift_altitude(pdn_aprs__cbuf *cb, double *feet);
 /* The length of a PHG/PHGR, RNG or DFS data extension at s, or 0. */
@@ -251,11 +284,23 @@ PDN_APRS__PRIVATE int pdn_aprs__mic_e_suffix_known(char type_code, const uint8_t
    diagnostics). */
 PDN_APRS__PRIVATE size_t pdn_aprs__parse_tnc2_header(pdn_aprs__dctx *c, const uint8_t *s, size_t n,
                                                      pdn_aprs_header *h, int third_party);
+/* The address field, control and PID of an AX.25 UI frame; *info_at is where the information field starts. */
+PDN_APRS__PRIVATE int pdn_aprs__parse_ax25_header(pdn_aprs__dctx *c, const uint8_t *f, size_t len,
+                                                  pdn_aprs_header *h, size_t *info_at);
+/* 1 if an entry used comes after one that is not: no TNC2 line or AX.25 frame carries such a path. */
+PDN_APRS__PRIVATE int pdn_aprs__path_has_gap(const pdn_aprs_header *h);
+/* 1 if the header written (a TNC2 header, or an AX.25 address field) reads back as the header given. */
+PDN_APRS__PRIVATE int pdn_aprs__header_reads_back(const uint8_t *head, size_t n, int ax25, const pdn_aprs_header *given,
+                                                  const char *dest, int as_received);
 PDN_APRS__PRIVATE void pdn_aprs__header_default(pdn_aprs_header *h);
+PDN_APRS__PRIVATE int pdn_aprs__address_valid(const char *s, size_t n);
 PDN_APRS__PRIVATE int pdn_aprs__header_strings_ok(const pdn_aprs_header *h, int destination);
 
+/* The mark (a checksum, never zero) the decoder sets in a third-party packet's as_received for the n bytes of its inner packet at p; the encoder honours it only when it matches the bytes it writes. */
+PDN_APRS__PRIVATE uint32_t pdn_aprs__third_party_mark(const uint8_t *p, size_t n);
+
 /* Compares decoded data as the vectors do (equal.c). */
-PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_aprs_data *b, int loose);
+PDN_APRS__PRIVATE int pdn_aprs__data_equal(const pdn_aprs_data *a, const pdn_aprs_data *b);
 
 /* ---- encoding (encode.c) ---- */
 
@@ -267,21 +312,39 @@ typedef struct pdn_aprs__ectx {
     const char *deferred_why;
     char dest[PDN_APRS_ADDR_SIZE];
     int variant; /* 1: put a / before any comment, 2: a space */
+    int bytes_first; /* a builder: a Mic-E altitude goes in the Mic-E bytes first, whatever it is given in */
+    int alt_force; /* a Mic-E altitude goes in a /A= where the Mic-E bytes (the first form) did not read back */
 } pdn_aprs__ectx;
 
 /* pdn_aprs_encode_tnc2 or pdn_aprs_encode_ax25 (ax25 nonzero). */
 PDN_APRS__PRIVATE int pdn_aprs__encode_packet(const pdn_aprs_header *header, const pdn_aprs_data *data,
                                               const pdn_aprs_encode_options *options, void *buf, size_t cap,
-                                              pdn_aprs_encoded *encoded, int ax25);
+                                              pdn_aprs_encoded *encoded, int ax25, int builder);
 
 PDN_APRS__PRIVATE int pdn_aprs__refuse(pdn_aprs__ectx *e, int code, const char *why);
 /* Where a refusal code comes in the README's Refusal reasons order. */
 PDN_APRS__PRIVATE int pdn_aprs__refusal_rank(int code);
-PDN_APRS__PRIVATE int pdn_aprs__encode_data(pdn_aprs__ectx *e, const pdn_aprs_data *d);
 PDN_APRS__PRIVATE int pdn_aprs__encode_mic_e(pdn_aprs__ectx *e, const pdn_aprs_report *r);
 PDN_APRS__PRIVATE int pdn_aprs__encode_weather_fields(pdn_aprs__ectx *e, const pdn_aprs_weather *w, int positionless);
 PDN_APRS__PRIVATE int pdn_aprs__encode_frequency(pdn_aprs__ectx *e, const pdn_aprs_frequency *f);
+#ifdef PDN_APRS_FAULT_INJECTION
+/* Test builds only (tests/readback.c): compiled only when PDN_APRS_FAULT_INJECTION
+   is defined, which the library and dist/pdn_aprs.c as shipped never are. The #ifdef
+   blocks stay in dist/pdn_aprs.c, so the same test builds from the single file. Called
+   with the bytes a field writer just wrote, before the read-back, to stand
+   in for a writer that writes a wrong byte. */
+extern void (*pdn_aprs__fault_hook)(uint8_t *info, size_t len, int data_type);
+/* The same for the header bytes written (a TNC2 header, or an AX.25 address field). */
+extern void (*pdn_aprs__header_fault_hook)(uint8_t *head, size_t len, int ax25);
+/* The same for the read-back's decode of the information field: called with the packet it
+   produced, before the comparison, to stand in for a decoder that reads a diagnostic or a field
+   the bytes do not carry. */
+extern void (*pdn_aprs__decode_fault_hook)(pdn_aprs_packet *decoded);
+#endif
+PDN_APRS__PRIVATE int pdn_aprs__header_addresses_ok(const pdn_aprs_header *h, const char *dest);
 PDN_APRS__PRIVATE int pdn_aprs__write_header_tnc2(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest);
 PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest);
+/* The refusal code (invalid-address, invalid-path) of a header as given, or 0; *why says why. */
+PDN_APRS__PRIVATE int pdn_aprs__header_fault(const pdn_aprs_header *h, const char *dest, const char **why);
 
 #endif

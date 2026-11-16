@@ -28,6 +28,7 @@ want = {
     "capabilities": macro("PDN_APRS_MAX_CAPABILITIES"),
     "weather-extras": macro("PDN_APRS_MAX_WEATHER_EXTRA"),
     "weather-extra-value": extra_value(),
+    "comment-boundaries": macro("PDN_APRS_MAX_COMMENT_BOUNDARIES"),
 }
 problems = 0
 if limits != want:

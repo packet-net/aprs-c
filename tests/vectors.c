@@ -21,6 +21,7 @@
 
 static int verbose = 0;
 /* passes per kind of check: lenient, strict, tolerance, reencode, encode, build */
+static int tolerance_ran, tolerance_ran_other, tolerance_eligible;
 static const char *const kinds[] = {"lenient", "strict", "tolerance", "reencode", "encode", "build"};
 static int kind_passed[6];
 static const char *filter = NULL;
@@ -439,6 +440,109 @@ static int needs_more_than(const jval *c, const input_t *in, int limit)
 
 static const pdn_aprs_device_table *devices(void) { return dev_table(); }
 
+static void check_writers_as(const jval *pt, const char *key, const char *id, const pdn_aprs_packet *p);
+
+/* "pass_through" and "pass_through_inner" (README Read-back, Header): the
+   lenient packet, or for the inner key the inner packet of its third-party
+   data, written with pdn_aprs_write_tnc2 and pdn_aprs_write_ax25 is the line
+   and the frame given, or a refusal with exactly the code given. */
+/* The optional "header" of a pass-through case (source, destination, path): the held packet's
+   information field is written under it, so the packet is re-addressed first (a copy). */
+static void readdress(pdn_aprs_packet *q, const jval *h)
+{
+    const jval *path = json_get(h, "path");
+    const char *v;
+    size_t k;
+    if ((v = json_gets(h, "source")) != NULL)
+        snprintf(q->header.source, sizeof q->header.source, "%s", v);
+    if ((v = json_gets(h, "destination")) != NULL)
+        snprintf(q->header.destination, sizeof q->header.destination, "%s", v);
+    if (path && path->t == J_ARR) {
+        q->header.path_count = 0;
+        for (k = 0; k < path->count && k < PDN_APRS_MAX_PATH; k++) {
+            pdn_aprs_path_entry *e = &q->header.path[q->header.path_count++];
+            size_t n = path->items[k]->len;
+            memset(e, 0, sizeof *e);
+            if (n && path->items[k]->str[n - 1] == '*') {
+                e->marked = e->used = 1;
+                n--;
+            }
+            snprintf(e->call, sizeof e->call, "%.*s", (int)n, path->items[k]->str);
+        }
+    }
+}
+
+static void check_writers(const jval *pt, const char *key, const char *id, const pdn_aprs_packet *held)
+{
+    pdn_aprs_packet *copy = (pdn_aprs_packet *)malloc(sizeof *copy);
+    const pdn_aprs_packet *p = held;
+    if (copy && json_get(pt, "header")) {
+        *copy = *held;
+        readdress(copy, json_get(pt, "header"));
+        p = copy;
+    }
+    check_writers_as(pt, key, id, p);
+    free(copy);
+}
+
+static void check_writers_as(const jval *pt, const char *key, const char *id, const pdn_aprs_packet *p)
+{
+    const char *tnc2 = json_gets(pt, "tnc2"), *hex = json_gets(pt, "ax25_hex");
+    const char *tref = json_gets(pt, "tnc2_refusal"), *aref = json_gets(pt, "ax25_refusal");
+    char why[512];
+    uint8_t buf[2048];
+    pdn_aprs_encoded enc;
+    int n;
+    if (tnc2 || tref) {
+        const char *got;
+        n = pdn_aprs_write_tnc2(p, (char *)buf, sizeof buf, &enc);
+        got = n == PDN_APRS_ERR_REFUSED ? pdn_aprs_refusal_name(enc.refusal) : NULL;
+        if (tref)
+            snprintf(why, sizeof why, "%s: tnc2 wrote %d (%s), want a refusal (%s)", key, n, got ? got : "-", tref);
+        else
+            snprintf(why, sizeof why, "%s: tnc2 wrote %.200s, want %s", key, n > 0 ? ascii(buf, n) : "nothing", tnc2);
+        report(id, "pass-through", tref ? (got && strcmp(got, tref) == 0)
+                                        : (n >= 0 && (size_t)n == strlen(tnc2) && memcmp(buf, tnc2, (size_t)n) == 0),
+               why, NULL, NULL);
+    }
+    if (hex || aref) {
+        char got[2 * 512 + 1];
+        const char *code;
+        int k, ok = 0;
+        n = pdn_aprs_write_ax25(p, buf, sizeof buf, &enc);
+        code = n == PDN_APRS_ERR_REFUSED ? pdn_aprs_refusal_name(enc.refusal) : NULL;
+        got[0] = 0;
+        for (k = 0; n > 0 && k < n && k < 512; k++)
+            snprintf(got + 2 * k, 3, "%02X", buf[k]);
+        if (aref)
+            ok = code && strcmp(code, aref) == 0;
+        else if (n > 0 && strlen(hex) == 2 * (size_t)n)
+            for (k = 0, ok = 1; k < 2 * n; k++)
+                ok = ok && (hex[k] & ~0x20) == (got[k] & ~0x20);
+        snprintf(why, sizeof why, "%s: ax25 wrote %d: %.200s (%s), want %.200s", key, n, got, code ? code : "-", aref ? aref : hex);
+        report(id, "pass-through", ok, why, NULL, NULL);
+    }
+}
+
+static void check_pass_through(const jval *c, const char *id, const input_t *in, const pdn_aprs_decode_options *lenient)
+{
+    const jval *pt = json_get(c, "pass_through"), *pi = json_get(c, "pass_through_inner");
+    if (decode(in, lenient, &pkt) != PDN_APRS_OK)
+        return;
+    if (pt)
+        check_writers(pt, "pass_through", id, &pkt);
+    if (pi) {
+        /* the inner packet of the third-party data, written as a line or a frame of its own */
+        pdn_aprs_packet *inner = (pdn_aprs_packet *)malloc(sizeof *inner);
+        if (!inner || pkt.data.type != PDN_APRS_TYPE_THIRD_PARTY ||
+            pdn_aprs_decode_third_party(&pkt.data, lenient, inner) != PDN_APRS_OK)
+            report(id, "pass-through", 0, "pass_through_inner: no inner packet to write", NULL, NULL);
+        else
+            check_writers(pi, "pass_through_inner", id, inner);
+        free(inner);
+    }
+}
+
 static void check_decode_case(const jval *c, const char *id)
 {
     input_t in;
@@ -497,6 +601,10 @@ static void check_decode_case(const jval *c, const char *id)
         }
     }
     report(id, "lenient", ok, why, ok ? NULL : got, ok ? NULL : expect);
+
+    /* pass through: the lenient packet written back with the packet writers */
+    if ((json_get(c, "pass_through") || json_get(c, "pass_through_inner")) && ok)
+        check_pass_through(c, id, &in, &lenient);
 
     /* re-encode, from the lenient data */
     if (reenc && pkt.header_ok) {
@@ -599,14 +707,34 @@ static void check_decode_case(const jval *c, const char *id)
                 }
             }
         }
+        jval *st = json_get(c, "strict");
+        const char *by = st ? json_gets(st, "rejected_by") : NULL;
         if (count == 1) {
             pdn_aprs_decode_options one = lenient;
+            int other = by && strcmp(by, pdn_aprs_code_name(code)) != 0;
             one.reject[code] = 1;
             rc = decode(&in, &one, &pkt);
             got = neutral_result(&pkt, rc, &one);
-            ok = strict_matches(got, c, why, sizeof why);
+            if (other) {
+                /* strict is rejected by a different code: turning off the one
+                   tolerance must give a reading whose diagnostics include that
+                   code as a warning */
+                jval *d = json_get(got, "data");
+                char want[128];
+                const char *ty = d ? json_gets(d, "type") : NULL;
+                snprintf(want, sizeof want, "warning:%s", by);
+                ok = ty && strcmp(ty, "unrecognized") != 0 && has_diag(json_get(got, "diagnostics"), want);
+                if (!ok)
+                    snprintf(why, sizeof why, "expected a reading with %s", want);
+            } else {
+                ok = strict_matches(got, c, why, sizeof why);
+            }
+            tolerance_ran++;
+            if (other)
+                tolerance_ran_other++;
             report(id, "tolerance", ok, why, ok ? NULL : got, NULL);
             json_free(got);
+            tolerance_eligible++;
         }
     }
 }
@@ -664,7 +792,9 @@ static void check_build_case(const jval *c, const char *id)
     uint8_t buf[2048];
     recipe_result res;
     char why[512];
-    if (recipe_build(json_get(json_get(c, "input"), "build"), buf, sizeof buf - 1, &res) == RECIPE_LIMIT) {
+    const char *write = json_gets(json_get(c, "input"), "write");
+    int frame = write && strcmp(write, "ax25") == 0;
+    if (recipe_build_as(json_get(json_get(c, "input"), "build"), buf, sizeof buf - 1, &res, frame) == RECIPE_LIMIT) {
         /* the library's fixed capacity, not a reading (README Implementation
            limits), where the recipe really needs more than it holds */
         if (!needs_more_than(c, NULL, res.limit)) {
@@ -687,11 +817,27 @@ static void check_build_case(const jval *c, const char *id)
         report(id, "build", res.kind == RECIPE_REFUSED && (!wcode || (res.refusal && strcmp(res.refusal, wcode) == 0)),
                why, NULL, NULL);
     } else {
-        const char *want = json_gets(expect, "tnc2");
-        int ok = res.kind == RECIPE_BUILT && want && strlen(want) == res.len && memcmp(buf, want, res.len) == 0;
-        if (res.kind == RECIPE_BUILT)
-            snprintf(why, sizeof why, "built %s, want %s", ascii(buf, (int)res.len), want ? want : "?");
-        else
+        const char *want = json_gets(expect, frame ? "ax25_hex" : "tnc2");
+        int ok;
+        if (frame) {
+            /* the frame as hex, compared as bytes (either case of digit) */
+            char got[2 * 512 + 1];
+            size_t k;
+            ok = 0;
+            for (k = 0; res.kind == RECIPE_BUILT && k < res.len && k < 512; k++)
+                snprintf(got + 2 * k, 3, "%02X", buf[k]);
+            if (res.kind == RECIPE_BUILT && want && strlen(want) == 2 * res.len && res.len <= 512) {
+                for (k = 0, ok = 1; k < 2 * res.len; k++)
+                    ok = ok && (want[k] & ~0x20) == (got[k] & ~0x20);
+            }
+            if (res.kind == RECIPE_BUILT)
+                snprintf(why, sizeof why, "built frame %.200s, want %.200s", res.len <= 512 ? got : "(long)", want ? want : "?");
+        } else {
+            ok = res.kind == RECIPE_BUILT && want && strlen(want) == res.len && memcmp(buf, want, res.len) == 0;
+            if (res.kind == RECIPE_BUILT)
+                snprintf(why, sizeof why, "built %s, want %s", ascii(buf, (int)res.len), want ? want : "?");
+        }
+        if (res.kind != RECIPE_BUILT)
             snprintf(why, sizeof why, "%s: %s", res.kind == RECIPE_REFUSED ? "refused" : "unsupported",
                      res.reason ? res.reason : "");
         report(id, "build", ok, why, NULL, NULL);
@@ -755,6 +901,12 @@ int main(int argc, char **argv)
     }
     printf("passed by check: lenient %d, strict %d, single tolerance %d, re-encode %d, encode %d, build %d\n",
            kind_passed[0], kind_passed[1], kind_passed[2], kind_passed[3], kind_passed[4], kind_passed[5]);
+    printf("single tolerance ran on %d cases (%d of them where strict is rejected by another code)\n", tolerance_ran,
+           tolerance_ran_other);
+    if (!filter && (tolerance_ran != tolerance_eligible || tolerance_ran < 726)) {
+        printf("the tolerance check did not run on every case with exactly one tolerable code\n");
+        failed++;
+    }
     printf("%d passed, %d failed, %d skipped (known differences), %d cases skipped (implementation limit)\n", passed,
            failed, skipped, skipped_limit);
     if (!TEST_HAVE_DEVICES)

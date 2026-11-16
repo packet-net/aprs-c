@@ -22,7 +22,13 @@
  *  - Nothing is locale-dependent.
  *  - Public names start pdn_aprs_ / PDN_APRS_.
  *
- * What 1.x promises: source compatibility only. Struct sizes depend on the
+ * What 1.x promises: source compatibility only, from 1.3.0 on. 1.3.0 itself
+ * changed three things incompatibly with 1.2.0: pdn_aprs_write_tnc2() and
+ * pdn_aprs_write_ax25() take a last argument, a pdn_aprs_encoded *result (NULL
+ * is allowed); pdn_aprs_third_party.as_received is a uint32_t hash set by the
+ * decoder, where it was a uint8_t flag; and the decoder's mark on a third-party
+ * packet is no longer a flag a program may set (see there). From 1.3.0 on no
+ * 1.x release changes a function signature or removes a name. Struct sizes depend on the
  * capacities below (which a program may override with -D), and 1.x may add a
  * field to any struct, so rebuild everything that includes this header when
  * you upgrade, and link the library statically or compile in the single file
@@ -99,7 +105,10 @@ PDN_APRS_API const char *pdn_aprs_version(void);
 /* The room reject[] in the decode options has for diagnostic codes: fixed, so
    that adding a code never changes the struct. */
 #define PDN_APRS_MAX_CODES 128
-/* The most diagnostics kept for one packet; any beyond are dropped. */
+/* The most diagnostics kept for one packet. A defect of one field or entry is listed once for each
+   occurrence (two empty path entries give two warnings), so a header with many of them can fill the
+   list: warnings beyond it are dropped, but an error that stops the decode takes the last place, so it
+   is never the one left out. */
 #define PDN_APRS_MAX_DIAGNOSTICS 24
 /* Base-91 comment telemetry and telemetry reports carry up to 5 analog
    channels; telemetry metadata names up to 13 channels and gives up to 15
@@ -117,6 +126,14 @@ PDN_APRS_API const char *pdn_aprs_version(void);
    library. A ninth one is unrecognized data with the error
    PDN_APRS_CODE_IMPLEMENTATION_LIMIT, in a lenient decode and a strict one. */
 #define PDN_APRS_MAX_WEATHER_EXTRA 8
+/* Places in one comment where an element was lifted and a boundary is kept,
+   so that no later reading spans it: a later Mic-E altitude, telemetry, a
+   !DAO!, a /A= altitude, braces and a late PHG, RNG or DFS, each lifted at
+   most once. A capacity of this library sized to those six kinds; a decode
+   that would need one more is unrecognized data with the error
+   PDN_APRS_CODE_IMPLEMENTATION_LIMIT (limit comment-boundaries), never a
+   boundary left out. No packet reaches it today. */
+#define PDN_APRS_MAX_COMMENT_BOUNDARIES 6
 
 /* ------------------------------------------------------------------------ */
 /* Results                                                                  */
@@ -227,7 +244,8 @@ typedef enum pdn_aprs_limit {
     PDN_APRS_LIMIT_PATH,              /* PDN_APRS_MAX_PATH: path entries, in the header or an inner one */
     PDN_APRS_LIMIT_CAPABILITIES,      /* PDN_APRS_MAX_CAPABILITIES */
     PDN_APRS_LIMIT_WEATHER_EXTRAS,    /* PDN_APRS_MAX_WEATHER_EXTRA */
-    PDN_APRS_LIMIT_WEATHER_EXTRA_VALUE /* an extra field's value of more than 23 characters */
+    PDN_APRS_LIMIT_WEATHER_EXTRA_VALUE, /* an extra field's value of more than 23 characters */
+    PDN_APRS_LIMIT_COMMENT_BOUNDARIES   /* PDN_APRS_MAX_COMMENT_BOUNDARIES: no packet reaches it */
 } pdn_aprs_limit;
 
 /* The limits.json key for a pdn_aprs_limit ("path"), or NULL for none or out of range. */
@@ -730,8 +748,12 @@ typedef struct pdn_aprs_report {
     uint8_t mic_e_message;    /* pdn_aprs_mic_e_message */
     uint8_t old_data;         /* ' rather than ` */
     /* The altitude was sent as a /A= in the text, not in the Mic-E altitude
-       bytes (set by the decoder; the encoder writes it the same way). Outside
-       the vectors' neutral form. */
+       bytes: set by the decoder, which records where the value came from, and
+       honoured by the encoder only while a /A= holds the value exactly (a whole
+       number of feet, within 1e-6, in six digits). It never makes the encoder
+       round: on a value a /A= does not hold exactly, a program that sets it gets
+       the Mic-E altitude bytes (the nearest metre) like any other data, or a
+       refusal where neither form holds it. Outside the vectors' neutral form. */
     uint8_t altitude_in_comment;
     char type_code;           /* the device type code: ` ' > ] or space; 0 if none */
     char device_suffix[3];    /* "_%", "=" ...; "" if none */
@@ -966,6 +988,15 @@ typedef struct pdn_aprs_third_party {
        PDN_APRS_MAX_THIRD_PARTY_DEPTH (a fifth level) is not read and is
        unrecognized with invalid-third-party. The encoder ignores it. */
     uint8_t depth;
+    /* Set by the decoder: a 32-bit hash of `packet` (never zero) that says the decoder read
+       these bytes as received, so the inner packets' warnings and errors are part of the data
+       and the encoder writes them as they are. The encoder honours it only while it matches the
+       bytes being written, so edited bytes, a copied flag or a bare 1 give no exemption: the
+       encoder's read-back then requires every inner packet, at every depth, to decode with no
+       warning or error (infos are not compared). Data a program builds has 0; leave it 0. This
+       is a guard against accidental edits, not against a program that sets it on purpose: the
+       hash is public and not a signature. */
+    uint32_t as_received;
 } pdn_aprs_third_party;
 
 /* User-defined data {UX... (APRS12c ch. 19): bytes as sent. */
@@ -1197,7 +1228,12 @@ typedef enum pdn_aprs_refusal {
     PDN_APRS_REFUSAL_INVALID_NMEA,
     PDN_APRS_REFUSAL_NOT_ENCODABLE,
     PDN_APRS_REFUSAL_DOES_NOT_READ_BACK,
-    PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG /* the whole field is over 256 bytes: judged last */
+    PDN_APRS_REFUSAL_INFORMATION_FIELD_TOO_LONG, /* the whole field is over 256 bytes: judged last */
+    /* A path with an entry not marked used before one that is: a line and a
+       frame both read every entry before a used one as used, so no form
+       carries it. A fault of the header given, judged when it is given, before
+       any fault of the data (added at 1.3.0). */
+    PDN_APRS_REFUSAL_INVALID_PATH
 } pdn_aprs_refusal;
 
 /* The vectors' id for a refusal code ("too-long"), or NULL if out of range or
@@ -1227,7 +1263,8 @@ typedef struct pdn_aprs_encoded {
  * PDN_APRS_REFUSAL_INVALID_CHARACTER. Returns the
  * length, or PDN_APRS_ERR_REFUSED (encoded->reason says why),
  * PDN_APRS_ERR_BUFFER (buf is too small to write and check the field) or
- * PDN_APRS_ERR_ARGUMENT; on failure buf holds nothing of use. options and
+ * PDN_APRS_ERR_ARGUMENT; on every failure buf holds nothing (what was written is
+ * zeroed). options and
  * encoded may be NULL, though a Mic-E report needs encoded for its
  * destination address.
  *
@@ -1241,7 +1278,17 @@ PDN_APRS_API int pdn_aprs_encode_info(const pdn_aprs_data *data, const pdn_aprs_
 
 /*
  * Encodes a whole TNC2 line "SRC>DEST,PATH:info", NUL-terminated if there
- * is room. For Mic-E the destination is the computed one.
+ * is room. For Mic-E the destination is the computed one. Like every call
+ * that writes bytes from data it ends in the read-back, and the header it
+ * writes is read back too (the same source, destination and path, with the
+ * `*` on the last used entry only). Refusals, in this order: an address that
+ * is not 1-9 letters, digits or - (PDN_APRS_REFUSAL_INVALID_ADDRESS); a path
+ * with an entry not marked used before one that is (INVALID_PATH), both
+ * judged before the data; then the data's own codes, the read-back's, the
+ * size, and last what a line cannot carry (TNC2_CANNOT_CARRY): a CR or LF
+ * inside the information field (a run of them at its very end, which a decoder takes off as one trailing-line-break, is carried) or a NUL,
+ * since the line is a string. On any failure buf holds nothing of use (it is
+ * zeroed).
  */
 PDN_APRS_API int pdn_aprs_encode_tnc2(const pdn_aprs_header *header, const pdn_aprs_data *data,
                                       const pdn_aprs_encode_options *options, char *buf, size_t cap,
@@ -1249,7 +1296,12 @@ PDN_APRS_API int pdn_aprs_encode_tnc2(const pdn_aprs_header *header, const pdn_a
 
 /*
  * Encodes an AX.25 UI frame (addresses, control 0x03, PID 0xF0, information
- * field), without flags or FCS, ready for KISS.
+ * field), without flags or FCS, ready for KISS. The refusals are those of
+ * pdn_aprs_encode_tnc2, except that what a frame cannot carry is
+ * PDN_APRS_REFUSAL_AX25_CANNOT_CARRY, the very last: a call over 6
+ * characters, in lower case or empty, an SSID a frame cannot hold, or more
+ * than 8 path entries. A frame carries a CR or LF in the information field.
+ * The H bit is set on every used entry.
  */
 PDN_APRS_API int pdn_aprs_encode_ax25(const pdn_aprs_header *header, const pdn_aprs_data *data,
                                       const pdn_aprs_encode_options *options, void *buf, size_t cap,
@@ -1263,7 +1315,14 @@ PDN_APRS_API int pdn_aprs_encode_ax25(const pdn_aprs_header *header, const pdn_a
 typedef struct pdn_aprs_station {
     const char *source;      /* "M0LTE-9"; required */
     const char *destination; /* NULL for "APZ001" (experimental software) */
-    const char *path;        /* "WIDE1-1,WIDE2-1", or NULL for none */
+    /* "WIDE1-1,WIDE2-1", or NULL for none. As in the neutral header form, an
+       entry ending in `*` is a used entry (never part of an address), and so
+       is every entry before one: "WIDE1-1*,N0CALL-1*,WIDE2-1". A line writes
+       the `*` on the last used entry only, a frame sets the H bit of every
+       used entry. An entry not marked used before one that is cannot be
+       carried by either form: PDN_APRS_REFUSAL_INVALID_PATH, whichever form
+       is written and before any fault of the data. */
+    const char *path;
     uint8_t ax25;            /* 1: write an AX.25 frame; 0: a TNC2 line */
     /* Unused by the builders (see pdn_aprs_encode_options); NULL is fine. */
     const pdn_aprs_device_table *devices;
@@ -1281,7 +1340,13 @@ typedef struct pdn_aprs_station {
  * carry, PDN_APRS_ERR_ARGUMENT for a NULL required
  * pointer or other misuse, PDN_APRS_ERR_UNSUPPORTED for text APRS allows but
  * that does not fit the library's fixed buffers, and PDN_APRS_ERR_BUFFER if
- * buf is too small.
+ * buf is too small; on every failure buf holds nothing (it is zeroed). Every
+ * call judges the station's header when it is given, before any fault of the
+ * arguments: an address that is not an address (PDN_APRS_REFUSAL_INVALID_ADDRESS,
+ * an empty destination included) or a path with an entry not marked used before
+ * one that is (PDN_APRS_REFUSAL_INVALID_PATH), whatever form it writes. An empty
+ * message ID is PDN_APRS_REFUSAL_INVALID_MESSAGE_ID; an empty comment or text is
+ * no text.
  *
  * Every input struct below is zero-initialised by its user ("= {0}" or a
  * designated initializer): zero is "absent" for any field a later 1.x adds.
@@ -1502,21 +1567,49 @@ PDN_APRS_API int pdn_aprs_build(const pdn_aprs_station *station, const pdn_aprs_
 
 /* Writes a decoded packet back as it was received: its header and its
    information field, as a TNC2 line (NUL-terminated if there is room) or as
-   an AX.25 UI frame (without flags or FCS). Return the length, or
-   PDN_APRS_ERR_HEADER if the packet's header was unusable,
-   PDN_APRS_ERR_REFUSED for an address the format cannot carry as sent (an
-   AX.25 frame holds no SSID with a leading zero, for one), or
+   an AX.25 UI frame (without flags or FCS). These write a packet the
+   program already holds and are not encoders: the information field goes
+   through as received, even over 256 bytes, with no size check and no
+   read-back of it. The header they write is read back, as a user's decode of
+   that form reads it (the outer header rules, whatever the packet's origin:
+   an inner packet from pdn_aprs_decode_third_party() whose source is "a b"
+   is refused, since no outer header holds it), and must give the header held
+   with no diagnostic the held packet does not carry. A line marks the last
+   used path entry only and leaves out an empty path entry; an empty
+   destination, which a lenient decode tolerates, is written as it came in a
+   line and refused in a frame, which never carries one.
+
+   Return the length, or PDN_APRS_ERR_HEADER if the packet's header was
+   unusable, PDN_APRS_ERR_REFUSED for a header or field the form cannot carry,
    PDN_APRS_ERR_BUFFER, or PDN_APRS_ERR_ARGUMENT for a length or path count
    that does not fit its array, or a fixed string in the header with no NUL. A
    packet whose decode returned PDN_APRS_ERR_TOO_LONG has info_dropped set and
-   is not written: PDN_APRS_ERR_TOO_LONG. A packet decoded with
+   is not written: PDN_APRS_ERR_TOO_LONG. The information field is decoded
+   again under the header written and compared byte for byte with the data the
+   packet holds: data and bytes that no longer agree (a field of the data
+   changed, in a copy too, at any depth of third-party packets) are
+   PDN_APRS_REFUSAL_NOT_ENCODABLE. A packet decoded with
    pdn_aprs_decode_info_unbounded keeps no information field, so only its
-   header is written (unless it returned TOO_LONG, as above). These pass
-   the information field through as received, even over 256 bytes: they write
-   a packet the program already holds and are not encoders, so they make no
-   size check. */
-PDN_APRS_API int pdn_aprs_write_tnc2(const pdn_aprs_packet *packet, char *buf, size_t cap);
-PDN_APRS_API int pdn_aprs_write_ax25(const pdn_aprs_packet *packet, void *buf, size_t cap);
+   header is written (unless it returned TOO_LONG, as above).
+
+   result may be NULL; when it is not, the call fills it as the encoders do:
+   len (the bytes written) and, for PDN_APRS_ERR_REFUSED, refusal (a
+   pdn_aprs_refusal code, zero for every other result) and reason. The codes,
+   in order: PDN_APRS_REFUSAL_INVALID_ADDRESS for an address no outer header
+   holds (a source with a space, _ or *, say), PDN_APRS_REFUSAL_INVALID_PATH
+   for a path with an entry not used before one that is, then what the form
+   cannot carry: for a line PDN_APRS_REFUSAL_TNC2_CANNOT_CARRY (a CR or LF
+   inside the information field, the run at its very end being carried, or a NUL,
+   since a line is a NUL-terminated string), for a frame
+   PDN_APRS_REFUSAL_AX25_CANNOT_CARRY (an empty, over-long or lower-case call,
+   an SSID a frame cannot hold, over 8 path entries); and
+   PDN_APRS_REFUSAL_DOES_NOT_READ_BACK if the header written does not read back
+   as the header held. A packet whose header was changed after the decode, so that
+   its information field reads as other data under the header written (a Mic-E
+   field put under a Mic-E destination, a Mic-E report under a plain one), is
+   PDN_APRS_REFUSAL_NOT_ENCODABLE, judged first. */
+PDN_APRS_API int pdn_aprs_write_tnc2(const pdn_aprs_packet *packet, char *buf, size_t cap, pdn_aprs_encoded *result);
+PDN_APRS_API int pdn_aprs_write_ax25(const pdn_aprs_packet *packet, void *buf, size_t cap, pdn_aprs_encoded *result);
 
 /* What a PHG's codes mean: watts (the power code squared), antenna height in
    feet (10 x 2 to the height code), gain in dB, and directivity in degrees

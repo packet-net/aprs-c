@@ -141,7 +141,28 @@ PDN_APRS__PRIVATE void pdn_aprs__putd(pdn_aprs__buf *b, double v)
         for (; p > 0; p--)
             pdn_aprs__putc(b, '0');
     } else if (mag >= 9.0e15) {
-        put_scaled(b, (uint64_t)floor(mag + 0.5), 0);
+        /* below 2^64: the fewest significant digits that give the same double, then zeros
+           (-2^63 is -9223372036854776000, not its exact value) */
+        int sd, p = 0, digits = (int)floor(log10(mag)) + 1;
+        uint64_t r = (uint64_t)mag;
+        for (sd = 1; sd <= 17; sd++) {
+            double back;
+            uint64_t q;
+            p = digits - sd;
+            if (p < 0)
+                p = 0;
+            q = (uint64_t)(mag / pdn_aprs__pow10i(p) + 0.5);
+            back = (double)q * pdn_aprs__pow10i(p);
+            if (back == mag) {
+                r = q;
+                break;
+            }
+        }
+        if (sd > 17)
+            p = 0;
+        put_scaled(b, r, 0);
+        for (; p > 0; p--)
+            pdn_aprs__putc(b, '0');
     } else {
         for (d = 15; d > 0 && mag * pdn_aprs__pow10i(d) >= 9.0e15; d--)
             ;
@@ -348,4 +369,33 @@ PDN_APRS__PRIVATE long pdn_aprs__b91(const uint8_t *s, size_t n)
     for (i = 0; i < n; i++)
         v = v * 91 + (long)(s[i] - 33);
     return v;
+}
+
+/* ---- the decoder's mark on a third-party packet ---- */
+
+/* A 64-bit multiplicative hash of the bytes, eight at a time (read as
+   little-endian numbers whatever the machine), mixed and folded to 32 bits,
+   never zero. Not a secret and not a signature: it ties as_received to the
+   bytes the decoder read, as a guard against accidental edits. A program that
+   means to set it can. */
+PDN_APRS__PRIVATE uint32_t pdn_aprs__third_party_mark(const uint8_t *p, size_t n)
+{
+    uint64_t h = UINT64_C(0x9E3779B97F4A7C15) ^ (uint64_t)n;
+    size_t i = 0, k;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w = 0;
+        for (k = 0; k < 8; k++)
+            w |= (uint64_t)p[i + k] << (8 * k);
+        h = (h ^ w) * UINT64_C(0xFF51AFD7ED558CCD);
+        h ^= h >> 32;
+    }
+    for (; i < n; i++) {
+        h = (h ^ p[i]) * UINT64_C(0x100000001B3);
+        h ^= h >> 29;
+    }
+    h ^= h >> 33;
+    h *= UINT64_C(0xC4CEB9FE1A85EC53);
+    h ^= h >> 29;
+    h = h ^ (h >> 32);
+    return (uint32_t)(h & 0xFFFFFFFFu ? h & 0xFFFFFFFFu : 1u);
 }

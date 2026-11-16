@@ -261,6 +261,85 @@ static int reencodes_as(const char *want)
     return strcmp(out, want) == 0;
 }
 
+/* A held packet is written only while its information bytes and its data agree, whatever the
+   type: a changed latitude, text or inner byte (in place or in a copy, at any depth) is
+   not-encodable in a line and in a frame, and a packet left as decoded is written as received. */
+static int refused_as_disagreeing(const pdn_aprs_packet *p)
+{
+    char line[2048];
+    uint8_t frame[2048];
+    pdn_aprs_encoded e1, e2;
+    int a = pdn_aprs_write_tnc2(p, line, sizeof line, &e1), b = pdn_aprs_write_ax25(p, frame, sizeof frame, &e2);
+    return a == PDN_APRS_ERR_REFUSED && b == PDN_APRS_ERR_REFUSED && e1.refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE &&
+           e2.refusal == PDN_APRS_REFUSAL_NOT_ENCODABLE;
+}
+
+static int written_as_received(const pdn_aprs_packet *p)
+{
+    char line[2048];
+    uint8_t frame[2048];
+    return pdn_aprs_write_tnc2(p, line, sizeof line, NULL) > 0 && pdn_aprs_write_ax25(p, frame, sizeof frame, NULL) > 0;
+}
+
+static void test_write_agrees_with_data(void)
+{
+    static pdn_aprs_packet outer, inner, inner2, copy;
+    static const char *const all[] = {
+        ">hello", "!4903.50N/07201.75W>088/036/A=001000Test", "_10090556c...s...g...t...h50",
+        ":K4CCC-9  :testing{6136", "}M0LTE>APRS,TCPIP*:>hello",
+    };
+    unsigned i;
+    for (i = 0; i < sizeof all / sizeof all[0]; i++) {
+        char line[300];
+        snprintf(line, sizeof line, "N0CALL>APZ001:%s", all[i]);
+        CHECK(decode(line) == PDN_APRS_OK && written_as_received(&pkt));
+    }
+    /* status text edited in the data, then in the bytes */
+    CHECK(decode("N0CALL>APZ001:>hello") == PDN_APRS_OK && written_as_received(&pkt));
+    memcpy(pkt.data.as.status.text, "evil!", 5);
+    CHECK(refused_as_disagreeing(&pkt));
+    CHECK(decode("N0CALL>APZ001:>hello") == PDN_APRS_OK);
+    pkt.info[1] = 'j';
+    CHECK(refused_as_disagreeing(&pkt));
+    /* a position whose latitude was changed, even by less than a step of the form */
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W>088/036") == PDN_APRS_OK);
+    pkt.data.as.report.latitude += 0.01;
+    CHECK(refused_as_disagreeing(&pkt));
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W>088/036") == PDN_APRS_OK);
+    copy = pkt;
+    copy.data.as.report.latitude += 1e-9;
+    CHECK(refused_as_disagreeing(&copy) && written_as_received(&pkt));
+    /* a held outer packet whose inner bytes were edited, and inner packets edited at depth 1 and 2 */
+    CHECK(decode("N0CALL>APZ001:}M0LTE>APRS,TCPIP*:}G0ABC>APRS,TCPIP*:>hello") == PDN_APRS_OK);
+    CHECK(written_as_received(&pkt));
+    outer = pkt;
+    CHECK(pdn_aprs_decode_third_party(&outer.data, NULL, &inner) == PDN_APRS_OK && written_as_received(&inner));
+    CHECK(pdn_aprs_decode_third_party(&inner.data, NULL, &inner2) == PDN_APRS_OK && written_as_received(&inner2));
+    copy = outer;
+    copy.data.as.third_party.packet[copy.data.as.third_party.len - 1] = 'X';
+    CHECK(refused_as_disagreeing(&copy));
+    copy = inner;
+    copy.data.as.third_party.packet[copy.data.as.third_party.len - 1] = 'X';
+    CHECK(refused_as_disagreeing(&copy));
+    copy = inner2;
+    memcpy(copy.data.as.status.text, "evil!", 5);
+    CHECK(refused_as_disagreeing(&copy));
+    /* the deepest level the decoder reads is held as unrecognized, and is written as read */
+    CHECK(decode("N0CALL>APZ001:}A>B:}C>D:}E>F:}G>H:}I>J:>hi") == PDN_APRS_OK);
+    {
+        pdn_aprs_packet cur = pkt, nx;
+        int d;
+        for (d = 0; d < 5 && cur.data.type == PDN_APRS_TYPE_THIRD_PARTY; d++) {
+            CHECK(pdn_aprs_decode_third_party(&cur.data, NULL, &nx) == PDN_APRS_OK && written_as_received(&nx));
+            cur = nx;
+        }
+        CHECK(d >= 4);
+    }
+    copy = inner;
+    strcpy(copy.header.destination, "APZ999");
+    CHECK(written_as_received(&copy));
+}
+
 static void test_exact_bytes(void)
 {
     pdn_aprs_position_args p;
@@ -283,6 +362,26 @@ static void test_exact_bytes(void)
     CHECK(reencodes_as("_10090556c...s...g...t...h00"));
     pkt.data.as.weather.weather.value[PDN_APRS_WX_HUMIDITY_PERCENT] = 0.4;
     CHECK(reencodes_as(NULL));
+    {
+        /* a humidity that rounds to 0 has no form; a negative one is outside the field */
+        static const double h[] = {0.4, 0.0, -0.4, -0.6, -5.0, 100.4, 100.6};
+        static const int want[] = {PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM,
+                                   PDN_APRS_REFUSAL_VALUE_HAS_NO_FORM, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE,
+                                   PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE, 0, PDN_APRS_REFUSAL_VALUE_OUT_OF_RANGE};
+        char o[300];
+        unsigned k;
+        for (k = 0; k < sizeof h / sizeof h[0]; k++) {
+            pdn_aprs_encoded enc;
+            int n;
+            pkt.data.as.weather.weather.value[PDN_APRS_WX_HUMIDITY_PERCENT] = h[k];
+            memset(&enc, 0, sizeof enc);
+            n = pdn_aprs_encode_info(&pkt.data, NULL, o, sizeof o, &enc);
+            if (want[k])
+                CHECK(n == PDN_APRS_ERR_REFUSED && enc.refusal == want[k]);
+            else
+                CHECK(n > 0);
+        }
+    }
     CHECK(decode("N0CALL>APZ001:!5130.00N/00007.00W>090/998") == PDN_APRS_OK);
     pkt.data.as.report.speed_knots = 999.4;
     CHECK(reencodes_as("!5130.00N/00007.00W>090/999"));
@@ -504,35 +603,35 @@ static void test_reading(void)
     int dir, n;
     const char *line = "N1EOE>APN391,N1NCI-3*,WIDE2-1:!4216.95n/07243.20w#phg6230/ Easthampton MA";
     CHECK(decode(line) == PDN_APRS_OK);
-    n = pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2);
+    n = pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2, NULL);
     CHECK(n == (int)strlen(line) && strcmp(tnc2, line) == 0);
-    n = pdn_aprs_write_ax25(&pkt, frame, sizeof frame);
+    n = pdn_aprs_write_ax25(&pkt, frame, sizeof frame, NULL);
     CHECK(n > 0 && pdn_aprs_decode_ax25(frame, (size_t)n, NULL, &back) == PDN_APRS_OK &&
           strcmp(back.header.source, "N1EOE") == 0 && back.info_len == pkt.info_len &&
           memcmp(back.info, pkt.info, pkt.info_len) == 0 && back.header.path[0].used);
-    CHECK(pdn_aprs_write_tnc2(&pkt, tnc2, 10) == PDN_APRS_ERR_BUFFER);
+    CHECK(pdn_aprs_write_tnc2(&pkt, tnc2, 10, NULL) == PDN_APRS_ERR_BUFFER);
     /* a leading-zero SSID has no AX.25 form */
     CHECK(decode("WB4APR-00>APRS:>x") == PDN_APRS_OK &&
-          pdn_aprs_write_ax25(&pkt, frame, sizeof frame) == PDN_APRS_ERR_REFUSED &&
-          pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) > 0);
+          pdn_aprs_write_ax25(&pkt, frame, sizeof frame, NULL) == PDN_APRS_ERR_REFUSED &&
+          pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2, NULL) > 0);
     /* so has an SSID of -0, in the outer header and in a third-party inner header */
     CHECK(decode("N0ZO-0>APRS:>x") == PDN_APRS_OK &&
-          pdn_aprs_write_ax25(&pkt, frame, sizeof frame) == PDN_APRS_ERR_REFUSED &&
-          pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) > 0);
+          pdn_aprs_write_ax25(&pkt, frame, sizeof frame, NULL) == PDN_APRS_ERR_REFUSED &&
+          pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2, NULL) > 0);
     CHECK(decode("N0ZO>APX220,TCPIP*,qAC,T2RDU:}N0ZO-0>APX220,WIDE-1,WIDE2-1:!3309.71N/08643.18W_035/002g002t063r000p000P000h098b10133") == PDN_APRS_OK &&
           pdn_aprs_decode_third_party(&pkt.data, NULL, &back) == PDN_APRS_OK &&
-          pdn_aprs_write_ax25(&back, frame, sizeof frame) == PDN_APRS_ERR_REFUSED);
-    CHECK(decode("N0ZO-1>APRS:>x") == PDN_APRS_OK && pdn_aprs_write_ax25(&pkt, frame, sizeof frame) > 0);
+          pdn_aprs_write_ax25(&back, frame, sizeof frame, NULL) == PDN_APRS_ERR_REFUSED);
+    CHECK(decode("N0ZO-1>APRS:>x") == PDN_APRS_OK && pdn_aprs_write_ax25(&pkt, frame, sizeof frame, NULL) > 0);
     /* an empty destination, which the lenient decoder takes, is written back as received */
     {
         const char *e = "KB1EZZ-9>,W1IMD:>x";
-        CHECK(decode(e) == PDN_APRS_OK && pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) == (int)strlen(e) &&
+        CHECK(decode(e) == PDN_APRS_OK && pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2, NULL) == (int)strlen(e) &&
               strcmp(tnc2, e) == 0);
         pkt.info_len = (uint16_t)(sizeof pkt.info + 1);
-        CHECK(pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) == PDN_APRS_ERR_ARGUMENT);
+        CHECK(pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2, NULL) == PDN_APRS_ERR_ARGUMENT);
     }
     CHECK(pdn_aprs_decode_tnc2("bad", 3, NULL, &pkt) == PDN_APRS_ERR_HEADER &&
-          pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2) == PDN_APRS_ERR_HEADER);
+          pdn_aprs_write_tnc2(&pkt, tnc2, sizeof tnc2, NULL) == PDN_APRS_ERR_HEADER);
     /* any code, any severity */
     CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W-\r") == PDN_APRS_OK);
     CHECK(pdn_aprs_has_diagnostic(&pkt, -1, PDN_APRS_SEVERITY_ERROR) == 0);
@@ -693,6 +792,40 @@ static void test_batch2(void)
        altitude search, so its digits are not an altitude (G1) */
     CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91SX/G PHG1060}AB") == PDN_APRS_OK && pkt.data.as.report.has_phg &&
           !pkt.data.as.report.has_altitude && strcmp(pkt.data.as.report.locator, "IO91SX") == 0);
+
+    /* a locator with its space only once what the decoder lifts is out: that
+       space separates it and the comment loses one more leading space, so two
+       spaces give "x" and three give " x", with no missing-space warning
+       (round 5, Mic-E locator space) */
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G\"4e}  x") == PDN_APRS_OK &&
+          !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
+          pkt.data.as.report.comment_len == 1 && strcmp(pkt.data.as.report.comment, "x") == 0);
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91SX/G\"4e}   x") == PDN_APRS_OK &&
+          !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
+          strcmp(pkt.data.as.report.comment, " x") == 0);
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G|!:&0'p|  x") == PDN_APRS_OK &&
+          !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
+          pkt.data.as.report.has_telemetry && strcmp(pkt.data.as.report.comment, "x") == 0);
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91SX/G|!:&0'p|   x") == PDN_APRS_OK &&
+          !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
+          pkt.data.as.report.has_telemetry && strcmp(pkt.data.as.report.comment, " x") == 0);
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G\"4e}|!:&0'p|  x") == PDN_APRS_OK &&
+          !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
+          pkt.data.as.report.has_telemetry && pkt.data.as.report.has_altitude &&
+          strcmp(pkt.data.as.report.comment, "x") == 0);
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91SX/G\"4e}|!:&0'p|   x") == PDN_APRS_OK &&
+          !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
+          strcmp(pkt.data.as.report.comment, " x") == 0);
+    /* telemetry split by the altitude is text, and the locator has no space */
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G|!:&0hl!Y[/>\"4e}='p|  x") == PDN_APRS_OK &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
+          !pkt.data.as.report.has_telemetry && pkt.data.as.report.has_altitude &&
+          strcmp(pkt.data.as.report.comment, "|!:&0hl!Y[/>='p|  x") == 0);
+    /* a !DAO! that exists only by joining across a lifted altitude is text, so
+       the locator has no space and the text stays */
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G!W1\"4e}2! hi") == PDN_APRS_OK && !pkt.data.as.report.has_dao &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING) &&
+          strcmp(pkt.data.as.report.comment, "!W12! hi") == 0);
 
     /* where a Mic-E altitude was sent is data (altitude_in_comment): zero feet
        sent as a /A= is written as a /A= again, and the same data without the
@@ -952,6 +1085,7 @@ static void test_refusal_codes(void)
     pdn_aprs_encoded enc;
     CHECK(strcmp(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_INVALID_ADDRESS), "invalid-address") == 0);
     CHECK(strcmp(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_DOES_NOT_READ_BACK), "does-not-read-back") == 0);
+    CHECK(strcmp(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_INVALID_PATH), "invalid-path") == 0);
     CHECK(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_NONE) == NULL && pdn_aprs_refusal_name(99) == NULL);
 
     memset(&pos, 0, sizeof pos);
@@ -1495,8 +1629,8 @@ static void test_too_long_and_line_end(void)
     memset(line + n, 'x', 600);
     rc = pdn_aprs_decode_tnc2(line, n + 600, NULL, &p);
     CHECK(rc == PDN_APRS_ERR_TOO_LONG && p.header_ok && p.info_len == 0);
-    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) == PDN_APRS_ERR_TOO_LONG);
-    CHECK(pdn_aprs_write_ax25(&p, out, sizeof out) == PDN_APRS_ERR_TOO_LONG);
+    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out, NULL) == PDN_APRS_ERR_TOO_LONG);
+    CHECK(pdn_aprs_write_ax25(&p, out, sizeof out, NULL) == PDN_APRS_ERR_TOO_LONG);
 
     /* the field itself at, and one past, the cap, with and without a line end */
     for (len = PDN_APRS_MAX_INFO - 1; len <= PDN_APRS_MAX_INFO + 1; len++) {
@@ -1511,12 +1645,12 @@ static void test_too_long_and_line_end(void)
             rc = pdn_aprs_decode_tnc2(line, n + (size_t)len + el, NULL, &p);
             if (len <= PDN_APRS_MAX_INFO) {
                 CHECK(rc == PDN_APRS_OK && p.info_len == (unsigned)len + el);
-                CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) == (int)(n + (size_t)len + el));
+                CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out, NULL) == (int)(n + (size_t)len + el));
                 CHECK(memcmp(out, line, n + (size_t)len + el) == 0);
-                CHECK(pdn_aprs_write_ax25(&p, out, sizeof out) > 0);
+                CHECK(pdn_aprs_write_ax25(&p, out, sizeof out, NULL) > 0);
             } else {
                 CHECK(rc == PDN_APRS_ERR_TOO_LONG);
-                CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) == PDN_APRS_ERR_TOO_LONG);
+                CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out, NULL) == PDN_APRS_ERR_TOO_LONG);
             }
         }
     }
@@ -1534,7 +1668,7 @@ static void test_too_long_and_line_end(void)
     CHECK(pdn_aprs_decode_info(NULL, line, PDN_APRS_MAX_INFO + 3, NULL, &p) == PDN_APRS_ERR_TOO_LONG);
     CHECK(pdn_aprs_decode_info_unbounded(NULL, line, PDN_APRS_MAX_INFO + 3, NULL, &p) == PDN_APRS_OK);
     /* an unbounded decode keeps nothing by design and still writes its header */
-    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) > 0);
+    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out, NULL) > 0);
 }
 
 /* A fixed char array in caller-filled data with no NUL in it is an invalid
@@ -1661,8 +1795,8 @@ static void test_unterminated_header(void)
         CHECK(pdn_aprs_encode_ax25(h, &d, NULL, buf, sizeof buf, &enc) == PDN_APRS_ERR_ARGUMENT);
         p->header_ok = 1;
         p->header = *h;
-        CHECK(pdn_aprs_write_tnc2(p, buf, sizeof buf) == PDN_APRS_ERR_ARGUMENT);
-        CHECK(pdn_aprs_write_ax25(p, buf, sizeof buf) == PDN_APRS_ERR_ARGUMENT);
+        CHECK(pdn_aprs_write_tnc2(p, buf, sizeof buf, NULL) == PDN_APRS_ERR_ARGUMENT);
+        CHECK(pdn_aprs_write_ax25(p, buf, sizeof buf, NULL) == PDN_APRS_ERR_ARGUMENT);
     }
     /* a path call beyond path_count is not read */
     memset(h, 0, sizeof *h);
@@ -1686,11 +1820,11 @@ static void test_unbounded_too_long(void)
     big[0] = '>';
     CHECK(pdn_aprs_decode_info_unbounded(NULL, big, sizeof big, NULL, &p) == PDN_APRS_ERR_TOO_LONG);
     CHECK(p.info_dropped == 1);
-    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) == PDN_APRS_ERR_TOO_LONG);
-    CHECK(pdn_aprs_write_ax25(&p, out, sizeof out) == PDN_APRS_ERR_TOO_LONG);
+    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out, NULL) == PDN_APRS_ERR_TOO_LONG);
+    CHECK(pdn_aprs_write_ax25(&p, out, sizeof out, NULL) == PDN_APRS_ERR_TOO_LONG);
     CHECK(pdn_aprs_decode_info_unbounded(NULL, big, 100, NULL, &p) == PDN_APRS_OK);
     CHECK(p.info_dropped == 0);
-    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out) > 0);
+    CHECK(pdn_aprs_write_tnc2(&p, out, sizeof out, NULL) > 0);
 }
 
 /* A capability with no value has an offset nobody reads, and none is formed from it. */
@@ -1896,6 +2030,80 @@ static void test_round5(void)
           !pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_OUT_OF_RANGE_VALUE, -1));
 }
 
+/* The Mic-E locator's space is judged on the text after a later altitude and the
+   telemetry it leaves between two bars are lifted. */
+static void test_mic_e_locator_space_after_lifted_altitude(void)
+{
+    const pdn_aprs_report *r;
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G\"4e}|!:&0'p| DG2MM") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(!pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, -1));
+    CHECK(pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MIC_E_ALTITUDE_NOT_FIRST, PDN_APRS_SEVERITY_WARNING));
+    CHECK(r->has_altitude && r->has_telemetry && strcmp(r->locator, "IO91") == 0);
+    CHECK(r->comment_len == 5 && memcmp(r->comment, "DG2MM", 5) == 0);
+    /* telemetry the altitude splits is text */
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G|!:&0hl!Y[/>\"4e}='p| DG2MM") == PDN_APRS_OK);
+    CHECK(!pkt.data.as.report.has_telemetry && pkt.data.as.report.has_altitude &&
+          strcmp(pkt.data.as.report.comment, "|!:&0hl!Y[/>='p| DG2MM") == 0 &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING));
+    /* a longer spaced comment */
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G\"4e}|!:&0'p| hello there") == PDN_APRS_OK);
+    CHECK(!pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, -1));
+    CHECK(pkt.data.as.report.comment_len == 11);
+    /* a comment with no space after the telemetry still warns */
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G\"4e}|!:&0'p|DG2MM") == PDN_APRS_OK);
+    CHECK(pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MISSING_SPACE_AFTER_LOCATOR, PDN_APRS_SEVERITY_WARNING));
+}
+
+/* A garbled timestamp before an uncompressed position: seven bytes ending in z, / or h
+   and an uncompressed position after them win over any reading straight after the DTI. */
+static void test_garbled_timestamp(void)
+{
+    static const char suffix[] = {'z', '/', 'h'};
+    static const char dti[] = {'/', '@'};
+    pdn_aprs_decode_options strict;
+    unsigned i, j;
+    char info[96];
+    memset(&strict, 0, sizeof strict);
+    strict.strict = 1;
+    for (i = 0; i < 3; i++) {
+        for (j = 0; j < 2; j++) {
+            const pdn_aprs_report *r;
+            int n = snprintf(info, sizeof info, "N0CALL>APZ001:%cR30549%c2831.07N/08142.92W_015/001g006t058", dti[j], suffix[i]);
+            CHECK(n > 0 && pdn_aprs_decode_tnc2(info, (size_t)n, NULL, &pkt) == PDN_APRS_OK &&
+                  (pkt.data.type == PDN_APRS_TYPE_WEATHER || pkt.data.type == PDN_APRS_TYPE_POSITION));
+            r = &pkt.data.as.report;
+            CHECK(pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MALFORMED_TIMESTAMP, PDN_APRS_SEVERITY_WARNING));
+            CHECK(!r->compressed && r->latitude > 28.5 && r->latitude < 28.6 && r->longitude < -81.7 &&
+                  r->timestamp[0] == 0 && r->messaging == (dti[j] == '@'));
+            CHECK(pdn_aprs_decode_tnc2(info, (size_t)n, &strict, &pkt) == PDN_APRS_OK &&
+                  pkt.data.type == PDN_APRS_TYPE_UNRECOGNIZED &&
+                  pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MALFORMED_TIMESTAMP, PDN_APRS_SEVERITY_ERROR));
+        }
+    }
+    /* lower-case hemisphere letters and ambiguity after the seven bytes */
+    CHECK(decode("N0CALL>APZ001:/R30549z2831.07n/08142.92w-") == PDN_APRS_OK &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MALFORMED_TIMESTAMP, PDN_APRS_SEVERITY_WARNING) &&
+          !pkt.data.as.report.compressed && pkt.data.as.report.latitude > 28.5 && pkt.data.as.report.latitude < 28.6);
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001:/R30549z2831.07n/08142.92w-", 41, &strict, &pkt) == PDN_APRS_OK &&
+          pkt.data.type == PDN_APRS_TYPE_UNRECOGNIZED &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MALFORMED_TIMESTAMP, PDN_APRS_SEVERITY_ERROR));
+    CHECK(decode("N0CALL>APZ001:@R30549h28  .  N/081  .  W-") == PDN_APRS_OK &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MALFORMED_TIMESTAMP, PDN_APRS_SEVERITY_WARNING) &&
+          !pkt.data.as.report.compressed && pkt.data.as.report.ambiguity == 4);
+    /* a seventh byte that is not a time indicator: the old order (a compressed reading straight after the DTI) */
+    CHECK(decode("N0CALL>APZ001:/R30549x2831.07N/08142.92W_015/001g006t058") == PDN_APRS_OK &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MALFORMED_TIMESTAMP, PDN_APRS_SEVERITY_WARNING) &&
+          pkt.data.as.report.compressed);
+    /* a compressed position after the seven bytes does not win */
+    CHECK(decode("N0CALL>APZ001:/R30549z/5L!!<*e7>7P[") == PDN_APRS_OK &&
+          pdn_aprs_has_diagnostic(&pkt, PDN_APRS_CODE_MALFORMED_TIMESTAMP, PDN_APRS_SEVERITY_WARNING) &&
+          pkt.data.as.report.compressed);
+    /* too short to hold a position after the seven bytes: no overrun, the old reading */
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001:/R30549z", 22, NULL, &pkt) >= 0);
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APZ001:/R30549z2831.07N/0814", 35, NULL, &pkt) >= 0);
+}
+
 /* A Mic-E info field decoded with no device table. */
 static int decode_mice_bare(char type_code, const char *tail)
 {
@@ -2051,6 +2259,142 @@ static void test_mic_e_codes(void)
     }
 }
 
+/* Round 5: lifting an element never joins the text either side of it. Each
+   element is read only where its bytes stand whole as sent. */
+static void test_lifting_never_joins(void)
+{
+    pdn_aprs_decode_options strict;
+    const pdn_aprs_report *r;
+    memset(&strict, 0, sizeof strict);
+    strict.strict = 1;
+    /* a range split by telemetry, in an object: text, and it will not
+       re-encode, since written it would read as a range */
+    CHECK(decode("N0CALL>APZ001:;OBJECT   *111111z4903.50N/07201.75W-RNG00|!:&0'p|12 x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(pkt.data.type == PDN_APRS_TYPE_OBJECT && !r->has_range && r->has_telemetry &&
+          strcmp(r->comment, "RNG0012 x") == 0 && reencodes_as(NULL));
+    /* an altitude split by a !DAO!, in an item, is text (its "/" is the comment's dropped delimiter); the DAO still counts */
+    CHECK(decode("N0CALL>APZ001:)ITEM!4903.50N/07201.75W-/A=00!W12!0123") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(pkt.data.type == PDN_APRS_TYPE_ITEM && !r->has_altitude && r->has_dao && strcmp(r->comment, "A=000123") == 0);
+    /* a PHG split by a later altitude is text, whichever lifts first */
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W-hi PH/A=000100G3330 x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->has_altitude && !r->has_phg && strcmp(r->comment, "hi PHG3330 x") == 0);
+    /* the weather software type and unit are one run: a telemetry block in
+       them makes them a comment */
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W_220/004g005t077e|!:&0'p|Cu2k") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->has_telemetry && r->weather.software == 0 && strcmp(r->comment, "eCu2k") == 0);
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W_220/004g005t077eCu2k") == PDN_APRS_OK);
+    CHECK(pkt.data.as.report.weather.software == 'e' && strcmp(pkt.data.as.report.weather.unit, "Cu2k") == 0);
+    /* a signpost split by an altitude is text */
+    CHECK(decode("N0CALL>APZ001:!4903.50N\\07201.75Wm{a/A=000100b} x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->has_altitude && r->signpost[0] == 0 && strcmp(r->comment, "{ab} x") == 0);
+    /* a voice frequency: an altitude before a field does not cut it off, a
+       telemetry block does, in either order of the two */
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W-146.520MHz T100/A=000100 R25m x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->has_frequency && r->frequency.tone_value == 100 && r->frequency.has_range && r->has_altitude &&
+          strcmp(r->comment, "x") == 0);
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W-146.520MHz T100|!:&0'p| R25m x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->has_frequency && r->frequency.tone_value == 100 && !r->frequency.has_range && r->has_telemetry &&
+          strcmp(r->comment, "R25m x") == 0);
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W-146.520MHz/A=000100!W12! T100 x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->has_frequency && r->frequency.tone == PDN_APRS_TONE_NONE && r->has_altitude && r->has_dao &&
+          strcmp(r->comment, "T100 x") == 0);
+    /* a space before a /A= does not reach a field after it, and braces
+       between a frequency and its fields cut them off: both are comment text,
+       and written back the text follows an altitude straight on and braces
+       after one space, with no / */
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W-146.520MHz T100 /A=000100-060 x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->frequency.tone_value == 100 && !r->frequency.has_offset && strcmp(r->comment, "-060 x") == 0 &&
+          reencodes_as("!4903.50N/07201.75W-146.520MHz T100/A=000100-060 x"));
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W-146.520MHz T100 -060 /A=000100R25m x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->frequency.has_offset && !r->frequency.has_range && strcmp(r->comment, "R25m x") == 0 &&
+          reencodes_as("!4903.50N/07201.75W-146.520MHz T100 -060/A=000100R25m x"));
+    CHECK(decode("N0CALL>APZ001:!4903.50N/07201.75W-146.520MHz/A=000100 T100 x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->frequency.tone == PDN_APRS_TONE_TONE && strcmp(r->comment, "x") == 0);
+    CHECK(decode("N0CALL>APZ001:;SIGN     *092345z4903.50N\\07201.75Wm146.520MHz{55} T100 x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->frequency.tone == PDN_APRS_TONE_NONE && strcmp(r->signpost, "55") == 0 && strcmp(r->comment, "T100 x") == 0 &&
+          reencodes_as(";SIGN     *092345z4903.50N\\07201.75Wm146.520MHz{55} T100 x"));
+    CHECK(decode("N0CALL>APZ001:;SIGN     *092345z4903.50N\\07201.75Wm146.520MHz T100{55} R25m x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(r->frequency.tone_value == 100 && !r->frequency.has_range && strcmp(r->comment, "R25m x") == 0 &&
+          reencodes_as(";SIGN     *092345z4903.50N\\07201.75Wm146.520MHz T100{55} R25m x"));
+    CHECK(decode("N0CALL>APZ001:;SIGN     *092345z4903.50N\\07201.75Wm146.520MHz{55}-060") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(!r->frequency.has_offset && strcmp(r->comment, "-060") == 0 &&
+          reencodes_as(";SIGN     *092345z4903.50N\\07201.75Wm146.520MHz{55} -060"));
+    /* Mic-E: telemetry split by a !DAO! is text, and a strict decoder reads a
+       later altitude as text and never rejects by it */
+    CHECK(decode("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G |!:&!W12!0'p| x") == PDN_APRS_OK);
+    r = &pkt.data.as.report;
+    CHECK(!r->has_telemetry && r->has_dao && strcmp(r->comment, "|!:&0'p| x") == 0);
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>S32UVT:`(_fn\"Oj/`IO91/G x\"4e}y", 37, &strict, &pkt) == PDN_APRS_OK &&
+          !pkt.data.as.report.has_altitude && strcmp(pkt.data.as.report.comment, "x\"4e}y") == 0);
+}
+
+/* A defect of one field or entry is listed once for each occurrence; a judgement about a whole, once.
+   A full list never loses the error that stopped the decode. */
+static void test_diagnostics_per_occurrence(void)
+{
+    static pdn_aprs_packet p;
+    static const uint8_t frame_two[] = {0x82, 0xA0, 0xA4, 0xA6, 0x40, 0x40, 0x60, 0x9C, 0x60, 0x86, 0x82, 0x98, 0x98, 0x60,
+                                        0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x60, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x61,
+                                        0x03, 0xF0, '>', 'h', 'i'};
+    char line[200];
+    int i, n, count;
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APRS,A,,B,,C:>hi", 23, NULL, &p) == PDN_APRS_OK);
+    for (i = 0, count = 0; i < p.diagnostic_count; i++)
+        count += p.diagnostics[i].code == PDN_APRS_CODE_EMPTY_PATH_ENTRY;
+    CHECK(count == 2 && p.header.path_count == 3);
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APRS:}N0CALL>APRS,A,,B,,C:>hi", 36, NULL, &p) == PDN_APRS_OK);
+    {
+        pdn_aprs_packet *in = (pdn_aprs_packet *)malloc(sizeof *in);
+        CHECK(pdn_aprs_decode_third_party(&p.data, NULL, in) == PDN_APRS_OK);
+        for (i = 0, count = 0; i < in->diagnostic_count; i++)
+            count += in->diagnostics[i].code == PDN_APRS_CODE_EMPTY_PATH_ENTRY;
+        CHECK(count == 2);
+        free(in);
+    }
+    /* two empty digipeater addresses in a frame */
+    CHECK(pdn_aprs_decode_ax25(frame_two, sizeof frame_two, NULL, &p) == PDN_APRS_OK);
+    for (i = 0, count = 0; i < p.diagnostic_count; i++)
+        count += p.diagnostics[i].code == PDN_APRS_CODE_EMPTY_PATH_ENTRY;
+    CHECK(count == 2 && p.header.path_count == 0);
+    /* several used markers are one judgement of the path */
+    CHECK(pdn_aprs_decode_tnc2("N0CALL>APRS,A*,B*,C*:>hi", 24, NULL, &p) == PDN_APRS_OK);
+    for (i = 0, count = 0; i < p.diagnostic_count; i++)
+        count += p.diagnostics[i].code == PDN_APRS_CODE_MULTIPLE_USED_MARKERS;
+    CHECK(count == 1);
+    /* a header with dozens of empty entries fills the list: the error that stops the decode is still there */
+    n = sprintf(line, "N0CALL>APRS,A");
+    for (i = 0; i < 40; i++)
+        line[n++] = ',';
+    n += sprintf(line + n, ":!junk");
+    pdn_aprs_decode_tnc2(line, (size_t)n, NULL, &p);
+    CHECK(p.diagnostic_count == PDN_APRS_MAX_DIAGNOSTICS);
+    CHECK(pdn_aprs_has_diagnostic(&p, -1, PDN_APRS_SEVERITY_ERROR));
+    /* a strict decoder stops at the first */
+    {
+        pdn_aprs_decode_options o;
+        memset(&o, 0, sizeof o);
+        o.strict = 1;
+        pdn_aprs_decode_tnc2("N0CALL>APRS,A,,B,,C:>hi", 23, &o, &p);
+        for (i = 0, count = 0; i < p.diagnostic_count; i++)
+            count += p.diagnostics[i].code == PDN_APRS_CODE_EMPTY_PATH_ENTRY;
+        CHECK(count == 1);
+    }
+}
+
 int main(void)
 {
     test_basics();
@@ -2058,6 +2402,7 @@ int main(void)
     test_devices();
     test_encoding();
     test_exact_bytes();
+    test_write_agrees_with_data();
     test_builders();
     test_timestamp();
     test_reading();
@@ -2069,13 +2414,17 @@ int main(void)
     test_round3();
     test_hostile_lengths();
     test_too_long_and_line_end();
+    test_diagnostics_per_occurrence();
     test_unterminated_strings();
     test_unterminated_header();
     test_unbounded_too_long();
     test_capability_without_value();
     test_round4();
     test_round5();
+    test_mic_e_locator_space_after_lifted_altitude();
+    test_garbled_timestamp();
     test_mic_e_codes();
+    test_lifting_never_joins();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

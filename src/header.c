@@ -38,6 +38,13 @@ static int address_ok(const uint8_t *s, size_t n)
     return 1;
 }
 
+/* 1 if the n bytes at s are an APRS-IS address (1-9 letters, digits or -): for the builders, which
+   judge a station's strings before they build its header. */
+PDN_APRS__PRIVATE int pdn_aprs__address_valid(const char *s, size_t n)
+{
+    return address_ok((const uint8_t *)s, n);
+}
+
 /* The source inside a third-party packet (APRS12c ch. 17): 1-9 printable
    ASCII characters other than '>' and ':', which end it. */
 static int inner_source_ok(const uint8_t *s, size_t n)
@@ -55,7 +62,7 @@ PDN_APRS__PRIVATE size_t pdn_aprs__parse_tnc2_header(pdn_aprs__dctx *c, const ui
                                                      pdn_aprs_header *h, int third_party)
 {
     size_t colon, gt, i, start;
-    int field = 0, marks = 0, last_marked = -1, empty_path = 0;
+    int field = 0, marks = 0, last_marked = -1, empty_path = 0, k;
     memset(h, 0, sizeof *h);
     h->q_construct = -1;
     for (colon = 0; colon < n && s[colon] != ':'; colon++)
@@ -96,7 +103,7 @@ PDN_APRS__PRIVATE size_t pdn_aprs__parse_tnc2_header(pdn_aprs__dctx *c, const ui
                     h->destination[len] = 0;
                 }
             } else if (len == 0) {
-                empty_path = 1;
+                empty_path++;
             } else {
                 if (e[len - 1] == '*') {
                     marked = 1;
@@ -127,8 +134,11 @@ PDN_APRS__PRIVATE size_t pdn_aprs__parse_tnc2_header(pdn_aprs__dctx *c, const ui
     }
     if (h->destination[0] == 0 && !pdn_aprs__tolerate(c, PDN_APRS_CODE_EMPTY_DESTINATION))
         return 0;
-    if (empty_path && !pdn_aprs__tolerate(c, PDN_APRS_CODE_EMPTY_PATH_ENTRY))
-        return 0;
+    /* one diagnostic for each empty entry; several used markers are a judgement of the whole path and
+       are listed once */
+    for (k = 0; k < empty_path; k++)
+        if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_EMPTY_PATH_ENTRY))
+            return 0;
     if (marks > 1 && !pdn_aprs__tolerate(c, PDN_APRS_CODE_MULTIPLE_USED_MARKERS))
         return 0;
     for (i = 0; (int)i <= last_marked; i++)
@@ -153,9 +163,73 @@ static int header_address_ok(const char *a)
     return address_ok((const uint8_t *)a, n);
 }
 
+/* 1 if the source, the destination and every path entry is an APRS-IS address
+   (1-9 letters, digits or -): the check that comes first, in either form. */
+PDN_APRS__PRIVATE int pdn_aprs__header_addresses_ok(const pdn_aprs_header *h, const char *dest)
+{
+    unsigned i;
+    if (!header_address_ok(h->source) || !header_address_ok(dest))
+        return 0;
+    for (i = 0; i < h->path_count && i < PDN_APRS_MAX_PATH; i++)
+        if (!header_address_ok(h->path[i].call))
+            return 0;
+    return 1;
+}
+
+/* 1 if an entry used (marked, or flagged used) comes after one that is not.
+   A line reads every entry before the last mark as used, and a frame reads
+   its H bits the same way, so no form carries such a path (README Read-back,
+   Header). */
+PDN_APRS__PRIVATE int pdn_aprs__path_has_gap(const pdn_aprs_header *h)
+{
+    unsigned i;
+    int unused = 0;
+    for (i = 0; i < h->path_count && i < PDN_APRS_MAX_PATH; i++) {
+        int used = h->path[i].used || h->path[i].marked;
+        if (used && unused)
+            return 1;
+        if (!used)
+            unused = 1;
+    }
+    return 0;
+}
+
+/* The fault of a header as given, which no form can carry and which is judged
+   when the header is given, before any fault of the data (README Refusal
+   reasons): PDN_APRS_REFUSAL_INVALID_ADDRESS for an address that is not 1-9
+   letters, digits or -, PDN_APRS_REFUSAL_INVALID_PATH for a path with an entry
+   not marked used before one that is, else 0. dest is the destination to
+   judge (a Mic-E report's is computed). *why is a plain reason. */
+PDN_APRS__PRIVATE int pdn_aprs__header_fault(const pdn_aprs_header *h, const char *dest, const char **why)
+{
+    if (!pdn_aprs__header_addresses_ok(h, dest)) {
+        *why = "a header address is not 1-9 letters, digits or -";
+        return PDN_APRS_REFUSAL_INVALID_ADDRESS;
+    }
+    if (pdn_aprs__path_has_gap(h)) {
+        *why = "a path entry that is not used comes before one that is, which reads back used";
+        return PDN_APRS_REFUSAL_INVALID_PATH;
+    }
+    return 0;
+}
+
+/* The last entry that is used, or -1. */
+static int last_used(const pdn_aprs_header *h)
+{
+    int i, last = -1;
+    for (i = 0; i < (int)h->path_count && i < PDN_APRS_MAX_PATH; i++)
+        if (h->path[i].used || h->path[i].marked)
+            last = i;
+    return last;
+}
+
+/* A TNC2 header: the * of a used path entry is written on the last one only
+   (a line reads every entry before it as used, and a * on each reads back
+   with multiple-used-markers). */
 PDN_APRS__PRIVATE int pdn_aprs__write_header_tnc2(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest)
 {
     unsigned i;
+    int last = last_used(h);
     if (!header_address_ok(h->source) || !header_address_ok(dest))
         return PDN_APRS_ERR_REFUSED;
     pdn_aprs__puts(b, h->source);
@@ -166,7 +240,7 @@ PDN_APRS__PRIVATE int pdn_aprs__write_header_tnc2(pdn_aprs__buf *b, const pdn_ap
             return PDN_APRS_ERR_REFUSED;
         pdn_aprs__putc(b, ',');
         pdn_aprs__puts(b, h->path[i].call);
-        if (h->path[i].marked)
+        if ((int)i == last)
             pdn_aprs__putc(b, '*');
     }
     pdn_aprs__putc(b, ':');
@@ -202,6 +276,10 @@ static int ax25_put_address(pdn_aprs__buf *b, const char *a, int last, int hbit,
     return 1;
 }
 
+/* An AX.25 frame never carries an empty or over-long address, a lower-case
+   call or an SSID it cannot hold, whatever wrote it: a packet already held,
+   whose lenient decode accepted an empty destination, is refused here as
+   well (README Read-back, Header). */
 PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_aprs_header *h, const char *dest)
 {
     unsigned i, count = h->path_count;
@@ -218,4 +296,46 @@ PDN_APRS__PRIVATE int pdn_aprs__write_header_ax25(pdn_aprs__buf *b, const pdn_ap
     pdn_aprs__putc(b, 0x03);
     pdn_aprs__putc(b, 0xF0);
     return PDN_APRS_OK;
+}
+
+/* ---- reading a written header back ---- */
+
+/* Decodes the header just written (head, n bytes: a TNC2 header ending in
+   its colon, or an AX.25 address field with its control and PID bytes) and
+   1 if it is the header given: the same source, the same destination (dest;
+   Mic-E's is computed), and the same path entry by entry, each used exactly
+   when the header gives it used (marked, or flagged), with no diagnostic.
+   A packet written as received (as_received) may have an empty destination,
+   which a lenient decode reads with a warning: it is written as it came. */
+PDN_APRS__PRIVATE int pdn_aprs__header_reads_back(const uint8_t *head, size_t n, int ax25, const pdn_aprs_header *given,
+                                                  const char *dest, int as_received)
+{
+    pdn_aprs_packet p;
+    pdn_aprs_header *h = &p.header;
+    pdn_aprs__dctx c;
+    size_t at = 0;
+    unsigned i;
+    int ok;
+    memset(&c, 0, sizeof c);
+    p.diagnostic_count = 0;
+    c.pkt = &p;
+    c.data = &p.data;
+    memset(h, 0, sizeof *h);
+    h->q_construct = -1;
+    if (ax25)
+        ok = pdn_aprs__parse_ax25_header(&c, head, n, h, &at) == PDN_APRS_OK && at == n;
+    else
+        ok = pdn_aprs__parse_tnc2_header(&c, head, n, h, 0) == n;
+    if (!ok)
+        return 0;
+    for (i = 0; i < p.diagnostic_count; i++)
+        if (!(as_received && !dest[0] && p.diagnostics[i].code == PDN_APRS_CODE_EMPTY_DESTINATION))
+            return 0;
+    if (strcmp(h->source, given->source) != 0 || strcmp(h->destination, dest) != 0 || h->path_count != given->path_count)
+        return 0;
+    for (i = 0; i < h->path_count; i++)
+        if (strcmp(h->path[i].call, given->path[i].call) != 0 ||
+            !h->path[i].used != !(given->path[i].used || given->path[i].marked))
+            return 0;
+    return 1;
 }

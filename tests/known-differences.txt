@@ -1,6 +1,6 @@
 # Checks the vectors runner skips on purpose, one per line as "<case id> [<check>]",
 # optionally followed by a tab and the reason. The target is none.
 #
-# Nothing is listed: a case beyond this library's fixed capacity gives
+# Cases beyond this library's fixed capacity gives
 # error:implementation-limit, and the runner skips the whole case for that
-# (it is counted on its own line), as the README's Implementation limits say.
+# (it is counted on its own line), as the README's Implementation limits say (those are not listed).

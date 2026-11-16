@@ -651,6 +651,7 @@ PDN_APRS__PRIVATE void pdn_aprs__decode_third_party(pdn_aprs__dctx *c)
     t->len = (uint16_t)(c->len - 1);
     memcpy(t->packet, c->info + 1, c->len - 1);
     t->depth = (uint8_t)c->depth;
+    t->as_received = pdn_aprs__third_party_mark(t->packet, t->len);
 }
 
 /* ---- user-defined, test, Agrelo, Maidenhead ---- */

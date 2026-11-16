@@ -16,7 +16,7 @@
  *     {"n", "result", "info", "destination", "again", "reason", "refusal"} out;
  *     result is written, refused, unsupported (the C data cannot hold it) or
  *     implementation-limit (it needs more than the library's fixed capacity).
- *   --build: builder recipes in; {"n", "result", "tnc2", "again", "reason", "refusal"}
+ *   --build: builder recipes in; {"n", "result", "tnc2", "ax25", "again", "reason", "refusal"}
  *     out; result is built, refused, unsupported or implementation-limit. Only
  *     the keys a recipe gives are passed: an absent one is the builder's own
  *     default, never filled in here.
@@ -235,16 +235,16 @@ static jval *api_view(const pdn_aprs_packet *p, int depth)
            field) and as an AX.25 frame; a header the library cannot write
            has no TNC2 form, and an address AX.25 cannot carry is refused */
         static uint8_t wbuf[2 * (PDN_APRS_MAX_PATH + 2) * 16 + PDN_APRS_MAX_INFO];
-        int w = pdn_aprs_write_tnc2(p, (char *)wbuf, sizeof wbuf);
+        pdn_aprs_encoded why;
+        int w = pdn_aprs_write_tnc2(p, (char *)wbuf, sizeof wbuf, &why);
         if (w >= 0)
             json_set(a, "tnc2", json_str(hex(wbuf, (size_t)w)));
-        w = pdn_aprs_write_ax25(p, wbuf, sizeof wbuf);
+        w = pdn_aprs_write_ax25(p, wbuf, sizeof wbuf, &why);
         if (w >= 0)
             json_set(a, "ax25", json_str(hex(wbuf, (size_t)w)));
         else if (w == PDN_APRS_ERR_REFUSED) {
-            /* the one reason pdn_aprs_write_ax25 refuses */
             json_set(a, "ax25", json_str("refused"));
-            json_set(a, "ax25_refusal", json_str(pdn_aprs_refusal_name(PDN_APRS_REFUSAL_AX25_CANNOT_CARRY)));
+            json_set(a, "ax25_refusal", json_str(pdn_aprs_refusal_name(why.refusal)));
         }
     }
     for (i = 0; i < h->path_count; i++) {
@@ -410,6 +410,20 @@ static void build_line(long fallback_n, const char *text, size_t tl)
     recipe_result res;
     json_set(out, "n", json_int(nv && nv->t == J_NUM ? (long)nv->num : fallback_n));
     recipe_build(in, out_buf, sizeof out_buf - 1, &res);
+    /* the same recipe as an AX.25 frame, for a record that built or was refused; never
+       before the line, so that nothing here pre-empts the library's own read-back */
+    if (res.kind == RECIPE_BUILT || res.kind == RECIPE_REFUSED) {
+        static uint8_t frame[OUT_ROOM];
+        recipe_result fr;
+        recipe_build_as(in, frame, sizeof frame - 1, &fr, 1);
+        if (fr.kind == RECIPE_BUILT) {
+            json_set(out, "ax25", json_str(hex(frame, fr.len)));
+        } else if (fr.kind == RECIPE_REFUSED) {
+            json_set(out, "ax25", json_str("refused"));
+            if (fr.refusal)
+                json_set(out, "ax25_refusal", json_str(fr.refusal));
+        }
+    }
     json_free(in);
     if (res.kind == RECIPE_UNSUPPORTED || res.kind == RECIPE_LIMIT) {
         json_set(out, "result", json_str(res.kind == RECIPE_LIMIT ? "implementation-limit" : "unsupported"));

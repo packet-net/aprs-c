@@ -16,6 +16,11 @@ PDN_APRS__PRIVATE void pdn_aprs__diag(pdn_aprs__dctx *c, int severity, int code)
         p->diagnostics[p->diagnostic_count].severity = (uint8_t)severity;
         p->diagnostics[p->diagnostic_count].code = (uint8_t)code;
         p->diagnostic_count++;
+    } else if (severity == PDN_APRS_SEVERITY_ERROR) {
+        /* the list is full (a header with dozens of empty path entries lists a warning for each):
+           an error that stops the decode is never the one left out, so it takes the last place */
+        p->diagnostics[PDN_APRS_MAX_DIAGNOSTICS - 1].severity = (uint8_t)severity;
+        p->diagnostics[PDN_APRS_MAX_DIAGNOSTICS - 1].code = (uint8_t)code;
     }
 }
 
@@ -92,6 +97,8 @@ const char *pdn_aprs_limit_name(int limit)
         return "weather-extras";
     case PDN_APRS_LIMIT_WEATHER_EXTRA_VALUE:
         return "weather-extra-value";
+    case PDN_APRS_LIMIT_COMMENT_BOUNDARIES:
+        return "comment-boundaries";
     default:
         return NULL;
     }
@@ -243,7 +250,8 @@ const char *pdn_aprs_refusal_name(int refusal)
         "invalid-nmea",
         "not-encodable",
         "does-not-read-back",
-        "information-field-too-long"};
+        "information-field-too-long",
+        "invalid-path"};
     if (refusal < 1 || refusal > (int)(sizeof names / sizeof names[0]))
         return NULL;
     return names[refusal - 1];
@@ -705,24 +713,24 @@ static int ax25_address(pdn_aprs__dctx *c, const uint8_t *a, char *out, int *nul
     return 1;
 }
 
-int pdn_aprs_decode_ax25(const void *frame, size_t len, const pdn_aprs_decode_options *options,
-                         pdn_aprs_packet *packet)
+/* The same, counting each address with a defect once, so that the defect is listed for each
+   address that has it (README Comments: a defect of one entry is listed once for each occurrence). */
+static int ax25_address_counted(pdn_aprs__dctx *c, const uint8_t *a, char *out, int *nul_padded, int *bad_chars)
 {
-    const uint8_t *f = (const uint8_t *)frame;
-    pdn_aprs__dctx c;
+    int np = 0, bc = 0, r = ax25_address(c, a, out, &np, &bc);
+    *nul_padded += np;
+    *bad_chars += bc;
+    return r;
+}
+
+/* The address field of an AX.25 UI frame, control and PID: the header into
+   h, and in *info_at where the information field starts. Returns
+   PDN_APRS_OK, or PDN_APRS_ERR_HEADER with the reason in c's diagnostics. */
+PDN_APRS__PRIVATE int pdn_aprs__parse_ax25_header(pdn_aprs__dctx *c, const uint8_t *f, size_t len,
+                                                  pdn_aprs_header *h, size_t *info_at)
+{
     size_t naddr = 0, i, at;
     int nul_padded = 0, bad_chars = 0, last_marked = -1, k, empty_destination, empty_path = 0;
-    pdn_aprs_header *h;
-    if (!packet || (!frame && len))
-        return PDN_APRS_ERR_ARGUMENT;
-    packet_reset(packet);
-    memset(&c, 0, sizeof c);
-    c.opt = options;
-    c.pkt = packet;
-    c.data = &packet->data;
-    h = &packet->header;
-    packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
-    packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
     /* addresses end at the one whose low bit is set */
     for (i = 0; i + 7 <= len; i += 7) {
         naddr++;
@@ -730,34 +738,34 @@ int pdn_aprs_decode_ax25(const void *frame, size_t len, const pdn_aprs_decode_op
             break;
     }
     if (i + 7 > len || naddr < 2 || i + 7 + 2 > len) {
-        pdn_aprs__fail(&c, PDN_APRS_CODE_NOT_APRS_FRAME);
+        pdn_aprs__fail(c, PDN_APRS_CODE_NOT_APRS_FRAME);
         return PDN_APRS_ERR_HEADER;
     }
     at = i + 7;
     if ((f[at] & ~0x10u) != 0x03 || f[at + 1] != 0xF0) {
-        pdn_aprs__fail(&c, PDN_APRS_CODE_NOT_APRS_FRAME);
+        pdn_aprs__fail(c, PDN_APRS_CODE_NOT_APRS_FRAME);
         return PDN_APRS_ERR_HEADER;
     }
     if (naddr - 2 > 8) {
-        pdn_aprs__fail(&c, PDN_APRS_CODE_TOO_MANY_DIGIPEATERS);
+        pdn_aprs__fail(c, PDN_APRS_CODE_TOO_MANY_DIGIPEATERS);
         return PDN_APRS_ERR_HEADER;
     }
-    if (ax25_address(&c, f + 7, h->source, &nul_padded, &bad_chars) != 1 ||
-        (k = ax25_address(&c, f, h->destination, &nul_padded, &bad_chars)) < 0) {
-        pdn_aprs__fail(&c, PDN_APRS_CODE_INVALID_ADDRESS);
+    if (ax25_address_counted(c, f + 7, h->source, &nul_padded, &bad_chars) != 1 ||
+        (k = ax25_address_counted(c, f, h->destination, &nul_padded, &bad_chars)) < 0) {
+        pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_ADDRESS);
         return PDN_APRS_ERR_HEADER;
     }
     empty_destination = k == 0;
     for (i = 2; i < naddr; i++) {
         pdn_aprs_path_entry *e = &h->path[h->path_count];
-        k = ax25_address(&c, f + 7 * i, e->call, &nul_padded, &bad_chars);
+        k = ax25_address_counted(c, f + 7 * i, e->call, &nul_padded, &bad_chars);
         if (k < 0) {
-            pdn_aprs__fail(&c, PDN_APRS_CODE_INVALID_ADDRESS);
+            pdn_aprs__fail(c, PDN_APRS_CODE_INVALID_ADDRESS);
             return PDN_APRS_ERR_HEADER;
         }
         if (k == 0) {
             /* an empty digipeater is left out of the path, as in TNC2 */
-            empty_path = 1;
+            empty_path++;
             continue;
         }
         if (f[7 * i + 6] & 0x80) {
@@ -768,15 +776,42 @@ int pdn_aprs_decode_ax25(const void *frame, size_t len, const pdn_aprs_decode_op
     }
     for (i = 0; (int)i <= last_marked; i++)
         h->path[i].used = 1;
-    if (nul_padded && !pdn_aprs__tolerate(&c, PDN_APRS_CODE_NUL_PADDED_ADDRESS))
+    /* one diagnostic for each address or entry that has the defect */
+    for (k = 0; k < nul_padded; k++)
+        if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_NUL_PADDED_ADDRESS))
+            return PDN_APRS_ERR_HEADER;
+    for (k = 0; k < bad_chars; k++)
+        if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_INVALID_AX25_ADDRESS_CHARACTERS))
+            return PDN_APRS_ERR_HEADER;
+    if (empty_destination && !pdn_aprs__tolerate(c, PDN_APRS_CODE_EMPTY_DESTINATION))
         return PDN_APRS_ERR_HEADER;
-    if (bad_chars && !pdn_aprs__tolerate(&c, PDN_APRS_CODE_INVALID_AX25_ADDRESS_CHARACTERS))
-        return PDN_APRS_ERR_HEADER;
-    if (empty_destination && !pdn_aprs__tolerate(&c, PDN_APRS_CODE_EMPTY_DESTINATION))
-        return PDN_APRS_ERR_HEADER;
-    if (empty_path && !pdn_aprs__tolerate(&c, PDN_APRS_CODE_EMPTY_PATH_ENTRY))
-        return PDN_APRS_ERR_HEADER;
+    for (k = 0; k < empty_path; k++)
+        if (!pdn_aprs__tolerate(c, PDN_APRS_CODE_EMPTY_PATH_ENTRY))
+            return PDN_APRS_ERR_HEADER;
+    *info_at = at + 2;
+    return PDN_APRS_OK;
+}
+
+int pdn_aprs_decode_ax25(const void *frame, size_t len, const pdn_aprs_decode_options *options,
+                         pdn_aprs_packet *packet)
+{
+    const uint8_t *f = (const uint8_t *)frame;
+    pdn_aprs__dctx c;
+    size_t at = 0;
+    int rc;
+    if (!packet || (!frame && len))
+        return PDN_APRS_ERR_ARGUMENT;
+    packet_reset(packet);
+    memset(&c, 0, sizeof c);
+    c.opt = options;
+    c.pkt = packet;
+    c.data = &packet->data;
+    packet->data.type = PDN_APRS_TYPE_UNRECOGNIZED;
+    packet->data.reason = PDN_APRS_UNRECOGNIZED_MALFORMED;
+    rc = pdn_aprs__parse_ax25_header(&c, f, len, &packet->header, &at);
+    if (rc != PDN_APRS_OK)
+        return rc;
     packet->header_ok = 1;
     packet->data.reason = 0;
-    return decode_info_into(packet, options, f + at + 2, len - at - 2, 1, 0);
+    return decode_info_into(packet, options, f + at, len - at, 1, 0);
 }
