@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 (2026-11-16)
 
-Round 5 of the shared vectors (aprs-vectors `round-5`, pinned at abe1b50).
+Round 5 of the shared vectors (aprs-vectors `round-5`, pinned at 26dd1dd).
 
 This release is 1.3.0 and is not source compatible with 1.2.0 in three places, all listed under Public API against 1.2.0 below: `pdn_aprs_write_tnc2()` and `pdn_aprs_write_ax25()` take a last argument; `pdn_aprs_third_party.as_received` is a `uint32_t` hash set by the decoder, where it was a `uint8_t` flag; and a program can no longer make the encoder skip the inner-packet check by setting it. The promise of source compatibility within 1.x holds from 1.3.0 on.
 
