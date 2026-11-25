@@ -1449,6 +1449,27 @@ static int third_party_in(conv *cv, const jval *p, pdn_aprs_third_party *t)
         /* what this level had noted survives the inner conversion, which starts afresh */
         pending_refusal = saved_refusal;
         pending_why = saved_why;
+        /* past every rule check, Mic-E data under a destination it does not compute is
+           not-encodable, before what the read-back found: the destination does not depend on
+           the comment, so the report without one says what it computes */
+        if (rc == 1 && i < 0 && !header_fault && inner->type == PDN_APRS_TYPE_MIC_E && dst[0] &&
+            neutral_refusal_rank(enc.refusal) >= neutral_refusal_rank(PDN_APRS_REFUSAL_TEXT_READS_AS_FIELD)) {
+            pdn_aprs_data *bare = (pdn_aprs_data *)malloc(sizeof *bare);
+            pdn_aprs_encoded benc;
+            int bi = -1;
+            memset(&benc, 0, sizeof benc);
+            if (bare) {
+                *bare = *inner;
+                bare->as.report.comment[0] = 0;
+                bare->as.report.comment_len = 0;
+                bi = pdn_aprs_encode_info(bare, NULL, line + 2 * PDN_APRS_MAX_INFO, 2 * PDN_APRS_MAX_INFO, &benc);
+                free(bare);
+            }
+            if (bi >= 0 && strcmp(dst, benc.destination) != 0) {
+                i = bi;
+                enc = benc;
+            }
+        }
         if (rc == 1 && i < 0 && !header_fault) {
             free(inner);
             snprintf(cv->err, cv->errlen, "inner packet: %s", enc.reason ? enc.reason : pdn_aprs_strerror(i));

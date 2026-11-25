@@ -3167,11 +3167,22 @@ static double field_value(uint8_t letter, int index, double v)
     }
 }
 
+/* 1 if the software type and unit start like a field, which makes them
+   text: a letter APRS12c defines followed by a digit, or t followed by -
+   and a digit (vectors interpretations.md, "Text after the weather fields
+   that starts like a field"). n is at least 3. */
+static int starts_like_a_field(const uint8_t *s)
+{
+    if (s[0] == 't' && s[1] == '-' && A_DIGIT(s[2]))
+        return 1;
+    return strchr("csgtrpPhbLl", s[0]) != NULL && A_DIGIT(s[1]);
+}
+
 static int unit_ok(const uint8_t *s, size_t n)
 {
     size_t i;
     int all_digits = 1;
-    if (n < 3 || n > 5 || !A_ALPHA(s[0]))
+    if (n < 3 || n > 5 || !A_ALPHA(s[0]) || starts_like_a_field(s))
         return 0;
     for (i = 1; i < n; i++) {
         if (!(A_ALNUM(s[i]) || s[i] == '-' || s[i] == '_'))
