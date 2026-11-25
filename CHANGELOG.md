@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.0 (2026-11-25)
+
+Round 6 of the shared vectors (aprs-vectors `round-6`, pinned at 85c675b).
+
+### Decoder
+
+- Weather: text left after the fields that starts like a field (a letter APRS12c defines followed by a digit, or `t` then `-` and a digit), whether that field was read or not, is `weather-comment` text, not a software type and unit: `t2h35` after a repeated `t` is the comment `t2h35`, while `hXYZ`, `e1ab` and `dP1x` stay a software type and unit (aprs-vectors#42). This holds in position, object, item and positionless reports. Data with such a software type and unit is refused `text-reads-as-field` by the read-back.
+
+### Tests and tools
+
+- The vectors runner gives `not-encodable` for a third-party inner Mic-E report under a destination it does not compute whose text would also read back changed (new case `precedence/not-encodable-and-text-reads-as-field`). The library already did.
+
 ## 1.3.0 (2026-11-16)
 
 Round 5 of the shared vectors (aprs-vectors `round-5`, pinned at 26dd1dd).
